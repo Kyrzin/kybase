@@ -1,0 +1,11 @@
+.git
+.next
+node_modules
+npm-debug.log*
+.env
+.env.local
+.env*.local
+docs
+README.md
+*.test.ts
+vitest.config.ts

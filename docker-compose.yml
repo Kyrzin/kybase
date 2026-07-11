@@ -1,0 +1,59 @@
+# Kybase — self-contained stack: app + Postgres(pgvector) + Ollama embeddings.
+#
+#   cp .env.example .env    # set KYBASE_SECRET
+#   docker compose up -d --build
+#
+# First start: Postgres runs db/migrations/*.sql automatically (empty volume
+# only), Ollama pulls the embedding model. Everything runs offline after that.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kybase
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kybase}
+      POSTGRES_DB: kybase
+    volumes:
+      - kybase-db:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kybase -d kybase"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - kybase-ollama:/root/.ollama
+    # Serve, then make sure the embedding model is present (no-op if cached)
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["ollama serve & sleep 3 && ollama pull ${OLLAMA_MODEL:-nomic-embed-text}; wait"]
+
+  kybase:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${KYBASE_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATABASE_URL: postgres://kybase:${POSTGRES_PASSWORD:-kybase}@db:5432/kybase
+      KYBASE_SECRET: ${KYBASE_SECRET:?set KYBASE_SECRET in .env}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-nomic-embed-text}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GOOGLE_MODEL: ${GOOGLE_MODEL:-text-embedding-004}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  kybase-db:
+  kybase-ollama:

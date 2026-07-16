@@ -41,6 +41,41 @@ describe('parseMarkdown — attribute escaping', () => {
   });
 });
 
+describe('parseMarkdown — fenced code blocks are inert', () => {
+  it('keeps newlines in code blocks as text, not <br>/<p>', () => {
+    const html = parseMarkdown('```\nline1\n\nline2\n```');
+    expect(html).toContain('line1\n\nline2');
+    const pre = html.slice(html.indexOf('<pre'), html.indexOf('</pre>'));
+    expect(pre).not.toContain('<br>');
+    expect(pre).not.toContain('<p>');
+  });
+
+  it('does not apply inline markup inside code blocks', () => {
+    const html = parseMarkdown('```\n**not bold** `not code` # not heading\n```');
+    expect(html).toContain('**not bold**');
+    expect(html).not.toContain('<strong>');
+    expect(html).not.toContain('<h1>');
+  });
+
+  it('still escapes HTML inside code blocks', () => {
+    const html = parseMarkdown('```\n<script>alert(1)</script>\n```');
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;');
+  });
+
+  it('renders text around a code block normally', () => {
+    const html = parseMarkdown('**bold**\n\n```\ncode\n```\n\nafter');
+    expect(html).toContain('<strong>bold</strong>');
+    expect(html).toContain('<pre');
+    expect(html).toContain('after');
+  });
+
+  it('cannot be forged with a NUL placeholder in content', () => {
+    const html = parseMarkdown('\u00000\u0000 text ```\ncode\n```');
+    expect(html.match(/<pre/g)?.length ?? 0).toBe(1);
+  });
+});
+
 describe('renderWithWikilinks — attribute escaping', () => {
   it('escapes quotes in the wikilink title so it cannot break out of data-title', () => {
     const html = renderWithWikilinks('[[foo&quot; onmouseover=&quot;alert(1)]]', notes);

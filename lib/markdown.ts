@@ -16,10 +16,21 @@ export function safeUrl(url: string): string {
 
 export function parseMarkdown(text: string): string {
   if (!text) return '';
+  // Fenced code blocks come out first, into placeholders, so nothing inside
+  // them is treated as markup — no **bold**, and no \n→<br> / \n\n→</p><p>
+  // mangling the code. NUL delimits the placeholder because it cannot occur
+  // in note text (Postgres rejects NUL in strings), so content can't forge it.
+  const codeBlocks: string[] = [];
   const html = text
+    .replace(/\u0000/g, '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
+    .replace(/```(\w*)\n([\s\S]*?)```/g, (_: string, __: string, code: string) => {
+      codeBlocks.push(
+        `<pre style="background:#1e1e2e;padding:12px;border-radius:6px;overflow-x:auto;margin:8px 0"><code>${code.trim()}</code></pre>`);
+      return `\u0000${codeBlocks.length - 1}\u0000`;
+    })
     .replace(/^### (.+)$/gm, '<h3>$1</h3>')
     .replace(/^## (.+)$/gm, '<h2>$1</h2>')
     .replace(/^# (.+)$/gm, '<h1>$1</h1>')
@@ -28,8 +39,6 @@ export function parseMarkdown(text: string): string {
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
     .replace(/~~(.+?)~~/g, '<del>$1</del>')
     .replace(/`([^`]+)`/g, '<code style="background:#1e1e2e;padding:2px 6px;border-radius:3px;font-size:0.9em">$1</code>')
-    .replace(/```(\w*)\n([\s\S]*?)```/g, (_: string, __: string, code: string) =>
-      `<pre style="background:#1e1e2e;padding:12px;border-radius:6px;overflow-x:auto;margin:8px 0"><code>${code.trim()}</code></pre>`)
     .replace(/^&gt; (.+)$/gm, '<blockquote style="border-left:3px solid #6c7086;padding-left:12px;color:#a6adc8;margin:8px 0">$1</blockquote>')
     .replace(/^---$/gm, '<hr style="border:none;border-top:1px solid #313244;margin:16px 0">')
     .replace(/^- \[x\] (.+)$/gm, '<li style="margin-left:16px">☑ $1</li>')
@@ -40,7 +49,8 @@ export function parseMarkdown(text: string): string {
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_: string, label: string, url: string) =>
       `<a href="${escapeAttr(safeUrl(url))}" style="color:#89b4fa;text-decoration:underline">${label}</a>`)
     .replace(/\n\n/g, '</p><p>')
-    .replace(/\n/g, '<br>');
+    .replace(/\n/g, '<br>')
+    .replace(/\u0000(\d+)\u0000/g, (_: string, i: string) => codeBlocks[Number(i)]);
   return `<p>${html}</p>`;
 }
 

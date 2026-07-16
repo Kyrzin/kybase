@@ -67,9 +67,11 @@ export function createMcpServer(): McpServer {
     async ({ id, title }) => {
       if (!id && !title) throw new Error('Provide either id or title');
       const cols = 'id, title, content, folder_id, tags, created_at, updated_at';
+      // escapeLike: ilike here means "case-insensitive exact title", so
+      // %/_ in a real title must not act as wildcards and match another note.
       const data = id
         ? await queryOne(`select ${cols} from notes where id = $1`, [id])
-        : await queryOne(`select ${cols} from notes where title ilike $1`, [title]);
+        : await queryOne(`select ${cols} from notes where title ilike $1`, [escapeLike(title!)]);
       if (!data) throw new Error('Note not found');
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
     }

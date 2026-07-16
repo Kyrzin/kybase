@@ -666,17 +666,17 @@ export default function KybaseApp() {
 
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
 
-  // Auto-expand parent folders when active note changes
-  useEffect(() => {
-    if (!activeNoteId) return;
-    const note = notes.find(n => n.id === activeNoteId);
-    if (!note?.folder_id) return;
+  // Expand a note's ancestor folders so it is visible in the tree. Called
+  // from the actions that change the active note (not an effect), so the
+  // user can still collapse folders afterwards.
+  const expandAncestors = useCallback((folderId: string | null | undefined, folderList: Folder[]) => {
+    if (!folderId) return;
     const parents = new Set<string>();
-    let cur: string | null = note.folder_id;
+    let cur: string | null = folderId;
     while (cur) {
       if (parents.has(cur)) break; // Failsafe guard against DB folder cycles
       parents.add(cur);
-      const f = folders.find(f => f.id === cur);
+      const f: Folder | undefined = folderList.find(f => f.id === cur);
       cur = f?.parent_id ?? null;
     }
     setExpandedFolders(prev => {
@@ -685,7 +685,7 @@ export default function KybaseApp() {
       parents.forEach(id => next.add(id));
       return next;
     });
-  }, [activeNoteId, notes, folders]);
+  }, []);
 
   // Scroll sidebar to active note after folders have expanded
   useEffect(() => {
@@ -752,9 +752,10 @@ export default function KybaseApp() {
         setActiveNoteId(first.id);
         setEditContent(first.content);
         setEditTitle(first.title);
+        expandAncestors(first.folder_id, foldersData);
       }
     }).finally(() => setLoading(false));
-  }, []);
+  }, [expandAncestors]);
 
   // Semantic edges: embedding-similarity pairs from the server. Fetched with
   // the lowest useful threshold — the graph's slider narrows client-side.
@@ -862,13 +863,40 @@ export default function KybaseApp() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editTitle, editContent]);
 
-  // ── Update editor when switching note ──────────────────────────────────────
-  useEffect(() => {
-    if (activeNote) {
-      setEditContent(activeNote.content);
-      setEditTitle(activeNote.title);
+  // ── Actions ──────────────────────────────────────────────────────────────────
+  const flushSave = useCallback(async () => {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
     }
-  }, [activeNoteId]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (editMode && activeNoteId) {
+      await apiFetch(`/api/notes/${activeNoteId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ title: editTitle, content: editContent }),
+      });
+      setNotes(prev => prev.map(n =>
+        n.id === activeNoteId
+          ? { ...n, title: editTitle, content: editContent, updated_at: new Date().toISOString() }
+          : n
+      ));
+    }
+  }, [editMode, activeNoteId, editTitle, editContent]);
+
+  const selectNote = useCallback(async (id: string) => {
+    await flushSave();
+    const note = notes.find(n => n.id === id);
+    if (note) {
+      setEditContent(note.content);
+      setEditTitle(note.title);
+      expandAncestors(note.folder_id, folders);
+    }
+    setActiveNoteId(id);
+    setEditMode(false);
+    // Close sidebar on mobile after selecting a note
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      setSidebarOpen(false);
+    }
+  }, [flushSave, notes, folders, expandAncestors]);
 
   // ── Wikilink click handler ───────────────────────────────────────────────────
   useEffect(() => {
@@ -896,41 +924,7 @@ export default function KybaseApp() {
     };
     document.addEventListener('click', handler);
     return () => document.removeEventListener('click', handler);
-  }, [notes]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // ── Actions ──────────────────────────────────────────────────────────────────
-  const flushSave = useCallback(async () => {
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-    if (editMode && activeNoteId) {
-      await apiFetch(`/api/notes/${activeNoteId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ title: editTitle, content: editContent }),
-      });
-      setNotes(prev => prev.map(n =>
-        n.id === activeNoteId
-          ? { ...n, title: editTitle, content: editContent, updated_at: new Date().toISOString() }
-          : n
-      ));
-    }
-  }, [editMode, activeNoteId, editTitle, editContent]);
-
-  const selectNote = useCallback(async (id: string) => {
-    await flushSave();
-    const note = notes.find(n => n.id === id);
-    if (note) {
-      setEditContent(note.content);
-      setEditTitle(note.title);
-    }
-    setActiveNoteId(id);
-    setEditMode(false);
-    // Close sidebar on mobile after selecting a note
-    if (typeof window !== 'undefined' && window.innerWidth < 768) {
-      setSidebarOpen(false);
-    }
-  }, [flushSave, notes]);
+  }, [notes, selectNote]);
 
   const saveNote = useCallback(async () => {
     if (!activeNote) return;
@@ -1096,7 +1090,8 @@ export default function KybaseApp() {
   const toggleFolder = (id: string) => {
     setExpandedFolders(prev => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
   };
@@ -1728,7 +1723,7 @@ export default function KybaseApp() {
                         onSelectNote={id => {
                           if (id.startsWith('f:')) {
                             const fid = id.slice(2);
-                            setExpandedFolders(prev => { const n = new Set(prev); n.has(fid) ? n.delete(fid) : n.add(fid); return n; });
+                            setExpandedFolders(prev => { const n = new Set(prev); if (n.has(fid)) n.delete(fid); else n.add(fid); return n; });
                             if (winSize.w < 768) setSidebarOpen(true);
                           } else {
                             selectNote(id);

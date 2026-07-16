@@ -1,25 +1,29 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import KybaseApp from '@/components/KybaseApp';
 
 const TOKEN_KEY = 'kybase_token';
+const AUTH_EVENT = 'kybase-auth';
+
+// localStorage as an external store: the server snapshot renders the login
+// form, the client snapshot takes over right after hydration — no
+// mounted-flag effect, no hydration mismatch.
+function subscribeAuth(onChange: () => void) {
+  window.addEventListener(AUTH_EVENT, onChange);
+  window.addEventListener('storage', onChange);
+  return () => {
+    window.removeEventListener(AUTH_EVENT, onChange);
+    window.removeEventListener('storage', onChange);
+  };
+}
+const hasToken = () => !!localStorage.getItem(TOKEN_KEY);
 
 export default function Page() {
-  const [mounted,       setMounted]       = useState(false);
-  const [authenticated, setAuthenticated] = useState(false);
-  const [password,      setPassword]      = useState('');
-  const [error,         setError]         = useState('');
-  const [loading,       setLoading]       = useState(false);
-
-  // Gate localStorage access behind mount — prevents SSR ReferenceError
-  useEffect(() => {
-    setMounted(true);
-    const stored = localStorage.getItem(TOKEN_KEY);
-    if (stored) setAuthenticated(true);
-  }, []);
-
-  if (!mounted) return null;
+  const authenticated = useSyncExternalStore(subscribeAuth, hasToken, () => false);
+  const [password, setPassword] = useState('');
+  const [error,    setError]    = useState('');
+  const [loading,  setLoading]  = useState(false);
 
   if (!authenticated) {
     return (
@@ -59,7 +63,7 @@ export default function Page() {
               });
               if (res.ok) {
                 localStorage.setItem(TOKEN_KEY, password);
-                setAuthenticated(true);
+                window.dispatchEvent(new Event(AUTH_EVENT));
               } else {
                 setError('Wrong password');
               }

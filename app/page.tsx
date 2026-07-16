@@ -34,8 +34,10 @@ export default function Page() {
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-            <rect x="3" y="3" width="18" height="18" rx="3" stroke="url(#lg)" strokeWidth="2" />
-            <path d="M8 12h8M12 8v8" stroke="url(#lg)" strokeWidth="2" strokeLinecap="round" />
+            <circle cx="12" cy="5.5" r="2.5" stroke="url(#lg)" strokeWidth="2" />
+            <circle cx="5.5" cy="18" r="2.5" stroke="url(#lg)" strokeWidth="2" />
+            <circle cx="18.5" cy="18" r="2.5" stroke="url(#lg)" strokeWidth="2" />
+            <path d="M10.9 7.7 6.7 15.8M13.1 7.7l4.2 8.1M8 18h8" stroke="url(#lg)" strokeWidth="2" strokeLinecap="round" />
             <defs>
               <linearGradient id="lg" x1="3" y1="3" x2="21" y2="21">
                 <stop stopColor="#89b4fa" />

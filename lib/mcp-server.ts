@@ -82,7 +82,7 @@ export function createMcpServer(): McpServer {
     'Before creating, search_notes for the topic and include [[wikilinks]] to related existing notes ' +
     '(copy titles exactly from tool results — never invent them).',
     {
-      title:     z.string().min(1).max(500),
+      title:     z.string().trim().min(1).max(500),
       content:   z.string().default(''),
       folder_id: z.string().uuid().nullable().optional(),
       tags:      z.array(z.string()).default([]),
@@ -117,7 +117,7 @@ export function createMcpServer(): McpServer {
     'search_notes (copy titles exactly from tool results).',
     {
       id:        z.string().uuid(),
-      title:     z.string().min(1).max(500).optional(),
+      title:     z.string().trim().min(1).max(500).optional(),
       content:   z.string().optional(),
       folder_id: z.string().uuid().nullable().optional(),
       tags:      z.array(z.string()).optional(),

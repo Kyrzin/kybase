@@ -19,7 +19,7 @@ export async function GET(
 }
 
 const UpdateNoteSchema = z.object({
-  title:     z.string().min(1).max(500).optional(),
+  title:     z.string().trim().min(1).max(500).optional(),
   content:   z.string().optional(),
   folder_id: z.string().uuid().nullable().optional(),
   tags:      z.array(z.string()).optional(),

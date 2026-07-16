@@ -30,7 +30,9 @@ export async function GET(req: NextRequest) {
 }
 
 const CreateNoteSchema = z.object({
-  title:     z.string().min(1).max(500),
+  // trim: invisible padding would create a title that looks like a duplicate
+  // but dodges the unique index and never matches its own export
+  title:     z.string().trim().min(1).max(500),
   content:   z.string().default(''),
   folder_id: z.string().uuid().nullable().optional(),
   tags:      z.array(z.string()).default([]),

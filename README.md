@@ -162,8 +162,11 @@ npx tsc --noEmit  # Type check
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](LICENSE.md) — free to use, modify, and share
-for any **noncommercial** purpose. Commercial use requires a separate license
-from the author.
+[AGPL-3.0](LICENSE) — free to use, modify, and self-host. If you run a
+modified version as a network service, you must make its source available
+to your users under the same license.
 
-Required Notice: Copyright © Denis Kurzin (https://github.com/Kyrzin)
+For a commercial license (e.g. embedding Kybase in a closed-source product
+or service), contact the author.
+
+Copyright © Denis Kurzin (https://github.com/Kyrzin)

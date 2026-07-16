@@ -3,8 +3,9 @@
 #   cp .env.example .env    # set KYBASE_SECRET
 #   docker compose up -d --build
 #
-# First start: Postgres runs db/migrations/*.sql automatically (empty volume
-# only), Ollama pulls the embedding model. Everything runs offline after that.
+# The app applies db/migrations/*.sql automatically on startup (tracked in
+# the schema_migrations table), Ollama pulls the embedding model on first
+# start. Everything runs offline after that.
 
 services:
   db:
@@ -16,7 +17,6 @@ services:
       POSTGRES_DB: kybase
     volumes:
       - kybase-db:/var/lib/postgresql/data
-      - ./db/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U kybase -d kybase"]
       interval: 5s

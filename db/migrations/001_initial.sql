@@ -52,8 +52,10 @@ create index if not exists notes_fts on notes using gin (
 -- Triggers
 -- ─────────────────────────────────────────────
 
--- Auto-update updated_at on every UPDATE
-create trigger notes_updated_at
+-- Auto-update updated_at on every UPDATE.
+-- 'or replace' keeps the file re-runnable: the migration runner replays all
+-- migrations once on databases created before schema_migrations existed.
+create or replace trigger notes_updated_at
   before update on notes
   for each row execute function moddatetime('updated_at');
 

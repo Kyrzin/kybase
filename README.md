@@ -63,8 +63,9 @@ docker compose up -d --build
 
 Open http://localhost:3000 and log in with your `KYBASE_SECRET`.
 
-That's it. On first start Postgres applies `db/migrations/*.sql`
-automatically and Ollama downloads the embedding model (~270 MB, one time).
+That's it. On startup the app applies `db/migrations/*.sql` automatically
+(tracked in the `schema_migrations` table) and Ollama downloads the
+embedding model (~270 MB, one time).
 Change the host port with `KYBASE_PORT` in `.env`.
 
 > **Note on embeddings:** notes and text search work immediately. Semantic
@@ -141,12 +142,15 @@ All supported providers use 768-dimensional embeddings, so switching does not re
 
 ## Upgrading
 
-`docker-entrypoint-initdb.d` migrations only run on a fresh database volume.
-When an upgrade ships a new `db/migrations/NNN_*.sql`, apply it manually:
-
 ```bash
-docker compose exec -T db psql -U kybase kybase < db/migrations/NNN_name.sql
+git pull
+docker compose up -d --build
 ```
+
+Pending migrations from `db/migrations/` are applied automatically when the
+app starts, tracked in the `schema_migrations` table. Databases created
+before this table existed get every migration replayed once — all shipped
+migrations are idempotent, so this is safe.
 
 ---
 

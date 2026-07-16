@@ -32,6 +32,9 @@ ENV HOSTNAME=0.0.0.0
 COPY --from=builder --chown=node:node /app/.next/standalone ./
 COPY --from=builder --chown=node:node /app/.next/static      ./.next/static
 COPY --from=builder --chown=node:node /app/public            ./public
+# Migration files are read from disk at startup (lib/migrate.ts) — the
+# standalone output tracer doesn't pick up runtime fs reads.
+COPY --from=builder --chown=node:node /app/db/migrations     ./db/migrations
 
 USER node
 

@@ -36,6 +36,9 @@ yarn-error.log*
 .env*.local
 .secret_for_test
 
+# per-deployment compose tweaks (networks, ports, proxy labels) stay local
+docker-compose.override.yml
+
 # vercel
 .vercel
 

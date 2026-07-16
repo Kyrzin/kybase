@@ -162,6 +162,16 @@ curl -X POST -H "Authorization: Bearer <KYBASE_SECRET>" \
 
 ---
 
+## Sharing notes
+
+The **Share** button on a note creates a public read-only link
+(`/share/<token>`) — rendered markdown, no login, wikilinks shown as plain
+text so nothing else in your vault is reachable. The threat model in one
+sentence: **the link is the access — revoke links you no longer need**
+(Settings → Active share links shows everything that is currently public).
+
+---
+
 ## Backups
 
 Everything lives in one Postgres volume — a nightly `pg_dump` is one line.

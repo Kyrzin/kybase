@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { Note, Folder, SearchHit } from '@/lib/types';
+import { parseMarkdown, renderWithWikilinks } from '@/lib/markdown';
 
 const TOKEN_KEY = 'kybase_token';
 const FOCUS_KEY = 'kybase_focus_folder';
@@ -20,56 +21,8 @@ function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   });
 }
 
-// ─── Markdown Parser ─────────────────────────────────────────────────────────
-// Content is escaped for &/</> before any HTML is generated, but quotes are
-// left alone so they read naturally in text — attribute values built from
-// user text must go through escapeAttr(), and URLs through safeUrl(), or a
-// note containing e.g. [x](" onerror="...") breaks out of the attribute.
-export function escapeAttr(s: string): string {
-  return s.replace(/"/g, '&quot;');
-}
-
-export function safeUrl(url: string): string {
-  return /^(https?:|mailto:|\/|#)/i.test(url.trim()) ? url : '#';
-}
-
-export function parseMarkdown(text: string): string {
-  if (!text) return '';
-  const html = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/~~(.+?)~~/g, '<del>$1</del>')
-    .replace(/`([^`]+)`/g, '<code style="background:#1e1e2e;padding:2px 6px;border-radius:3px;font-size:0.9em">$1</code>')
-    .replace(/```(\w*)\n([\s\S]*?)```/g, (_: string, __: string, code: string) =>
-      `<pre style="background:#1e1e2e;padding:12px;border-radius:6px;overflow-x:auto;margin:8px 0"><code>${code.trim()}</code></pre>`)
-    .replace(/^&gt; (.+)$/gm, '<blockquote style="border-left:3px solid #6c7086;padding-left:12px;color:#a6adc8;margin:8px 0">$1</blockquote>')
-    .replace(/^---$/gm, '<hr style="border:none;border-top:1px solid #313244;margin:16px 0">')
-    .replace(/^- \[x\] (.+)$/gm, '<li style="margin-left:16px">☑ $1</li>')
-    .replace(/^- \[ \] (.+)$/gm, '<li style="margin-left:16px">☐ $1</li>')
-    .replace(/^- (.+)$/gm, '<li style="margin-left:16px">$1</li>')
-    .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_: string, alt: string, url: string) =>
-      `<img src="${escapeAttr(safeUrl(url))}" alt="${escapeAttr(alt)}" style="max-width:100%;border-radius:6px;margin:8px 0">`)
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_: string, label: string, url: string) =>
-      `<a href="${escapeAttr(safeUrl(url))}" style="color:#89b4fa;text-decoration:underline">${label}</a>`)
-    .replace(/\n\n/g, '</p><p>')
-    .replace(/\n/g, '<br>');
-  return `<p>${html}</p>`;
-}
-
-export function renderWithWikilinks(html: string, notes: Note[]): string {
-  return html.replace(/\[\[([^\]]+)\]\]/g, (_: string, raw: string) => {
-    const title = raw.split(/[|#]/)[0].trim();
-    const exists = notes.some(n => n.title.toLowerCase() === title.toLowerCase());
-    return `<span class="wikilink ${exists ? 'exists' : 'missing'}" data-title="${escapeAttr(title)}">[[${raw}]]</span>`;
-  });
-}
+// Markdown rendering lives in lib/markdown.ts (shared with the public
+// share page); its XSS coverage is in lib/markdown.test.ts.
 
 // ─── Icons ───────────────────────────────────────────────────────────────────
 const Icons = {
@@ -713,6 +666,8 @@ export default function KybaseApp() {
   const [toolbarEditingTitle, setToolbarEditingTitle] = useState(false);
 
   const [movingNote, setMovingNote]     = useState(false);
+  const [shareInfo, setShareInfo]       = useState<{ token: string; url: string } | null>(null);
+  const [shares, setShares]             = useState<{ token: string; note_id: string; note_title: string; created_at: string; expires_at: string | null }[]>([]);
   const [linkPickerOpen, setLinkPickerOpen] = useState(false);
   const [linkInlineTrigger, setLinkInlineTrigger] = useState(false);
   const [linkSearch, setLinkSearch]     = useState('');
@@ -894,6 +849,7 @@ export default function KybaseApp() {
     }
     setActiveNoteId(id);
     setEditMode(false);
+    setShareInfo(null); // the popover belongs to the note it was created for
     // Close sidebar on mobile after selecting a note
     if (typeof window !== 'undefined' && window.innerWidth < 768) {
       setSidebarOpen(false);
@@ -1144,12 +1100,32 @@ export default function KybaseApp() {
       .then(r => (r.ok ? r.json() : []))
       .then(d => { if (Array.isArray(d)) setOauthClients(d); })
       .catch(() => {});
+    apiFetch('/api/shares')
+      .then(r => (r.ok ? r.json() : []))
+      .then(d => { if (Array.isArray(d)) setShares(d); })
+      .catch(() => {});
   }, [settingsOpen]);
 
   const revokeClient = async (id: string) => {
     const res = await apiFetch(`/api/oauth/clients/${id}`, { method: 'DELETE' });
     if (res.ok || res.status === 404) {
       setOauthClients(prev => prev.filter(c => c.id !== id));
+    }
+  };
+
+  const shareNote = async () => {
+    if (!activeNoteId) return;
+    const res = await apiFetch(`/api/notes/${activeNoteId}/share`, { method: 'POST', body: '{}' });
+    if (!res.ok) return;
+    const data = await res.json();
+    setShareInfo({ token: data.token, url: data.url });
+  };
+
+  const revokeShareLink = async (noteId: string, token: string) => {
+    const res = await apiFetch(`/api/notes/${noteId}/share/${token}`, { method: 'DELETE' });
+    if (res.ok || res.status === 404) {
+      setShares(prev => prev.filter(s => s.token !== token));
+      setShareInfo(prev => (prev?.token === token ? null : prev));
     }
   };
 
@@ -1543,6 +1519,44 @@ export default function KybaseApp() {
                       {Icons.folder}<span>Move</span>
                     </button>
                   )}
+                  <div style={{ position: 'relative', display: 'inline-block' }}>
+                    <button title="Create a public read-only link" onClick={shareNote} style={{ fontSize: 12, gap: 4 }}>
+                      {Icons.link}<span>Share</span>
+                    </button>
+                    {shareInfo && (
+                      <div style={{ position: 'absolute', top: '100%', right: 0, zIndex: 100, background: 'rgba(30,30,46,0.9)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 8, marginTop: 4, padding: 10, width: 320, boxShadow: '0 12px 40px rgba(0,0,0,0.5)' }}>
+                        <div style={{ fontSize: 11, color: '#6c7086', marginBottom: 6 }}>
+                          Anyone with this link can read the note. Revoke it when done.
+                        </div>
+                        <input
+                          readOnly
+                          value={shareInfo.url}
+                          onFocus={e => e.target.select()}
+                          style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 4, color: '#cdd6f4', fontSize: 11, padding: '5px 7px', outline: 'none', marginBottom: 8 }}
+                        />
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button
+                            onClick={() => navigator.clipboard?.writeText(shareInfo.url)}
+                            style={{ flex: 1, background: '#89b4fa', border: 'none', borderRadius: 4, color: '#1e1e2e', padding: '5px 0', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
+                          >
+                            Copy
+                          </button>
+                          <button
+                            onClick={() => activeNoteId && revokeShareLink(activeNoteId, shareInfo.token)}
+                            style={{ flex: 1, background: '#313244', border: '1px solid #45475a', borderRadius: 4, color: '#f38ba8', padding: '5px 0', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}
+                          >
+                            Revoke
+                          </button>
+                          <button
+                            onClick={() => setShareInfo(null)}
+                            style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 4, color: '#a6adc8', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}
+                          >
+                            ×
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                   {editMode && (
                     <>
                       <div className="sep" />
@@ -1950,6 +1964,43 @@ export default function KybaseApp() {
                   />
                 </label>
               </div>
+            </div>
+
+            <div style={{ borderTop: '1px solid #313244', marginTop: 16, paddingTop: 12 }}>
+              <div style={{ fontSize: 11, color: '#6c7086', marginBottom: 8 }}>
+                Active share links — everything that is currently public.
+                A link is access: revoke the ones you no longer need.
+              </div>
+              {shares.length === 0 ? (
+                <div style={{ fontSize: 12, color: '#6c7086' }}>Nothing is shared.</div>
+              ) : (
+                shares.map(s => (
+                  <div key={s.token} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid #1e1e2e' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, color: '#cdd6f4', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {s.note_title}
+                      </div>
+                      <div style={{ fontSize: 11, color: '#6c7086' }}>
+                        shared {new Date(s.created_at).toLocaleDateString()} · {s.expires_at ? `expires ${new Date(s.expires_at).toLocaleDateString()}` : 'no expiry'}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => navigator.clipboard?.writeText(`${window.location.origin}/share/${s.token}`)}
+                      title="Copy link"
+                      style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                    >
+                      Copy
+                    </button>
+                    <button
+                      onClick={() => revokeShareLink(s.note_id, s.token)}
+                      title="Revoke link"
+                      style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#f38ba8', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                    >
+                      Revoke
+                    </button>
+                  </div>
+                ))
+              )}
             </div>
 
             <div style={{ borderTop: '1px solid #313244', marginTop: 16, paddingTop: 12 }}>

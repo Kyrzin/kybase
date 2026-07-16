@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { parseMarkdown, renderWithWikilinks, escapeAttr, safeUrl } from './KybaseApp';
-import type { Note } from '@/lib/types';
+import { parseMarkdown, renderWithWikilinks, stripWikilinks, escapeAttr, safeUrl } from './markdown';
+import type { WikilinkNote } from './markdown';
 
-const notes: Note[] = [];
+const notes: WikilinkNote[] = [];
 
 describe('parseMarkdown — attribute escaping', () => {
   it('rejects a non-http(s) URL outright (safeUrl allowlist)', () => {
@@ -47,6 +47,35 @@ describe('renderWithWikilinks — attribute escaping', () => {
     // parseMarkdown would have already turned a literal " into &quot; before this
     // runs; simulate that upstream escaping and confirm no raw " survives.
     expect(html).not.toMatch(/data-title="[^"]*"[^>]*onmouseover=/);
+  });
+});
+
+describe('stripWikilinks — public share page renders links as dead text', () => {
+  it('renders [[Title]] as the bare title, no element', () => {
+    const out = stripWikilinks(parseMarkdown('see [[My Note]] here'));
+    expect(out).toContain('see My Note here');
+    expect(out).not.toContain('[[');
+    expect(out).not.toContain('wikilink');
+    expect(out).not.toContain('data-title');
+  });
+
+  it('renders [[Title#Section|Alias]] as the alias only', () => {
+    const out = stripWikilinks(parseMarkdown('go [[Target#Part|читай тут]]'));
+    expect(out).toContain('go читай тут');
+    expect(out).not.toContain('Target');
+    expect(out).not.toContain('#Part');
+  });
+
+  it('renders [[Title#Section]] as the title without the section', () => {
+    const out = stripWikilinks(parseMarkdown('[[Target#Deep Section]]'));
+    expect(out).toContain('Target');
+    expect(out).not.toContain('#Deep Section');
+  });
+
+  it('produces identical markup for existing and non-existing targets', () => {
+    // No difference in output = no way to probe which titles exist.
+    expect(stripWikilinks('[[A]]')).toBe('A');
+    expect(stripWikilinks('[[Definitely Missing]]')).toBe('Definitely Missing');
   });
 });
 

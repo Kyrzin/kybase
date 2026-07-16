@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { consumeCode } from '@/lib/auth-codes';
 import { safeEqual } from '@/lib/auth';
 import { verifyPkce } from '@/lib/pkce';
+import { issueToken } from '@/lib/tokens';
 import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
@@ -51,7 +52,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'invalid_grant', error_description: 'pkce verification failed' }, { status: 400 });
     }
 
-    return NextResponse.json({ access_token: secret, token_type: 'bearer', expires_in: 3600 });
+    // A real, revocable token — never the master secret (see lib/tokens.ts).
+    const { token, expiresAt } = await issueToken(params.get('client_id') ?? 'mcp-client');
+    return NextResponse.json({
+      access_token: token,
+      token_type: 'bearer',
+      expires_in: Math.floor((expiresAt.getTime() - Date.now()) / 1000),
+    });
   }
 
   if (grantType === 'client_credentials') {
@@ -67,7 +74,12 @@ export async function POST(req: NextRequest) {
       recordAuthFailure(req, 'oauth-token');
       return NextResponse.json({ error: 'invalid_client' }, { status: 401 });
     }
-    return NextResponse.json({ access_token: secret, token_type: 'bearer', expires_in: 3600 });
+    const { token, expiresAt } = await issueToken(params.get('client_id') ?? 'client-credentials');
+    return NextResponse.json({
+      access_token: token,
+      token_type: 'bearer',
+      expires_in: Math.floor((expiresAt.getTime() - Date.now()) / 1000),
+    });
   }
 
   return NextResponse.json({ error: 'unsupported_grant_type' }, { status: 400 });

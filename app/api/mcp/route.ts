@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { createMcpServer } from '@/lib/mcp-server';
 import { bearerToken, safeEqual } from '@/lib/auth';
+import { verifyToken } from '@/lib/tokens';
 import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
@@ -28,9 +29,14 @@ const SSE_HEADERS: Record<string, string> = {
   'X-Accel-Buffering': 'no',
 };
 
-function authorized(req: NextRequest): boolean {
+// The master secret always works (UI, scripts, pre-token deployments);
+// OAuth clients hold revocable tokens issued by /api/oauth/token.
+async function authorized(req: NextRequest): Promise<boolean> {
   const secret = process.env.KYBASE_SECRET;
-  return !!secret && safeEqual(bearerToken(req), secret);
+  if (!secret) return false;
+  const bearer = bearerToken(req);
+  if (safeEqual(bearer, secret)) return true;
+  return verifyToken(bearer);
 }
 
 async function handle(req: NextRequest): Promise<Response> {
@@ -41,7 +47,7 @@ async function handle(req: NextRequest): Promise<Response> {
       { status: 429, headers: { 'Retry-After': String(retryAfter) } }
     );
   }
-  if (!authorized(req)) {
+  if (!(await authorized(req))) {
     recordAuthFailure(req, 'bearer');
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }

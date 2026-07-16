@@ -2,27 +2,31 @@
 
 ## The security model, honestly
 
-Kybase is a **single-user** application protected by **one shared secret**
-(`KYBASE_SECRET`). That secret is simultaneously:
+Kybase is a **single-user** application with one root credential and
+revocable per-client tokens:
 
-- the UI login password,
-- the `Authorization: Bearer` token for the REST API and the MCP endpoint,
-- the `access_token` issued by the OAuth flow (the `expires_in: 3600` in the
-  token response is advisory — the underlying secret never expires).
+- **`KYBASE_SECRET` (master secret)** — the UI login password and the
+  `Authorization: Bearer` credential for the REST API and MCP endpoint.
+  Anyone holding it owns the whole vault: read, write, delete, settings.
+- **OAuth tokens** — the OAuth flow issues each MCP client (Claude, etc.)
+  its own random token: 90-day sliding expiry, stored server-side only as
+  a sha256 hash, revocable one-by-one in Settings → Connected clients.
+  Tokens authenticate **only the MCP endpoint** — they cannot log into the
+  UI, call the REST API, or list/revoke other tokens.
 
 Consequences you should understand before deploying:
 
-- **Anyone holding the secret owns the whole vault** — read, write, delete,
-  settings. There are no scopes, roles, or per-client tokens yet.
-- **Revoking one client means rotating the secret for all clients**
-  (change `KYBASE_SECRET` in `.env`, restart, re-authorize every client).
-- The browser UI keeps the secret in `localStorage`; a successful XSS would
-  expose it. The markdown renderer is hardened and test-covered against
-  XSS payloads, but self-audit accordingly.
+- There are no accounts or roles — the master secret is root. Rotate it
+  (`.env`, restart) if you suspect it leaked; that invalidates nothing
+  token-wise, so also revoke tokens you don't recognize.
+- The browser UI keeps the master secret in `localStorage`; a successful
+  XSS would expose it. The markdown renderer is hardened and test-covered
+  against XSS payloads, but self-audit accordingly.
 
 ## What is implemented
 
-- All auth comparisons are constant-time (`safeEqual`, `timingSafeEqual`).
+- All auth comparisons are constant-time (`safeEqual`, `timingSafeEqual`);
+  OAuth tokens are looked up by sha256 hash, never stored raw.
 - Failed auth attempts are rate-limited on every endpoint that verifies the
   secret: 10/min per client IP plus a 30/min global bucket (spoofing
   `X-Forwarded-For` doesn't help). Successes are never counted.

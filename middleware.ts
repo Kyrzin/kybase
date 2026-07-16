@@ -33,8 +33,11 @@ export function middleware(req: NextRequest) {
   return NextResponse.next();
 }
 
-// Protect /api/* except /api/auth/*, /api/mcp, /api/oauth/*
-// /authorize is also public (OAuth flow)
+// Protect /api/* except /api/auth/* (the login endpoint), /api/mcp (handles
+// its own auth), and the two public OAuth endpoints. /api/oauth/clients is
+// deliberately NOT excluded — listing/revoking tokens requires the master
+// secret, so a leaked OAuth token can't enumerate or revoke its peers.
+// /authorize is public by location (not under /api).
 export const config = {
-  matcher: ['/api/((?!auth/|mcp|oauth/).*)'],
+  matcher: ['/api/((?!auth/|mcp|oauth/token|oauth/discovery).*)'],
 };

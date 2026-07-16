@@ -706,6 +706,7 @@ export default function KybaseApp() {
   const [settingsStatus, setSettingsStatus]   = useState<string | null>(null);
   const [reindexRunning, setReindexRunning]   = useState(false);
   const [importRunning, setImportRunning]     = useState(false);
+  const [oauthClients, setOauthClients]       = useState<{ id: string; client_name: string | null; created_at: string; last_used_at: string; expires_at: string }[]>([]);
 
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
   const [renamingFolderName, setRenamingFolderName] = useState('');
@@ -1139,7 +1140,18 @@ export default function KybaseApp() {
       setSettingsOllamaModel(data.ollamaModel ?? 'nomic-embed-text');
       setSettingsStatus(null);
     });
+    apiFetch('/api/oauth/clients')
+      .then(r => (r.ok ? r.json() : []))
+      .then(d => { if (Array.isArray(d)) setOauthClients(d); })
+      .catch(() => {});
   }, [settingsOpen]);
+
+  const revokeClient = async (id: string) => {
+    const res = await apiFetch(`/api/oauth/clients/${id}`, { method: 'DELETE' });
+    if (res.ok || res.status === 404) {
+      setOauthClients(prev => prev.filter(c => c.id !== id));
+    }
+  };
 
   const saveSettings = async () => {
     setSettingsSaving(true);
@@ -1938,6 +1950,36 @@ export default function KybaseApp() {
                   />
                 </label>
               </div>
+            </div>
+
+            <div style={{ borderTop: '1px solid #313244', marginTop: 16, paddingTop: 12 }}>
+              <div style={{ fontSize: 11, color: '#6c7086', marginBottom: 8 }}>
+                Connected clients — OAuth tokens issued to MCP clients (Claude, etc.).
+                Revoking disconnects that client without touching your secret.
+              </div>
+              {oauthClients.length === 0 ? (
+                <div style={{ fontSize: 12, color: '#6c7086' }}>No active OAuth clients.</div>
+              ) : (
+                oauthClients.map(c => (
+                  <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid #1e1e2e' }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, color: '#cdd6f4', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {c.client_name || 'Unnamed client'}
+                      </div>
+                      <div style={{ fontSize: 11, color: '#6c7086' }}>
+                        last used {new Date(c.last_used_at).toLocaleString()} · expires {new Date(c.expires_at).toLocaleDateString()}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => revokeClient(c.id)}
+                      title="Revoke access"
+                      style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#f38ba8', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                    >
+                      Revoke
+                    </button>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>

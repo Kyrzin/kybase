@@ -9,17 +9,25 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const folder_id = searchParams.get('folder_id');
   const tag       = searchParams.get('tag');
+  // Optional pagination — the bundled UI loads the whole vault for the tree,
+  // so no default limit; API consumers with large vaults pass limit/offset.
+  const limit  = Math.min(Math.max(parseInt(searchParams.get('limit')  ?? '', 10) || 0, 0), 1000);
+  const offset = Math.max(parseInt(searchParams.get('offset') ?? '', 10) || 0, 0);
 
   const conds: string[] = [];
   const params: unknown[] = [];
   if (folder_id) { params.push(folder_id); conds.push(`folder_id = $${params.length}`); }
   if (tag)       { params.push([tag]);     conds.push(`tags @> $${params.length}`); }
 
+  let paging = '';
+  if (limit > 0) { params.push(limit);  paging += ` limit $${params.length}`; }
+  if (offset > 0) { params.push(offset); paging += ` offset $${params.length}`; }
+
   try {
     const data = await query(
       `select ${NOTE_SELECT} from notes
        ${conds.length ? 'where ' + conds.join(' and ') : ''}
-       order by updated_at desc`,
+       order by updated_at desc${paging}`,
       params
     );
     return NextResponse.json(data);

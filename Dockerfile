@@ -22,11 +22,18 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=3000
+# Bind all interfaces: the standalone server listens on HOSTNAME, and the
+# container hostname resolves to a single network's IP — with more than one
+# network attached the reachable interface is a coin toss.
+ENV HOSTNAME=0.0.0.0
 
-# Copy standalone output (next.config.ts: output: 'standalone')
-COPY --from=builder /app/.next/standalone ./
-COPY --from=builder /app/.next/static      ./.next/static
-COPY --from=builder /app/public            ./public
+# Copy standalone output (next.config.ts: output: 'standalone').
+# chown so the runtime cache (.next/cache) stays writable for the node user.
+COPY --from=builder --chown=node:node /app/.next/standalone ./
+COPY --from=builder --chown=node:node /app/.next/static      ./.next/static
+COPY --from=builder --chown=node:node /app/public            ./public
+
+USER node
 
 EXPOSE 3000
 CMD ["node", "server.js"]

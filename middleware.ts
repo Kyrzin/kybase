@@ -38,6 +38,8 @@ export function middleware(req: NextRequest) {
 // deliberately NOT excluded — listing/revoking tokens requires the master
 // secret, so a leaked OAuth token can't enumerate or revoke its peers.
 // /authorize is public by location (not under /api).
+// Every exclusion is anchored ($ or /): a bare prefix like `mcp` would also
+// exempt a future /api/mcp2 from auth.
 export const config = {
-  matcher: ['/api/((?!auth/|mcp|oauth/token|oauth/discovery).*)'],
+  matcher: ['/api/((?!auth/|mcp$|mcp/|oauth/token$|oauth/discovery$).*)'],
 };

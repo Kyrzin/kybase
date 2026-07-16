@@ -14,6 +14,10 @@ import { reindexPendingAsync } from '@/lib/reindex';
 export const dynamic = 'force-dynamic';
 
 const MAX_ZIP_BYTES = 100 * 1024 * 1024;
+// A zip bomb can expand far beyond the archive-size cap, so the decompressed
+// total is limited too. Checked as entries stream out — notes already written
+// when the cap trips stay imported (each note is written independently).
+const MAX_UNZIPPED_BYTES = 400 * 1024 * 1024;
 
 async function ensureFolderPath(
   segments: string[],
@@ -60,12 +64,19 @@ export async function POST(req: NextRequest) {
 
   const entries = Object.values(zip.files).filter(f => !f.dir && f.name.toLowerCase().endsWith('.md'));
   const folderCache = new Map<string, string>();
-  let imported = 0, updated = 0, skipped = 0;
+  let imported = 0, updated = 0, skipped = 0, unzippedBytes = 0;
   const errors: string[] = [];
 
   for (const entry of entries) {
     try {
       const md = await entry.async('string');
+      unzippedBytes += Buffer.byteLength(md, 'utf8');
+      if (unzippedBytes > MAX_UNZIPPED_BYTES) {
+        return NextResponse.json(
+          { error: 'Decompressed size limit exceeded', imported, updated, skipped, errors },
+          { status: 413 }
+        );
+      }
       const { title: fmTitle, tags, body: content } = parseFrontmatter(md);
 
       // "a/b/Note.md" → folders ["a","b"], fallback title "Note".

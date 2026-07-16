@@ -5,7 +5,8 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const q     = searchParams.get('q')?.trim();
   const type  = (searchParams.get('type') ?? 'text') as 'text' | 'semantic' | 'hybrid';
-  const limit = Math.min(parseInt(searchParams.get('limit') ?? '10', 10), 50);
+  const rawLimit = parseInt(searchParams.get('limit') ?? '10', 10);
+  const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 50) : 10;
 
   if (!q) return NextResponse.json({ error: 'Missing ?q= parameter' }, { status: 400 });
 

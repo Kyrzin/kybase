@@ -1,4 +1,4 @@
-// lib/mcp-server.ts — MCP server factory with 12 tools
+// lib/mcp-server.ts — MCP server factory with 13 tools
 // Uses @modelcontextprotocol/sdk McpServer (high-level API)
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -324,7 +324,7 @@ export function createMcpServer(): McpServer {
         ? await queryOne<{ id: string; title: string; content: string }>(
             `select ${cols} from notes where id = $1`, [id])
         : await queryOne<{ id: string; title: string; content: string }>(
-            `select ${cols} from notes where title ilike $1`, [title]);
+            `select ${cols} from notes where title ilike $1`, [escapeLike(title!)]);
       if (!note) throw new Error('Note not found');
 
       // Extract all wikilink targets
@@ -339,7 +339,7 @@ export function createMcpServer(): McpServer {
           if (target.toLowerCase() === note.title.toLowerCase()) return;
           const linked = await queryOne(
             'select id, title, content, folder_id, tags, updated_at from notes where title ilike $1',
-            [target]
+            [escapeLike(target)]
           );
           if (linked) resolved.push(linked);
           else        missing.push(target);

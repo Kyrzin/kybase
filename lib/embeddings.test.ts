@@ -46,10 +46,14 @@ describe('getEmbedding - ollama provider', () => {
     process.env.OLLAMA_URL = 'http://ollama:11434';
     process.env.OLLAMA_MODEL = 'nomic-embed-text';
 
-    mockFetch.mockResolvedValueOnce({ ok: false, statusText: 'Service Unavailable' });
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      text: async () => '{"error":"model is loading"}',
+    });
 
     const { getEmbedding } = await import('./embeddings');
-    await expect(getEmbedding('test')).rejects.toThrow('Ollama error');
+    await expect(getEmbedding('test')).rejects.toThrow('Ollama error (503): {"error":"model is loading"}');
   });
 });
 

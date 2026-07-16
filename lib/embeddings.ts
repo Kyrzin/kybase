@@ -39,7 +39,9 @@ async function ollamaEmbed(text: string, model?: string): Promise<number[]> {
     body: JSON.stringify({ model: model ?? 'nomic-embed-text', input: text }),
     signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
   });
-  if (!res.ok) throw new Error(`Ollama error: ${res.statusText}`);
+  // Include the body: Ollama's statusText is just "Bad Request", the real
+  // cause ("input length exceeds the context length") is in the JSON.
+  if (!res.ok) throw new Error(`Ollama error (${res.status}): ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();
   return data.embeddings[0] as number[];
 }
@@ -55,7 +57,7 @@ async function googleEmbed(text: string, apiKey?: string): Promise<number[]> {
       body: JSON.stringify({ model: `models/${model}`, content: { parts: [{ text }] }, outputDimensionality: 768 }),
     }
   );
-  if (!res.ok) throw new Error(`Google embed error: ${res.statusText}`);
+  if (!res.ok) throw new Error(`Google embed error (${res.status}): ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();
   return data.embedding.values as number[];
 }
@@ -67,7 +69,7 @@ async function openaiEmbed(text: string, apiKey?: string): Promise<number[]> {
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify({ model: 'text-embedding-3-small', input: text, dimensions: 768 }),
   });
-  if (!res.ok) throw new Error(`OpenAI embed error: ${res.statusText}`);
+  if (!res.ok) throw new Error(`OpenAI embed error (${res.status}): ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();
   return data.data[0].embedding as number[];
 }

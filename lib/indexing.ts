@@ -11,13 +11,38 @@ import { chunkNote } from './chunking';
 // them constantly instead of rarely.
 const EMBED_CONCURRENCY = 4;
 
+// The whole-note embedding sees only the head of very long notes — the
+// chunks cover the rest. The provider's context window depends on server
+// config we can't see (Ollama defaults to 2048 tokens ≈ 4000 chars of dense
+// Cyrillic), and overflow hard-fails (400: "input length exceeds the context
+// length") — which used to abort indexNote before any chunks were written,
+// silently dropping long notes from semantic search entirely. So: start
+// with an 8000-char head and halve until the provider accepts it.
+const NOTE_EMBED_MAX_CHARS = 8000;
+const NOTE_EMBED_MIN_CHARS = 1000;
+
+function isContextOverflow(err: unknown): boolean {
+  return err instanceof Error && /context length|maximum context|too (long|large)|token/i.test(err.message);
+}
+
+async function embedNoteHead(title: string, content: string): Promise<number[]> {
+  const full = `${title}\n\n${content}`;
+  for (let budget = NOTE_EMBED_MAX_CHARS; ; budget = Math.floor(budget / 2)) {
+    try {
+      return await getEmbedding(full.slice(0, budget));
+    } catch (err) {
+      if (budget <= NOTE_EMBED_MIN_CHARS || !isContextOverflow(err)) throw err;
+    }
+  }
+}
+
 /**
  * Embed a note and its chunks, then persist both.
  * All embeddings are computed before any rows are touched, so a provider
  * failure leaves the previous index intact (embedding_pending stays true).
  */
 export async function indexNote(id: string, title: string, content: string): Promise<void> {
-  const noteEmbedding = await getEmbedding(`${title}\n\n${content}`);
+  const noteEmbedding = await embedNoteHead(title, content);
 
   const chunks = chunkNote(content);
   const chunkRows = [];

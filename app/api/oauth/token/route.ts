@@ -1,18 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import crypto from 'crypto';
 import { consumeCode } from '@/lib/auth-codes';
 import { safeEqual } from '@/lib/auth';
+import { verifyPkce } from '@/lib/pkce';
 import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
-
-function verifyPkce(verifier: string, challenge: string, method: string): boolean {
-  if (method === 'S256') {
-    const hash = crypto.createHash('sha256').update(verifier).digest('base64url');
-    return hash === challenge;
-  }
-  return verifier === challenge;
-}
 
 export async function POST(req: NextRequest) {
   // Both grants verify a guessable credential (code or client_secret) — keep

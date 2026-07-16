@@ -63,7 +63,14 @@ function renderForm(params: Record<string, string>, error?: string) {
     </form>
   </div>
 </body>
-</html>`, { headers: { 'Content-Type': 'text/html' } });
+</html>`, {
+    headers: {
+      'Content-Type': 'text/html',
+      // The form takes the master secret — never allow it inside a frame.
+      'X-Frame-Options': 'DENY',
+      'Content-Security-Policy': "frame-ancestors 'none'",
+    },
+  });
 }
 
 export async function GET(req: NextRequest) {
@@ -74,6 +81,14 @@ export async function GET(req: NextRequest) {
   if (!parseRedirectUri(p.redirect_uri ?? '')) {
     return NextResponse.json(
       { error: 'invalid_request', error_description: 'redirect_uri must be https (or http on localhost)' },
+      { status: 400 }
+    );
+  }
+  // PKCE is mandatory (S256 only) — without a challenge the code would be
+  // exchangeable by anyone who intercepts it.
+  if (!p.code_challenge || (p.code_challenge_method ?? 'plain') !== 'S256') {
+    return NextResponse.json(
+      { error: 'invalid_request', error_description: 'PKCE with code_challenge_method=S256 is required' },
       { status: 400 }
     );
   }
@@ -104,6 +119,12 @@ export async function POST(req: NextRequest) {
   if (!callbackUrl) {
     return NextResponse.json(
       { error: 'invalid_request', error_description: 'redirect_uri must be https (or http on localhost)' },
+      { status: 400 }
+    );
+  }
+  if (!codeChallenge || codeChallengeMethod !== 'S256') {
+    return NextResponse.json(
+      { error: 'invalid_request', error_description: 'PKCE with code_challenge_method=S256 is required' },
       { status: 400 }
     );
   }

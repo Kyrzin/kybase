@@ -24,7 +24,9 @@ services:
       retries: 12
 
   ollama:
-    image: ollama/ollama:latest
+    # Pinned: ':latest' makes fresh installs unreproducible and is a supply
+    # chain liability. Bump deliberately.
+    image: ollama/ollama:0.24.0
     restart: unless-stopped
     volumes:
       - kybase-ollama:/root/.ollama

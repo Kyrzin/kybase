@@ -140,6 +140,28 @@ All supported providers use 768-dimensional embeddings, so switching does not re
 
 ---
 
+## Export & Import
+
+Your notes are never locked in. Settings → **Export .zip** downloads the
+whole vault as plain markdown files with frontmatter (title, tags, dates),
+folders as directories — readable by any editor, Obsidian included.
+**Import .zip** merges a vault back; notes whose titles already exist are
+skipped. Imported notes are re-embedded automatically in the background.
+
+The same via API:
+
+```bash
+curl -H "Authorization: Bearer <KYBASE_SECRET>" -o vault.zip \
+  http://localhost:3000/api/export
+
+# mode=skip (default) keeps existing notes; mode=overwrite replaces them
+curl -X POST -H "Authorization: Bearer <KYBASE_SECRET>" \
+  --data-binary @vault.zip \
+  "http://localhost:3000/api/import?mode=skip"
+```
+
+---
+
 ## Upgrading
 
 ```bash

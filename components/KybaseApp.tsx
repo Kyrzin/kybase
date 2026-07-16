@@ -705,6 +705,7 @@ export default function KybaseApp() {
   const [settingsSaving, setSettingsSaving]   = useState(false);
   const [settingsStatus, setSettingsStatus]   = useState<string | null>(null);
   const [reindexRunning, setReindexRunning]   = useState(false);
+  const [importRunning, setImportRunning]     = useState(false);
 
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
   const [renamingFolderName, setRenamingFolderName] = useState('');
@@ -1163,6 +1164,53 @@ export default function KybaseApp() {
       setSettingsStatus('Failed to save.');
     } finally {
       setSettingsSaving(false);
+    }
+  };
+
+  const exportVault = async () => {
+    setSettingsStatus('Exporting…');
+    try {
+      const res = await apiFetch('/api/export');
+      if (!res.ok) { setSettingsStatus('Export failed.'); return; }
+      const blob = await res.blob();
+      const name = res.headers.get('content-disposition')?.match(/filename="([^"]+)"/)?.[1] ?? 'kybase-export.zip';
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(url);
+      setSettingsStatus('Export downloaded.');
+    } catch {
+      setSettingsStatus('Export failed.');
+    }
+  };
+
+  const importVault = async (input: HTMLInputElement) => {
+    const file = input.files?.[0];
+    input.value = ''; // allow re-selecting the same file
+    if (!file) return;
+    setImportRunning(true);
+    setSettingsStatus('Importing…');
+    try {
+      const res = await apiFetch('/api/import', {
+        method: 'POST',
+        body: file,
+        headers: { 'Content-Type': 'application/zip' },
+      });
+      const data = await res.json();
+      if (!res.ok) { setSettingsStatus(data.error ?? 'Import failed.'); return; }
+      setSettingsStatus(`Imported ${data.imported}, updated ${data.updated}, skipped ${data.skipped}. Embeddings index in the background.`);
+      const [notesData, foldersData] = await Promise.all([
+        apiFetch('/api/notes').then(r => r.json()),
+        apiFetch('/api/folders').then(r => r.json()),
+      ]);
+      setNotes(notesData);
+      setFolders(foldersData);
+    } catch {
+      setSettingsStatus('Import failed.');
+    } finally {
+      setImportRunning(false);
     }
   };
 
@@ -1862,6 +1910,34 @@ export default function KybaseApp() {
               >
                 {settingsSaving ? 'Saving…' : 'Save & Apply'}
               </button>
+            </div>
+
+            <div style={{ borderTop: '1px solid #313244', marginTop: 16, paddingTop: 12 }}>
+              <div style={{ fontSize: 11, color: '#6c7086', marginBottom: 8 }}>
+                Vault backup — markdown files with frontmatter, folders as directories.
+                Import skips notes whose titles already exist.
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  onClick={exportVault}
+                  disabled={importRunning}
+                  style={{ flex: 1, background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '9px 0', fontSize: 13, fontWeight: 600, cursor: importRunning ? 'not-allowed' : 'pointer', opacity: importRunning ? 0.7 : 1, fontFamily: 'inherit' }}
+                >
+                  Export .zip
+                </button>
+                <label
+                  style={{ flex: 1, background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '9px 0', fontSize: 13, fontWeight: 600, cursor: importRunning ? 'not-allowed' : 'pointer', opacity: importRunning ? 0.7 : 1, fontFamily: 'inherit', textAlign: 'center' }}
+                >
+                  {importRunning ? 'Importing…' : 'Import .zip'}
+                  <input
+                    type="file"
+                    accept=".zip,application/zip"
+                    disabled={importRunning}
+                    onChange={e => importVault(e.target)}
+                    style={{ display: 'none' }}
+                  />
+                </label>
+              </div>
             </div>
           </div>
         </div>

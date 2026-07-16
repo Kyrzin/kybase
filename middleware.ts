@@ -3,6 +3,7 @@
 // /api/mcp  — handles its own auth internally (SSE needs no buffering interference)
 import { NextRequest, NextResponse } from 'next/server';
 import { bearerToken, safeEqual } from '@/lib/auth';
+import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
 
 export function middleware(req: NextRequest) {
   const token  = bearerToken(req);
@@ -14,7 +15,19 @@ export function middleware(req: NextRequest) {
       { status: 500 }
     );
   }
+  // Any protected route verifies the same secret, so any of them could be
+  // used for brute force — count failed bearer checks like login failures.
+  // (If middleware runs in an isolated runtime its counters are separate
+  // from the /api/mcp 'bearer' bucket; both still enforce independently.)
+  const retryAfter = authLimitExceeded(req, 'bearer');
+  if (retryAfter > 0) {
+    return NextResponse.json(
+      { error: 'Too many failed attempts' },
+      { status: 429, headers: { 'Retry-After': String(retryAfter) } }
+    );
+  }
   if (!safeEqual(token, secret)) {
+    recordAuthFailure(req, 'bearer');
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
   return NextResponse.next();

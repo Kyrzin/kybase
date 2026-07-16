@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { consumeCode } from '@/lib/auth-codes';
 import { safeEqual } from '@/lib/auth';
+import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,6 +15,16 @@ function verifyPkce(verifier: string, challenge: string, method: string): boolea
 }
 
 export async function POST(req: NextRequest) {
+  // Both grants verify a guessable credential (code or client_secret) — keep
+  // brute force off the table.
+  const retryAfter = authLimitExceeded(req, 'oauth-token');
+  if (retryAfter > 0) {
+    return NextResponse.json(
+      { error: 'slow_down' },
+      { status: 429, headers: { 'Retry-After': String(retryAfter) } }
+    );
+  }
+
   const secret = process.env.KYBASE_SECRET;
   if (!secret) return NextResponse.json({ error: 'server_error' }, { status: 500 });
 
@@ -36,12 +47,15 @@ export async function POST(req: NextRequest) {
 
     const entry = consumeCode(code);
     if (!entry) {
+      recordAuthFailure(req, 'oauth-token');
       return NextResponse.json({ error: 'invalid_grant' }, { status: 400 });
     }
     if (entry.redirectUri !== redirectUri) {
+      recordAuthFailure(req, 'oauth-token');
       return NextResponse.json({ error: 'invalid_grant', error_description: 'redirect_uri mismatch' }, { status: 400 });
     }
     if (!verifyPkce(codeVerifier, entry.codeChallenge, entry.codeChallengeMethod)) {
+      recordAuthFailure(req, 'oauth-token');
       return NextResponse.json({ error: 'invalid_grant', error_description: 'pkce verification failed' }, { status: 400 });
     }
 
@@ -58,6 +72,7 @@ export async function POST(req: NextRequest) {
       }
     }
     if (!clientSecret || !safeEqual(clientSecret, secret)) {
+      recordAuthFailure(req, 'oauth-token');
       return NextResponse.json({ error: 'invalid_client' }, { status: 401 });
     }
     return NextResponse.json({ access_token: secret, token_type: 'bearer', expires_in: 3600 });

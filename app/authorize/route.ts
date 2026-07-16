@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 import { storeCode } from '@/lib/auth-codes';
 import { safeEqual } from '@/lib/auth';
+import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 
@@ -9,10 +10,28 @@ function esc(s: string) {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// The code (and with it the master secret) is sent wherever redirect_uri
+// points, so a phishing link with an attacker-controlled redirect_uri would
+// exfiltrate it. Require https (or localhost for local MCP clients) and show
+// the target host on the consent form so the user sees where they're sent.
+function parseRedirectUri(uri: string): URL | null {
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    return null;
+  }
+  const isLoopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
+  if (url.protocol === 'https:' || (url.protocol === 'http:' && isLoopback)) return url;
+  return null;
+}
+
 function renderForm(params: Record<string, string>, error?: string) {
   const hidden = Object.entries(params)
     .map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`)
     .join('\n      ');
+
+  const redirectHost = parseRedirectUri(params.redirect_uri ?? '')?.host ?? '';
 
   return new Response(`<!DOCTYPE html>
 <html lang="en">
@@ -35,7 +54,7 @@ function renderForm(params: Record<string, string>, error?: string) {
 <body>
   <div class="card">
     <h1>Kybase</h1>
-    <p>Claude requests access to your Kybase knowledge base. Enter your API key to continue.</p>
+    <p>Claude requests access to your Kybase knowledge base. Enter your API key to continue.${redirectHost ? `<br>After sign-in you will be redirected to <strong>${esc(redirectHost)}</strong>.` : ''}</p>
     ${error ? `<div class="error">${esc(error)}</div>` : ''}
     <form method="POST">
       ${hidden}
@@ -51,6 +70,12 @@ export async function GET(req: NextRequest) {
   const p = Object.fromEntries(new URL(req.url).searchParams);
   if (p.response_type !== 'code') {
     return NextResponse.json({ error: 'unsupported_response_type' }, { status: 400 });
+  }
+  if (!parseRedirectUri(p.redirect_uri ?? '')) {
+    return NextResponse.json(
+      { error: 'invalid_request', error_description: 'redirect_uri must be https (or http on localhost)' },
+      { status: 400 }
+    );
   }
   return renderForm(p);
 }
@@ -70,7 +95,21 @@ export async function POST(req: NextRequest) {
 
   const formParams = { client_id: clientId, redirect_uri: redirectUri, code_challenge: codeChallenge, code_challenge_method: codeChallengeMethod, state, response_type: responseType };
 
+  const retryAfter = authLimitExceeded(req, 'authorize');
+  if (retryAfter > 0) {
+    return renderForm(formParams, `Too many attempts. Try again in ${retryAfter}s.`);
+  }
+
+  const callbackUrl = parseRedirectUri(redirectUri);
+  if (!callbackUrl) {
+    return NextResponse.json(
+      { error: 'invalid_request', error_description: 'redirect_uri must be https (or http on localhost)' },
+      { status: 400 }
+    );
+  }
+
   if (!secret || !safeEqual(submittedSecret, secret)) {
+    recordAuthFailure(req, 'authorize');
     return renderForm(formParams, 'Invalid API key. Please try again.');
   }
 
@@ -82,14 +121,13 @@ export async function POST(req: NextRequest) {
     expiresAt: Date.now() + 10 * 60 * 1000,
   });
 
-  const callback = new URL(redirectUri);
-  callback.searchParams.set('code', code);
-  callback.searchParams.set('state', state);
+  callbackUrl.searchParams.set('code', code);
+  callbackUrl.searchParams.set('state', state);
 
   // 303 See Other forces the OAuth callback to be a GET. Default redirect is
   // 307, which preserves the POST method and makes Claude's callback 405.
   return new NextResponse(null, {
     status: 303,
-    headers: { Location: callback.toString() },
+    headers: { Location: callbackUrl.toString() },
   });
 }

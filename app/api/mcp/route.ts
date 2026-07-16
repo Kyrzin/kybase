@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { createMcpServer } from '@/lib/mcp-server';
 import { bearerToken, safeEqual } from '@/lib/auth';
+import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 
@@ -33,7 +34,15 @@ function authorized(req: NextRequest): boolean {
 }
 
 async function handle(req: NextRequest): Promise<Response> {
+  const retryAfter = authLimitExceeded(req, 'bearer');
+  if (retryAfter > 0) {
+    return NextResponse.json(
+      { error: 'Too many failed attempts' },
+      { status: 429, headers: { 'Retry-After': String(retryAfter) } }
+    );
+  }
   if (!authorized(req)) {
+    recordAuthFailure(req, 'bearer');
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 

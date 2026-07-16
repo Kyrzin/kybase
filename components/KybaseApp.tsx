@@ -659,6 +659,7 @@ export default function KybaseApp() {
   const [settingsStatus, setSettingsStatus]   = useState<string | null>(null);
   const [reindexRunning, setReindexRunning]   = useState(false);
   const [importRunning, setImportRunning]     = useState(false);
+  const [settingsTab, setSettingsTab]         = useState<'embeddings' | 'access'>('embeddings');
   const [oauthClients, setOauthClients]       = useState<{ id: string; client_name: string | null; created_at: string; last_used_at: string; expires_at: string }[]>([]);
 
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
@@ -1129,6 +1130,12 @@ export default function KybaseApp() {
       setShareInfo(prev => (prev?.token === token ? null : prev));
     }
   };
+
+  // Permanent links first (they're the ones to worry about), then newest.
+  const sortedShares = [...shares].sort((a, b) => {
+    if (!a.expires_at !== !b.expires_at) return a.expires_at ? 1 : -1;
+    return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+  });
 
   const saveSettings = async () => {
     setSettingsSaving(true);
@@ -1877,12 +1884,32 @@ export default function KybaseApp() {
 
       {settingsOpen && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }} onClick={e => { if (e.target === e.currentTarget) setSettingsOpen(false); }}>
-          <div style={{ background: 'rgba(30,30,46,0.85)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)', border: '1px solid rgba(69,71,90,0.6)', borderRadius: 12, padding: 24, width: 'min(420px, calc(100vw - 32px))', boxShadow: '0 8px 48px rgba(0,0,0,0.6)', maxHeight: 'calc(100dvh - 32px)', overflowY: 'auto' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-              <span style={{ fontWeight: 600, fontSize: 15, color: '#cdd6f4' }}>Embedding Provider</span>
+          <div style={{ background: 'rgba(30,30,46,0.85)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)', border: '1px solid rgba(69,71,90,0.6)', borderRadius: 12, padding: 24, width: 'min(440px, calc(100vw - 32px))', boxShadow: '0 8px 48px rgba(0,0,0,0.6)', maxHeight: '85vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
+              <span style={{ fontWeight: 600, fontSize: 15, color: '#cdd6f4' }}>Settings</span>
               <button onClick={() => setSettingsOpen(false)} style={{ background: 'none', border: 'none', color: '#585b70', cursor: 'pointer', fontSize: 18, lineHeight: 1 }}>✕</button>
             </div>
 
+            <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid #313244', marginBottom: 18 }}>
+              {([['embeddings', 'Embeddings'], ['access', `Access (${shares.length + oauthClients.length})`]] as const).map(([tab, label]) => (
+                <button
+                  key={tab}
+                  onClick={() => setSettingsTab(tab)}
+                  style={{
+                    background: 'none', border: 'none', fontFamily: 'inherit', cursor: 'pointer',
+                    padding: '8px 14px', fontSize: 13, fontWeight: 600,
+                    color: settingsTab === tab ? '#89b4fa' : '#6c7086',
+                    borderBottom: settingsTab === tab ? '2px solid #89b4fa' : '2px solid transparent',
+                    marginBottom: -1,
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {settingsTab === 'embeddings' && (
+            <>
             <label style={{ fontSize: 12, color: '#a6adc8', display: 'block', marginBottom: 6 }}>Provider</label>
             <select value={settingsProvider} onChange={e => setSettingsProvider(e.target.value as 'ollama' | 'google' | 'openai')} style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', marginBottom: 16, outline: 'none' }}>
               <option value="ollama">Ollama (local, free)</option>
@@ -1979,41 +2006,47 @@ export default function KybaseApp() {
                 </label>
               </div>
             </div>
+            </>
+            )}
 
-            <div style={{ borderTop: '1px solid #313244', marginTop: 16, paddingTop: 12 }}>
+            {settingsTab === 'access' && (
+            <>
+            <div>
               <div style={{ fontSize: 11, color: '#6c7086', marginBottom: 8 }}>
                 Active share links — everything that is currently public.
                 A link is access: revoke the ones you no longer need.
               </div>
-              {shares.length === 0 ? (
+              {sortedShares.length === 0 ? (
                 <div style={{ fontSize: 12, color: '#6c7086' }}>Nothing is shared.</div>
               ) : (
-                shares.map(s => (
-                  <div key={s.token} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid #1e1e2e' }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, color: '#cdd6f4', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {s.note_title}
+                <div style={{ maxHeight: 190, overflowY: 'auto' }}>
+                  {sortedShares.map(s => (
+                    <div key={s.token} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid #1e1e2e' }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div title={s.note_title} style={{ fontSize: 13, color: '#cdd6f4', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {s.note_title}
+                        </div>
+                        <div style={{ fontSize: 11, color: s.expires_at ? '#6c7086' : '#f9e2af' }}>
+                          shared {new Date(s.created_at).toLocaleDateString()} · {s.expires_at ? `expires ${new Date(s.expires_at).toLocaleDateString()}` : 'no expiry'}
+                        </div>
                       </div>
-                      <div style={{ fontSize: 11, color: '#6c7086' }}>
-                        shared {new Date(s.created_at).toLocaleDateString()} · {s.expires_at ? `expires ${new Date(s.expires_at).toLocaleDateString()}` : 'no expiry'}
-                      </div>
+                      <button
+                        onClick={() => navigator.clipboard?.writeText(`${window.location.origin}/share/${s.token}`)}
+                        title="Copy link"
+                        style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                      >
+                        Copy
+                      </button>
+                      <button
+                        onClick={() => revokeShareLink(s.note_id, s.token)}
+                        title="Revoke link"
+                        style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#f38ba8', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                      >
+                        Revoke
+                      </button>
                     </div>
-                    <button
-                      onClick={() => navigator.clipboard?.writeText(`${window.location.origin}/share/${s.token}`)}
-                      title="Copy link"
-                      style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
-                    >
-                      Copy
-                    </button>
-                    <button
-                      onClick={() => revokeShareLink(s.note_id, s.token)}
-                      title="Revoke link"
-                      style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#f38ba8', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
-                    >
-                      Revoke
-                    </button>
-                  </div>
-                ))
+                  ))}
+                </div>
               )}
             </div>
 
@@ -2025,27 +2058,31 @@ export default function KybaseApp() {
               {oauthClients.length === 0 ? (
                 <div style={{ fontSize: 12, color: '#6c7086' }}>No active OAuth clients.</div>
               ) : (
-                oauthClients.map(c => (
-                  <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid #1e1e2e' }}>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, color: '#cdd6f4', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {c.client_name || 'Unnamed client'}
+                <div style={{ maxHeight: 190, overflowY: 'auto' }}>
+                  {oauthClients.map(c => (
+                    <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid #1e1e2e' }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div title={c.client_name || 'Unnamed client'} style={{ fontSize: 13, color: '#cdd6f4', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {c.client_name || 'Unnamed client'}
+                        </div>
+                        <div style={{ fontSize: 11, color: '#6c7086' }}>
+                          last used {new Date(c.last_used_at).toLocaleString()} · expires {new Date(c.expires_at).toLocaleDateString()}
+                        </div>
                       </div>
-                      <div style={{ fontSize: 11, color: '#6c7086' }}>
-                        last used {new Date(c.last_used_at).toLocaleString()} · expires {new Date(c.expires_at).toLocaleDateString()}
-                      </div>
+                      <button
+                        onClick={() => revokeClient(c.id)}
+                        title="Revoke access"
+                        style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#f38ba8', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                      >
+                        Revoke
+                      </button>
                     </div>
-                    <button
-                      onClick={() => revokeClient(c.id)}
-                      title="Revoke access"
-                      style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#f38ba8', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
-                    >
-                      Revoke
-                    </button>
-                  </div>
-                ))
+                  ))}
+                </div>
               )}
             </div>
+            </>
+            )}
           </div>
         </div>
       )}

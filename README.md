@@ -162,6 +162,35 @@ curl -X POST -H "Authorization: Bearer <KYBASE_SECRET>" \
 
 ---
 
+## Backups
+
+Everything lives in Postgres. A nightly dump is one line:
+
+```bash
+docker compose exec -T db pg_dump -U kybase kybase | gzip \
+  > kybase-$(date +%F).sql.gz
+```
+
+Cron example (03:00 daily, keep two weeks):
+
+```cron
+0 3 * * * cd /path/to/kybase && docker compose exec -T db pg_dump -U kybase kybase | gzip > backups/kybase-$(date +\%F).sql.gz && find backups -name 'kybase-*.sql.gz' -mtime +14 -delete
+```
+
+Restore into a fresh instance (empty database volume):
+
+```bash
+docker compose up -d db
+gunzip -c kybase-2026-07-16.sql.gz | docker compose exec -T db psql -U kybase kybase
+docker compose up -d
+```
+
+The markdown **Export .zip** (above) is a good second layer — plain files,
+readable without Kybase — but `pg_dump` is the complete one: it also
+preserves note ids, folder ids, and embeddings.
+
+---
+
 ## Upgrading
 
 ```bash

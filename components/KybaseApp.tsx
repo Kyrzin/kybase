@@ -667,6 +667,7 @@ export default function KybaseApp() {
 
   const [movingNote, setMovingNote]     = useState(false);
   const [shareInfo, setShareInfo]       = useState<{ token: string; url: string } | null>(null);
+  const [shareCopied, setShareCopied]   = useState(false);
   const [shares, setShares]             = useState<{ token: string; note_id: string; note_title: string; created_at: string; expires_at: string | null }[]>([]);
   const [linkPickerOpen, setLinkPickerOpen] = useState(false);
   const [linkInlineTrigger, setLinkInlineTrigger] = useState(false);
@@ -1367,9 +1368,12 @@ export default function KybaseApp() {
             {Icons.sidebar}
           </button>
           <div className="topbar-brand">
+            {/* Brand mark: three linked notes — the knowledge graph */}
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-              <rect x="3" y="3" width="18" height="18" rx="3" stroke="url(#g1)" strokeWidth="2" />
-              <path d="M8 12h8M12 8v8" stroke="url(#g1)" strokeWidth="2" strokeLinecap="round" />
+              <circle cx="12" cy="5.5" r="2.5" stroke="url(#g1)" strokeWidth="2" />
+              <circle cx="5.5" cy="18" r="2.5" stroke="url(#g1)" strokeWidth="2" />
+              <circle cx="18.5" cy="18" r="2.5" stroke="url(#g1)" strokeWidth="2" />
+              <path d="M10.9 7.7 6.7 15.8M13.1 7.7l4.2 8.1M8 18h8" stroke="url(#g1)" strokeWidth="2" strokeLinecap="round" />
               <defs>
                 <linearGradient id="g1" x1="3" y1="3" x2="21" y2="21">
                   <stop stopColor="#89b4fa" /><stop offset="1" stopColor="#b4befe" />
@@ -1519,44 +1523,9 @@ export default function KybaseApp() {
                       {Icons.folder}<span>Move</span>
                     </button>
                   )}
-                  <div style={{ position: 'relative', display: 'inline-block' }}>
-                    <button title="Create a public read-only link" onClick={shareNote} style={{ fontSize: 12, gap: 4 }}>
-                      {Icons.link}<span>Share</span>
-                    </button>
-                    {shareInfo && (
-                      <div style={{ position: 'absolute', top: '100%', right: 0, zIndex: 100, background: 'rgba(30,30,46,0.9)', backdropFilter: 'blur(16px)', WebkitBackdropFilter: 'blur(16px)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 8, marginTop: 4, padding: 10, width: 320, boxShadow: '0 12px 40px rgba(0,0,0,0.5)' }}>
-                        <div style={{ fontSize: 11, color: '#6c7086', marginBottom: 6 }}>
-                          Anyone with this link can read the note. Revoke it when done.
-                        </div>
-                        <input
-                          readOnly
-                          value={shareInfo.url}
-                          onFocus={e => e.target.select()}
-                          style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 4, color: '#cdd6f4', fontSize: 11, padding: '5px 7px', outline: 'none', marginBottom: 8 }}
-                        />
-                        <div style={{ display: 'flex', gap: 6 }}>
-                          <button
-                            onClick={() => navigator.clipboard?.writeText(shareInfo.url)}
-                            style={{ flex: 1, background: '#89b4fa', border: 'none', borderRadius: 4, color: '#1e1e2e', padding: '5px 0', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
-                          >
-                            Copy
-                          </button>
-                          <button
-                            onClick={() => activeNoteId && revokeShareLink(activeNoteId, shareInfo.token)}
-                            style={{ flex: 1, background: '#313244', border: '1px solid #45475a', borderRadius: 4, color: '#f38ba8', padding: '5px 0', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}
-                          >
-                            Revoke
-                          </button>
-                          <button
-                            onClick={() => setShareInfo(null)}
-                            style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 4, color: '#a6adc8', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}
-                          >
-                            ×
-                          </button>
-                        </div>
-                      </div>
-                    )}
-                  </div>
+                  <button title="Create a public read-only link" onClick={shareNote} style={{ fontSize: 12, gap: 4 }}>
+                    {Icons.link}<span>Share</span>
+                  </button>
                   {editMode && (
                     <>
                       <div className="sep" />
@@ -1721,8 +1690,10 @@ export default function KybaseApp() {
             ) : (
               <div className="empty-state">
                 <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#45475a" strokeWidth="1.5">
-                  <rect x="3" y="3" width="18" height="18" rx="3" />
-                  <path d="M8 12h8M12 8v8" strokeLinecap="round" />
+                  <circle cx="12" cy="5.5" r="2.5" />
+                  <circle cx="5.5" cy="18" r="2.5" />
+                  <circle cx="18.5" cy="18" r="2.5" />
+                  <path d="M10.9 7.7 6.7 15.8M13.1 7.7l4.2 8.1M8 18h8" strokeLinecap="round" />
                 </svg>
                 <span className="empty-state-text">Select or create a note</span>
               </div>
@@ -1861,6 +1832,49 @@ export default function KybaseApp() {
       </div>
 
       {/* Settings Modal */}
+      {/* Share Link Modal */}
+      {shareInfo && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }} onClick={e => { if (e.target === e.currentTarget) setShareInfo(null); }}>
+          <div style={{ background: 'rgba(30,30,46,0.95)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)', border: '1px solid rgba(69,71,90,0.6)', borderRadius: 12, padding: 24, width: 'min(480px, calc(100vw - 32px))', boxShadow: '0 8px 48px rgba(0,0,0,0.6)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+              {Icons.link}
+              <span style={{ fontWeight: 600, fontSize: 15, color: '#cdd6f4' }}>Public link created</span>
+            </div>
+            <div style={{ fontSize: 12, color: '#a6adc8', marginBottom: 14, lineHeight: 1.5 }}>
+              Anyone with this link can read the note — no login needed. The link is the access:
+              revoke it here or later in Settings → Active share links.
+            </div>
+            <input
+              readOnly
+              autoFocus
+              value={shareInfo.url}
+              onFocus={e => e.target.select()}
+              style={{ width: '100%', background: '#11111b', border: '1px solid #45475a', borderRadius: 6, color: '#89b4fa', fontSize: 13, padding: '10px 12px', outline: 'none', marginBottom: 14, fontFamily: 'monospace' }}
+            />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={() => { navigator.clipboard?.writeText(shareInfo.url); setShareCopied(true); setTimeout(() => setShareCopied(false), 1500); }}
+                style={{ flex: 2, background: shareCopied ? '#a6e3a1' : 'linear-gradient(135deg,#89b4fa,#b4befe)', border: 'none', borderRadius: 6, color: '#1e1e2e', padding: '10px 0', fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', transition: 'background 0.2s' }}
+              >
+                {shareCopied ? '✓ Copied' : 'Copy link'}
+              </button>
+              <button
+                onClick={() => activeNoteId && revokeShareLink(activeNoteId, shareInfo.token)}
+                style={{ flex: 1, background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#f38ba8', padding: '10px 0', fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
+              >
+                Revoke
+              </button>
+              <button
+                onClick={() => setShareInfo(null)}
+                style={{ flex: 1, background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '10px 0', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit' }}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {settingsOpen && (
         <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }} onClick={e => { if (e.target === e.currentTarget) setSettingsOpen(false); }}>
           <div style={{ background: 'rgba(30,30,46,0.85)', backdropFilter: 'blur(20px)', WebkitBackdropFilter: 'blur(20px)', border: '1px solid rgba(69,71,90,0.6)', borderRadius: 12, padding: 24, width: 'min(420px, calc(100vw - 32px))', boxShadow: '0 8px 48px rgba(0,0,0,0.6)', maxHeight: 'calc(100dvh - 32px)', overflowY: 'auto' }}>

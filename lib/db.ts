@@ -33,6 +33,33 @@ export async function queryOne<T = Record<string, unknown>>(
 }
 
 /**
+ * Run `fn` inside a single transaction; rolls back on any throw.
+ * Multi-statement invariants (e.g. rename + backlink rewrite) must go
+ * through this — two pool queries can interleave or half-fail.
+ */
+export async function withTransaction<T>(
+  fn: (client: import('pg').PoolClient) => Promise<T>
+): Promise<T> {
+  const client = await getPool().connect();
+  try {
+    await client.query('begin');
+    const result = await fn(client);
+    await client.query('commit');
+    return result;
+  } catch (err) {
+    await client.query('rollback');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/** True when the error is a Postgres unique-constraint violation. */
+export function isUniqueViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: string }).code === '23505';
+}
+
+/**
  * Serialize an embedding for a vector-typed parameter.
  * pgvector accepts the '[0.1,0.2,...]' text form; cast with ::vector in SQL.
  */

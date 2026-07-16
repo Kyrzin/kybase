@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { query, queryOne } from '@/lib/db';
+import { query, queryOne, withTransaction, isUniqueViolation } from '@/lib/db';
 import { indexNoteAsync } from '@/lib/indexing';
 import { z } from 'zod';
 
@@ -62,19 +62,25 @@ export async function PATCH(
   sqlParams.push(id);
   let note;
   try {
-    note = await queryOne(
-      `update notes set ${sets.join(', ')} where id = $${sqlParams.length}
-       returning ${NOTE_SELECT}`,
-      sqlParams
-    );
+    // One transaction: a rename must never land without its backlink
+    // rewrite — a failure between the two leaves [[OldTitle]] links broken.
+    note = await withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `update notes set ${sets.join(', ')} where id = $${sqlParams.length}
+         returning ${NOTE_SELECT}`,
+        sqlParams
+      );
+      if (titleChanged && rows[0]) {
+        await client.query('select update_wikilinks($1, $2)', [existing.title, parsed.data.title!]);
+      }
+      return rows[0] ?? null;
+    });
   } catch (err) {
+    if (isUniqueViolation(err)) {
+      return NextResponse.json({ error: 'A note with this title already exists' }, { status: 409 });
+    }
     const message = err instanceof Error ? err.message : 'Update failed';
     return NextResponse.json({ error: message }, { status: 500 });
-  }
-
-  // Update [[OldTitle]] → [[NewTitle]] in all other notes (case-insensitive)
-  if (titleChanged) {
-    await query('select update_wikilinks($1, $2)', [existing.title, parsed.data.title!]);
   }
 
   // Re-index asynchronously (note embedding + chunks)

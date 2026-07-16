@@ -2,7 +2,7 @@
 // Uses @modelcontextprotocol/sdk McpServer (high-level API)
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { query, queryOne } from './db';
+import { query, queryOne, withTransaction, isUniqueViolation } from './db';
 import { textSearch, semanticSearch, hybridSearch } from './search';
 import { indexNoteAsync } from './indexing';
 import { extractAllWikilinks } from './wikilinks';
@@ -88,12 +88,18 @@ export function createMcpServer(): McpServer {
       tags:      z.array(z.string()).default([]),
     },
     async ({ title, content, folder_id, tags }) => {
-      const note = await queryOne<{ id: string }>(
-        `insert into notes (title, content, folder_id, tags, embedding_pending)
-         values ($1, $2, $3, $4, true)
-         returning id, title, content, folder_id, tags, created_at`,
-        [title, content, folder_id ?? null, tags]
-      );
+      let note;
+      try {
+        note = await queryOne<{ id: string }>(
+          `insert into notes (title, content, folder_id, tags, embedding_pending)
+           values ($1, $2, $3, $4, true)
+           returning id, title, content, folder_id, tags, created_at`,
+          [title, content, folder_id ?? null, tags]
+        );
+      } catch (err) {
+        if (isUniqueViolation(err)) throw new Error(`A note titled "${title}" already exists — update it or pick another title`);
+        throw err;
+      }
       if (!note) throw new Error('Insert failed');
 
       // background index (note embedding + chunks)
@@ -135,16 +141,26 @@ export function createMcpServer(): McpServer {
       if (changed) sets.push('embedding_pending = true');
 
       params.push(id);
-      const note = await queryOne(
-        `update notes set ${sets.join(', ')} where id = $${params.length}
-         returning id, title, content, folder_id, tags, updated_at`,
-        params
-      );
-      if (!note) throw new Error('Note not found');
-
-      if (title && title !== existing.title) {
-        await query('select update_wikilinks($1, $2)', [existing.title, title]);
+      let note;
+      try {
+        // One transaction: a rename must never land without its backlink
+        // rewrite — a failure between the two leaves [[OldTitle]] links broken.
+        note = await withTransaction(async (client) => {
+          const { rows } = await client.query(
+            `update notes set ${sets.join(', ')} where id = $${params.length}
+             returning id, title, content, folder_id, tags, updated_at`,
+            params
+          );
+          if (title && title !== existing.title && rows[0]) {
+            await client.query('select update_wikilinks($1, $2)', [existing.title, title]);
+          }
+          return rows[0] ?? null;
+        });
+      } catch (err) {
+        if (isUniqueViolation(err)) throw new Error(`A note titled "${title}" already exists — update it or pick another title`);
+        throw err;
       }
+      if (!note) throw new Error('Note not found');
       if (changed) {
         indexNoteAsync(id, title ?? existing.title, content ?? existing.content);
       }

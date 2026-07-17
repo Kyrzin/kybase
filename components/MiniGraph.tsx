@@ -81,7 +81,9 @@ export default function MiniGraph({ graphData, activeNoteId, onSelectNote, w = 3
       }
     });
     nodesRef.current = next;
-  }, [graphData]);
+    // W/H only position brand-new nodes; on a pure resize prev already has
+    // every node, so including them here never moves existing ones.
+  }, [graphData, W, H]);
 
   // Helpers
   const degreeMap = useMemo(() => {
@@ -90,7 +92,9 @@ export default function MiniGraph({ graphData, activeNoteId, onSelectNote, w = 3
     return m;
   }, [edges]);
 
-  const nodeRadius = (id: string) => id.startsWith('f:') ? 7 : 4 + (degreeMap.get(id) ?? 0) * 1.2;
+  // Memoized so the animation effect can depend on it without restarting the
+  // RAF loop every render — identity changes only when degreeMap does.
+  const nodeRadius = useCallback((id: string) => id.startsWith('f:') ? 7 : 4 + (degreeMap.get(id) ?? 0) * 1.2, [degreeMap]);
 
   const zoomToFit = useCallback(() => {
     const noteNodes = Array.from(nodesRef.current.values()).filter(n => n.type === 'note');
@@ -384,7 +388,7 @@ export default function MiniGraph({ graphData, activeNoteId, onSelectNote, w = 3
       canvas.removeEventListener('touchmove',  wake);
       canvas.removeEventListener('wheel',      wake);
     };
-  }, [graphData, edges, activeNoteId, degreeMap, W, H, zoomToFit]);
+  }, [graphData, edges, activeNoteId, degreeMap, nodeRadius, W, H, zoomToFit]);
 
   // Unified pointer position from mouse or touch
   const clientXY = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {

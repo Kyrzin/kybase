@@ -21,6 +21,10 @@ export default function RootLayout({
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        {/* Fonts are loaded by family name ('DM Sans', 'JetBrains Mono') from
+            globals.css and inline styles throughout the app; next/font would
+            hash the family name and break those references. Intentional link. */}
+        {/* eslint-disable-next-line @next/next/no-page-custom-font */}
         <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
       </head>
       <body style={{ height: '100%', margin: 0 }}>{children}</body>

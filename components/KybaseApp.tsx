@@ -1,41 +1,21 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import type { Note, Folder, SearchHit } from '@/lib/types';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import type { Folder, SearchHit } from '@/lib/types';
 import { Icons } from './Icons';
 import MiniGraph, { type GraphData } from './MiniGraph';
 import SettingsModal from './SettingsModal';
 import Sidebar from './Sidebar';
 import Editor from './Editor';
+import { apiFetch, useNotes } from '@/lib/useNotes';
 
-const TOKEN_KEY = 'kybase_token';
 const FOCUS_KEY = 'kybase_focus_folder';
 
-// ─── API helper ──────────────────────────────────────────────────────────────
-function apiFetch(path: string, init?: RequestInit): Promise<Response> {
-  const token = typeof window !== 'undefined' ? localStorage.getItem(TOKEN_KEY) ?? '' : '';
-  return fetch(path, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(init?.headers ?? {}),
-    },
-  });
-}
-
 // Markdown rendering lives in lib/markdown.ts (shared with the public
-// share page); its XSS coverage is in lib/markdown.test.ts.
+// share page). Notes/folders data + CRUD live in lib/useNotes.ts.
 
 // ─── Main App ─────────────────────────────────────────────────────────────────
 export default function KybaseApp() {
-  const [notes, setNotes]             = useState<Note[]>([]);
-  const [folders, setFolders]         = useState<Folder[]>([]);
-  const [loading, setLoading]         = useState(true);
-  const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
-  const [editMode, setEditMode]       = useState(false);
-  const [editContent, setEditContent] = useState('');
-  const [editTitle, setEditTitle]     = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [aiQuery, setAiQuery]         = useState('');
   const [aiResults, setAiResults]     = useState<SearchHit[] | null>(null);
@@ -71,38 +51,6 @@ export default function KybaseApp() {
     };
   }, []);
 
-  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
-
-  // Expand a note's ancestor folders so it is visible in the tree. Called
-  // from the actions that change the active note (not an effect), so the
-  // user can still collapse folders afterwards.
-  const expandAncestors = useCallback((folderId: string | null | undefined, folderList: Folder[]) => {
-    if (!folderId) return;
-    const parents = new Set<string>();
-    let cur: string | null = folderId;
-    while (cur) {
-      if (parents.has(cur)) break; // Failsafe guard against DB folder cycles
-      parents.add(cur);
-      const f: Folder | undefined = folderList.find(f => f.id === cur);
-      cur = f?.parent_id ?? null;
-    }
-    setExpandedFolders(prev => {
-      if (Array.from(parents).every(id => prev.has(id))) return prev;
-      const next = new Set(prev);
-      parents.forEach(id => next.add(id));
-      return next;
-    });
-  }, []);
-
-  // Scroll sidebar to active note after folders have expanded
-  useEffect(() => {
-    if (!activeNoteId) return;
-    const timer = setTimeout(() => {
-      document.querySelector('.tree-item.note-item.active')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }, 150);
-    return () => clearTimeout(timer);
-  }, [activeNoteId]);
-
   // Settings modal
   const [settingsOpen, setSettingsOpen]       = useState(false);
 
@@ -123,7 +71,8 @@ export default function KybaseApp() {
   const [newTag, setNewTag]             = useState('');
 
   // Focus mode: show only one top-level folder's subtree (workspace). Pure view
-  // preference — lives in localStorage, never sent to the server or MCP.
+  // preference — lives in localStorage, never sent to the server or MCP. Stays
+  // in the parent (not useNotes) because the graph reads the same visibleNotes.
   const [focusFolderId, setFocusFolderId] = useState<string | null>(null);
   const switchFocus = (id: string | null) => {
     setFocusFolderId(id);
@@ -131,31 +80,41 @@ export default function KybaseApp() {
     else localStorage.removeItem(FOCUS_KEY);
   };
 
-  const saveTimerRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // UI reactions that useNotes' data actions must trigger — kept here (not in
+  // the hook) so the hook owns no view state. Memoized so the hook's load
+  // effect doesn't re-run every render.
+  const restoreFocus = useCallback((foldersData: Folder[]) => {
+    const savedFocus = localStorage.getItem(FOCUS_KEY);
+    if (savedFocus && foldersData.some(f => f.id === savedFocus && f.parent_id === null)) {
+      setFocusFolderId(savedFocus);
+    } else if (savedFocus) {
+      localStorage.removeItem(FOCUS_KEY);
+    }
+  }, []);
+  const onNoteOpened = useCallback(() => {
+    setShareInfo(null); // the popover belongs to the note it was created for
+    if (typeof window !== 'undefined' && window.innerWidth < 768) setSidebarOpen(false);
+  }, []);
+  const onMoveDone = useCallback(() => setMovingNote(false), []);
+  const onRenameDone = useCallback(() => setRenamingFolderId(null), []);
+  const onTagInputConsumed = useCallback(() => setNewTag(''), []);
 
-  // ── Initial data load ───────────────────────────────────────────────────────
+  const {
+    notes, setNotes, folders, setFolders, loading, activeNote, activeNoteId,
+    editMode, setEditMode, editContent, setEditContent, editTitle, setEditTitle,
+    expandedFolders, toggleFolder,
+    selectNote, saveNote, addTag, removeTag,
+    createNote, createFolder, deleteFolder, renameFolder, deleteNote, moveNote,
+  } = useNotes({ onNoteOpened, onMoveDone, onRenameDone, onTagInputConsumed, restoreFocus });
+
+  // Scroll sidebar to active note after folders have expanded
   useEffect(() => {
-    Promise.all([
-      apiFetch('/api/notes').then(r => r.json()),
-      apiFetch('/api/folders').then(r => r.json()),
-    ]).then(([notesData, foldersData]: [Note[], Folder[]]) => {
-      setNotes(notesData);
-      setFolders(foldersData);
-      const savedFocus = localStorage.getItem(FOCUS_KEY);
-      if (savedFocus && foldersData.some(f => f.id === savedFocus && f.parent_id === null)) {
-        setFocusFolderId(savedFocus);
-      } else if (savedFocus) {
-        localStorage.removeItem(FOCUS_KEY);
-      }
-      if (notesData.length > 0) {
-        const first = notesData[0];
-        setActiveNoteId(first.id);
-        setEditContent(first.content);
-        setEditTitle(first.title);
-        expandAncestors(first.folder_id, foldersData);
-      }
-    }).finally(() => setLoading(false));
-  }, [expandAncestors]);
+    if (!activeNoteId) return;
+    const timer = setTimeout(() => {
+      document.querySelector('.tree-item.note-item.active')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 150);
+    return () => clearTimeout(timer);
+  }, [activeNoteId]);
 
   // Semantic edges: embedding-similarity pairs from the server. Fetched with
   // the lowest useful threshold — the graph's slider narrows client-side.
@@ -169,7 +128,6 @@ export default function KybaseApp() {
   }, [rightPanel]);
 
   // ── Derived ─────────────────────────────────────────────────────────────────
-  const activeNote = useMemo(() => notes.find(n => n.id === activeNoteId) ?? null, [notes, activeNoteId]);
   const activeFolder = useMemo(() => activeNote?.folder_id ? (folders.find(f => f.id === activeNote.folder_id) ?? null) : null, [activeNote, folders]);
 
   // Focus subtree: the focused folder plus all its descendants
@@ -244,216 +202,12 @@ export default function KybaseApp() {
     );
   }, [searchQuery, tagFilter, visibleNotes]);
 
-  // ── Auto-save debounce (800ms) ───────────────────────────────────────────────
-  useEffect(() => {
-    if (!editMode || !activeNoteId) return;
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(async () => {
-      await apiFetch(`/api/notes/${activeNoteId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ title: editTitle, content: editContent }),
-      });
-      setNotes(prev => prev.map(n =>
-        n.id === activeNoteId
-          ? { ...n, title: editTitle, content: editContent, updated_at: new Date().toISOString() }
-          : n
-      ));
-    }, 800);
-    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editTitle, editContent]);
-
-  // ── Actions ──────────────────────────────────────────────────────────────────
-  const flushSave = useCallback(async () => {
-    if (saveTimerRef.current) {
-      clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-    if (editMode && activeNoteId) {
-      await apiFetch(`/api/notes/${activeNoteId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ title: editTitle, content: editContent }),
-      });
-      setNotes(prev => prev.map(n =>
-        n.id === activeNoteId
-          ? { ...n, title: editTitle, content: editContent, updated_at: new Date().toISOString() }
-          : n
-      ));
-    }
-  }, [editMode, activeNoteId, editTitle, editContent]);
-
-  const selectNote = useCallback(async (id: string) => {
-    await flushSave();
-    const note = notes.find(n => n.id === id);
-    if (note) {
-      setEditContent(note.content);
-      setEditTitle(note.title);
-      expandAncestors(note.folder_id, folders);
-    }
-    setActiveNoteId(id);
-    setEditMode(false);
-    setShareInfo(null); // the popover belongs to the note it was created for
-    // Close sidebar on mobile after selecting a note
-    if (typeof window !== 'undefined' && window.innerWidth < 768) {
-      setSidebarOpen(false);
-    }
-  }, [flushSave, notes, folders, expandAncestors]);
-
-  // ── Wikilink click handler ───────────────────────────────────────────────────
-  useEffect(() => {
-    const handler = async (e: MouseEvent) => {
-      const wl = (e.target as HTMLElement).closest('.wikilink') as HTMLElement | null;
-      if (!wl) return;
-      const title = wl.dataset.title ?? '';
-      const target = notes.find(n => n.title.toLowerCase() === title.toLowerCase());
-      if (target) {
-        selectNote(target.id);
-      } else {
-        const res = await apiFetch('/api/notes', {
-          method: 'POST',
-          body: JSON.stringify({ title, content: `# ${title}\n\n`, tags: [] }),
-        });
-        if (res.ok) {
-          const newNote: Note = await res.json();
-          setNotes(prev => [...prev, newNote]);
-          setActiveNoteId(newNote.id);
-          setEditMode(true);
-          setEditContent(newNote.content);
-          setEditTitle(newNote.title);
-        }
-      }
-    };
-    document.addEventListener('click', handler);
-    return () => document.removeEventListener('click', handler);
-  }, [notes, selectNote]);
-
-  const saveNote = useCallback(async () => {
-    if (!activeNote) return;
-    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    await apiFetch(`/api/notes/${activeNote.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ title: editTitle, content: editContent }),
-    });
-    setNotes(prev => prev.map(n =>
-      n.id === activeNote.id
-        ? { ...n, title: editTitle, content: editContent, updated_at: new Date().toISOString() }
-        : n
-    ));
-    setEditMode(false);
-  }, [activeNote, editTitle, editContent]);
-
-  // ── Tags ───────────────────────────────────────────────────────────────────
-  // Optimistic local update + PATCH. Tags don't change embeddings, so the
-  // server skips re-indexing (only title/content do).
-  const saveTags = useCallback(async (tags: string[]) => {
-    if (!activeNote) return;
-    const id = activeNote.id;
-    setNotes(prev => prev.map(n => (n.id === id ? { ...n, tags } : n)));
-    await apiFetch(`/api/notes/${id}`, { method: 'PATCH', body: JSON.stringify({ tags }) });
-  }, [activeNote]);
-
-  const addTag = useCallback((raw: string) => {
-    if (!activeNote) return;
-    const t = raw.replace(/^#+/, '').trim().toLowerCase();
-    setNewTag('');
-    if (!t || activeNote.tags.includes(t)) return;
-    saveTags([...activeNote.tags, t]);
-  }, [activeNote, saveTags]);
-
-  const removeTag = useCallback((tag: string) => {
-    if (!activeNote) return;
-    saveTags(activeNote.tags.filter(t => t !== tag));
-  }, [activeNote, saveTags]);
-
   const filterByTag = useCallback((tag: string) => {
     setTagFilter(tag);
     setSearchQuery('');
     setRightPanel(null);
     if (typeof window !== 'undefined' && window.innerWidth < 768) setSidebarOpen(true);
   }, []);
-
-  const createNote = useCallback(async (folderId: string | null = null) => {
-    const res = await apiFetch('/api/notes', {
-      method: 'POST',
-      body: JSON.stringify({ title: 'Untitled', content: '# Untitled\n\nStart writing...', folder_id: folderId, tags: [] }),
-    });
-    if (!res.ok) return;
-    const newNote: Note = await res.json();
-    setNotes(prev => [...prev, newNote]);
-    setActiveNoteId(newNote.id);
-    setEditMode(true);
-    setEditContent(newNote.content);
-    setEditTitle(newNote.title);
-  }, []);
-
-  const createFolder = useCallback(async (parentId: string | null = null) => {
-    const name = prompt('Folder name:');
-    if (!name) return;
-    const res = await apiFetch('/api/folders', {
-      method: 'POST',
-      body: JSON.stringify({ name, parent_id: parentId }),
-    });
-    if (!res.ok) return;
-    const newFolder: Folder = await res.json();
-    setFolders(prev => [...prev, newFolder]);
-    setExpandedFolders(prev => new Set([...prev, newFolder.id]));
-  }, []);
-
-  const deleteFolder = useCallback(async (id: string) => {
-    if (!confirm('Delete folder and all its contents?')) return;
-    await apiFetch(`/api/folders/${id}`, { method: 'DELETE' });
-    setFolders(prev => prev.filter(f => f.id !== id));
-    // Remove notes that were in this folder from local state
-    setNotes(prev => {
-      const removed = prev.filter(n => n.folder_id === id);
-      const next = prev.filter(n => n.folder_id !== id);
-      if (removed.some(n => n.id === activeNoteId)) {
-        const nextNote = next[0] ?? null;
-        setActiveNoteId(nextNote?.id ?? null);
-        if (nextNote) { setEditContent(nextNote.content); setEditTitle(nextNote.title); }
-      }
-      return next;
-    });
-  }, [activeNoteId]);
-
-  const renameFolder = useCallback(async (id: string, name: string) => {
-    const trimmed = name.trim();
-    if (!trimmed) { setRenamingFolderId(null); return; }
-    const res = await apiFetch(`/api/folders/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ name: trimmed }),
-    });
-    if (res.ok) {
-      setFolders(prev => prev.map(f => f.id === id ? { ...f, name: trimmed } : f));
-    }
-    setRenamingFolderId(null);
-  }, []);
-
-  const deleteNote = useCallback(async (id: string) => {
-    await apiFetch(`/api/notes/${id}`, { method: 'DELETE' });
-    setNotes(prev => {
-      const next = prev.filter(n => n.id !== id);
-      if (activeNoteId === id) {
-        const nextNote = next[0] ?? null;
-        setActiveNoteId(nextNote?.id ?? null);
-        if (nextNote) { setEditContent(nextNote.content); setEditTitle(nextNote.title); }
-      }
-      return next;
-    });
-  }, [activeNoteId]);
-
-  const moveNote = useCallback(async (folderId: string | null) => {
-    if (!activeNoteId) return;
-    await apiFetch(`/api/notes/${activeNoteId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ folder_id: folderId }),
-    });
-    setNotes(prev => prev.map(n =>
-      n.id === activeNoteId ? { ...n, folder_id: folderId } : n
-    ));
-    setMovingNote(false);
-  }, [activeNoteId]);
-
 
   const handleAiSearch = async () => {
     if (!aiQuery.trim()) return;
@@ -469,17 +223,6 @@ export default function KybaseApp() {
       setAiLoading(false);
     }
   };
-
-  const toggleFolder = (id: string) => {
-    setExpandedFolders(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  // ── Folder tree renderer ─────────────────────────────────────────────────────
 
   const shareNote = async () => {
     if (!activeNoteId) return;
@@ -690,7 +433,7 @@ export default function KybaseApp() {
                         onSelectNote={id => {
                           if (id.startsWith('f:')) {
                             const fid = id.slice(2);
-                            setExpandedFolders(prev => { const n = new Set(prev); if (n.has(fid)) n.delete(fid); else n.add(fid); return n; });
+                            toggleFolder(fid);
                             if (winSize.w < 768) setSidebarOpen(true);
                           } else {
                             selectNote(id);

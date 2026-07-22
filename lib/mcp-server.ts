@@ -13,6 +13,40 @@ function escapeLike(s: string): string {
   return s.replace(/[%_\\]/g, (c) => `\\${c}`);
 }
 
+// A note's full content used to go out unconditionally — a ~60k-char note
+// (~25k+ tokens, worse for dense Cyrillic) hard-fails the MCP host's
+// response-size limit with no way to retrieve the rest. 20000 chars keeps
+// the JSON response comfortably under that even for Cyrillic-heavy text;
+// most notes are far smaller and pass through untouched.
+const DEFAULT_CONTENT_LIMIT = 20_000;
+// get_note_with_links can pull in many linked notes at once — each is capped
+// tighter than a standalone get_note so a handful of large linked notes
+// can't blow the response budget by themselves. Call get_note on a specific
+// link for its full content.
+const LINKED_NOTE_CONTENT_LIMIT = 4_000;
+
+export function windowContent<T extends { content: string }>(
+  note: T,
+  offset: number,
+  limit: number
+): Omit<T, 'content'> & {
+  content: string;
+  content_total_length: number;
+  content_truncated: boolean;
+  next_offset?: number;
+} {
+  const total = note.content.length;
+  const end = Math.min(total, offset + limit);
+  const truncated = end < total || offset > 0;
+  return {
+    ...note,
+    content: note.content.slice(offset, end),
+    content_total_length: total,
+    content_truncated: truncated,
+    ...(end < total ? { next_offset: end } : {}),
+  };
+}
+
 export function createMcpServer(): McpServer {
   const server = new McpServer(
     { name: 'kybase', version: '1.0.0' },
@@ -59,21 +93,27 @@ export function createMcpServer(): McpServer {
   // ── get_note ─────────────────────────────────────────────────────────────
   server.tool(
     'get_note',
-    'Get full note content by id or title (case-insensitive).',
+    'Get full note content by id or title (case-insensitive). Large notes are windowed: content ' +
+    `is capped at ${DEFAULT_CONTENT_LIMIT} chars by default (see limit/offset) — check ` +
+    'content_truncated and content_total_length in the response, and pass next_offset back as ' +
+    '`offset` to fetch the rest.',
     {
-      id:    z.string().uuid().optional(),
-      title: z.string().optional(),
+      id:     z.string().uuid().optional(),
+      title:  z.string().optional(),
+      offset: z.number().int().min(0).default(0).describe('Character offset into content to start from'),
+      limit:  z.number().int().min(1000).max(200_000).default(DEFAULT_CONTENT_LIMIT)
+        .describe('Max characters of content to return'),
     },
-    async ({ id, title }) => {
+    async ({ id, title, offset, limit }) => {
       if (!id && !title) throw new Error('Provide either id or title');
       const cols = 'id, title, content, folder_id, tags, created_at, updated_at';
       // escapeLike: ilike here means "case-insensitive exact title", so
       // %/_ in a real title must not act as wildcards and match another note.
       const data = id
-        ? await queryOne(`select ${cols} from notes where id = $1`, [id])
-        : await queryOne(`select ${cols} from notes where title ilike $1`, [escapeLike(title!)]);
+        ? await queryOne<{ content: string }>(`select ${cols} from notes where id = $1`, [id])
+        : await queryOne<{ content: string }>(`select ${cols} from notes where title ilike $1`, [escapeLike(title!)]);
       if (!data) throw new Error('Note not found');
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify(windowContent(data, offset, limit), null, 2) }] };
     }
   );
 
@@ -185,7 +225,11 @@ export function createMcpServer(): McpServer {
   server.tool(
     'search_notes',
     'Search notes. type: "text" (fast), "semantic" (meaning-based), "hybrid" (best, uses RRF). ' +
-    'Returns short excerpts, not full notes — call get_note with the id to read a full note.',
+    'Returns short excerpts, not full notes — call get_note with the id to read a full note. ' +
+    'On hybrid results, `score` is rank fusion, not a relevance measure — use the per-hit ' +
+    'text_score (FTS relevance) / semantic_score (raw cosine similarity) to judge how strong a ' +
+    'match actually is; higher is more relevant within each field, but the two are not comparable ' +
+    'to each other.',
     {
       query: z.string().min(1),
       type:  z.enum(['text', 'semantic', 'hybrid']).default('hybrid'),
@@ -310,12 +354,19 @@ export function createMcpServer(): McpServer {
   // ── get_note_with_links ──────────────────────────────────────────────────
   server.tool(
     'get_note_with_links',
-    'Get a note and automatically resolve all [[wikilinks]] inside it (1 level deep). Returns the main note plus the full content of every linked note found in the knowledge base. Unresolved links (notes not found) are listed separately.',
+    'Get a note and automatically resolve all [[wikilinks]] inside it (1 level deep). Returns the ' +
+    'main note plus the content of every linked note found in the knowledge base. Unresolved links ' +
+    `(notes not found) are listed separately. The main note's content is windowed like get_note ` +
+    `(limit/offset, default ${DEFAULT_CONTENT_LIMIT} chars); each linked note is capped at ` +
+    `${LINKED_NOTE_CONTENT_LIMIT} chars — call get_note on its id for the full text.`,
     {
-      id:    z.string().uuid().optional(),
-      title: z.string().optional(),
+      id:     z.string().uuid().optional(),
+      title:  z.string().optional(),
+      offset: z.number().int().min(0).default(0).describe('Character offset into the main note\'s content'),
+      limit:  z.number().int().min(1000).max(200_000).default(DEFAULT_CONTENT_LIMIT)
+        .describe('Max characters of the main note\'s content to return'),
     },
-    async ({ id, title }) => {
+    async ({ id, title, offset, limit }) => {
       if (!id && !title) throw new Error('Provide either id or title');
 
       // Fetch the main note
@@ -337,17 +388,17 @@ export function createMcpServer(): McpServer {
       await Promise.all(
         linkTargets.map(async (target) => {
           if (target.toLowerCase() === note.title.toLowerCase()) return;
-          const linked = await queryOne(
+          const linked = await queryOne<{ content: string }>(
             'select id, title, content, folder_id, tags, updated_at from notes where title ilike $1',
             [escapeLike(target)]
           );
-          if (linked) resolved.push(linked);
+          if (linked) resolved.push(windowContent(linked, 0, LINKED_NOTE_CONTENT_LIMIT));
           else        missing.push(target);
         })
       );
 
       const result = {
-        note,
+        note: windowContent(note, offset, limit),
         linked_notes: resolved,
         unresolved_links: missing,
       };

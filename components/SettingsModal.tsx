@@ -197,7 +197,9 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
             )}
 
             <div style={{ fontSize: 11, color: '#6c7086', background: '#11111b', borderRadius: 6, padding: '8px 10px', marginBottom: 16 }}>
-              Switching the provider automatically re-indexes all notes.
+              Switching the provider automatically re-indexes all notes. &quot;Reindex&quot; below only
+              catches notes that were never embedded — after an update that changes how embeddings
+              themselves are computed, use &quot;Reindex all&quot; to recompute every note.
             </div>
 
             {settingsStatus && (
@@ -223,9 +225,31 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
                   }
                 }}
                 disabled={reindexRunning || settingsSaving}
+                title="Only re-embeds notes that were never embedded"
                 style={{ flex: 1, background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '9px 0', fontSize: 13, fontWeight: 600, cursor: reindexRunning || settingsSaving ? 'not-allowed' : 'pointer', opacity: reindexRunning || settingsSaving ? 0.7 : 1, fontFamily: 'inherit' }}
               >
                 {reindexRunning ? 'Indexing…' : 'Reindex'}
+              </button>
+              <button
+                onClick={async () => {
+                  if (!window.confirm('Recompute embeddings for every note? This can take a while on a large vault.')) return;
+                  setReindexRunning(true);
+                  setSettingsStatus('Reindexing all notes…');
+                  try {
+                    const ri = await apiFetch('/api/admin/reindex?mode=all', { method: 'POST' });
+                    const riData = await ri.json();
+                    setSettingsStatus(`Done. Reindexed ${riData.reindexed} notes.`);
+                  } catch {
+                    setSettingsStatus('Reindex failed.');
+                  } finally {
+                    setReindexRunning(false);
+                  }
+                }}
+                disabled={reindexRunning || settingsSaving}
+                title="Recompute every note's embedding, even already-indexed ones"
+                style={{ flex: 1, background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '9px 0', fontSize: 13, fontWeight: 600, cursor: reindexRunning || settingsSaving ? 'not-allowed' : 'pointer', opacity: reindexRunning || settingsSaving ? 0.7 : 1, fontFamily: 'inherit' }}
+              >
+                Reindex all
               </button>
               <button
                 onClick={saveSettings}

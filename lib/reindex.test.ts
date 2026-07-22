@@ -5,6 +5,7 @@ const mockIndexNote = vi.fn();
 
 vi.mock('./db', () => ({ query: (...args: unknown[]) => mockQuery(...args) }));
 vi.mock('./indexing', () => ({ indexNote: (...args: unknown[]) => mockIndexNote(...args) }));
+vi.mock('./embeddings', () => ({ getEmbedConcurrency: async () => ({ notes: 2, chunks: 2 }) }));
 
 import { reindexPending, reindexAll } from './reindex';
 

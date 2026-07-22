@@ -96,3 +96,17 @@ describe('getEmbedding - unknown provider', () => {
     await expect(getEmbedding('test')).rejects.toThrow('Unknown embedding provider');
   });
 });
+
+describe('getEmbedConcurrency', () => {
+  it('gives ollama a higher but still modest concurrency', async () => {
+    process.env.EMBEDDING_PROVIDER = 'ollama';
+    const { getEmbedConcurrency } = await import('./embeddings');
+    expect(await getEmbedConcurrency()).toEqual({ notes: 2, chunks: 2 });
+  });
+
+  it('gives cloud providers a conservative concurrency to respect free-tier rate limits', async () => {
+    process.env.EMBEDDING_PROVIDER = 'google';
+    const { getEmbedConcurrency } = await import('./embeddings');
+    expect(await getEmbedConcurrency()).toEqual({ notes: 1, chunks: 2 });
+  });
+});

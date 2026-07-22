@@ -2,19 +2,19 @@
 // POST /api/admin/reindex and fired in the background after an import.
 import { query } from './db';
 import { indexNote } from './indexing';
-
-// Reindexing whole notes (each with its own batch of chunk embeddings) is
-// heavier than a single chunk, so keep concurrency lower than indexNote's.
-const NOTE_CONCURRENCY = 3;
+import { getEmbedConcurrency } from './embeddings';
 
 export type ReindexResult = { reindexed: number; errors: string[]; total: number };
 
 async function reindexRows(rows: { id: string; title: string; content: string }[]): Promise<ReindexResult> {
+  // Each note embeds its own chunks concurrently too (lib/indexing.ts), so
+  // this multiplies with that — keep it modest, see getEmbedConcurrency.
+  const { notes: noteConcurrency } = await getEmbedConcurrency();
   let reindexed = 0;
   const errors: string[] = [];
 
-  for (let i = 0; i < rows.length; i += NOTE_CONCURRENCY) {
-    const batch = rows.slice(i, i + NOTE_CONCURRENCY);
+  for (let i = 0; i < rows.length; i += noteConcurrency) {
+    const batch = rows.slice(i, i + noteConcurrency);
     await Promise.all(batch.map(async (note) => {
       try {
         await indexNote(note.id, note.title, note.content);

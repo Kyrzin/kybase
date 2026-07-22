@@ -13,6 +13,21 @@ export async function getEmbedding(text: string, task: EmbedTask = 'document'): 
   }
 }
 
+export type EmbedConcurrency = { notes: number; chunks: number };
+
+// How many notes/chunks lib/reindex.ts and lib/indexing.ts embed at once.
+// Verified live: the old flat 3 notes × 4 chunks (≤12 concurrent calls) blew
+// through Google's free-tier embedding quota during a 90-note reindex —
+// hundreds of 429s, each retried up to 5x by fetchWithRetry. Ollama has no
+// quota, but it's often a small self-hosted box (single CPU core doing
+// inference), not a datacenter — 12-way concurrency there just queues
+// requests behind each other rather than speeding anything up, so it gets a
+// modest number too, not the old aggressive default.
+export async function getEmbedConcurrency(): Promise<EmbedConcurrency> {
+  const cfg = await getEmbeddingConfig();
+  return cfg.provider === 'ollama' ? { notes: 2, chunks: 2 } : { notes: 1, chunks: 2 };
+}
+
 // A hung provider (e.g. a stalled Ollama container) would otherwise block
 // note saves and searches forever — the caller sees a TimeoutError and
 // embedding_pending stays true for the next reindex.

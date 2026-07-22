@@ -2,14 +2,8 @@
 // whole-note embedding + per-chunk embeddings. Used by the notes API,
 // the MCP server, the admin reindex endpoint, and scripts/reindex.ts.
 import { getPool, toVector } from './db';
-import { getEmbedding } from './embeddings';
+import { getEmbedding, getEmbedConcurrency } from './embeddings';
 import { chunkNote } from './chunking';
-
-// Cap concurrent embedding requests per note so bulk reindexing doesn't
-// blast the provider's rate limit — fetchWithRetry's backoff handles the
-// occasional 429, but a fully-parallel note with many chunks would trigger
-// them constantly instead of rarely.
-const EMBED_CONCURRENCY = 4;
 
 // The whole-note embedding sees only the head of very long notes — the
 // chunks cover the rest. The provider's context window depends on server
@@ -44,10 +38,11 @@ async function embedNoteHead(title: string, content: string): Promise<number[]> 
 export async function indexNote(id: string, title: string, content: string): Promise<void> {
   const noteEmbedding = await embedNoteHead(title, content);
 
+  const { chunks: chunkConcurrency } = await getEmbedConcurrency();
   const chunks = chunkNote(content);
   const chunkRows = [];
-  for (let i = 0; i < chunks.length; i += EMBED_CONCURRENCY) {
-    const batch = chunks.slice(i, i + EMBED_CONCURRENCY);
+  for (let i = 0; i < chunks.length; i += chunkConcurrency) {
+    const batch = chunks.slice(i, i + chunkConcurrency);
     const embedded = await Promise.all(batch.map(async (chunk) => {
       const context = chunk.heading ? `${title} › ${chunk.heading}` : title;
       const embedding = await getEmbedding(`${context}\n\n${chunk.content}`, 'document');

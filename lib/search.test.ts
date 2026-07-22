@@ -6,37 +6,57 @@ vi.mock('./embeddings', () => ({ getEmbedding: vi.fn() }));
 
 import { rrfMerge, makeExcerpt } from './search';
 
-const make = (id: string) => ({ id, title: id, excerpt: '', tags: [] as string[], score: 0 });
+const make = (id: string, score = 0) => ({ id, title: id, excerpt: '', tags: [] as string[], score });
+const text     = (results: ReturnType<typeof make>[]) => ({ field: 'text_score' as const, results });
+const semantic = (results: ReturnType<typeof make>[]) => ({ field: 'semantic_score' as const, results });
 
 describe('rrfMerge', () => {
   it('gives higher score to items ranked first in both lists', () => {
     const a = [make('a'), make('b'), make('c')];
     const b = [make('a'), make('c'), make('b')];
-    const merged = rrfMerge([a, b]);
+    const merged = rrfMerge([text(a), semantic(b)]);
     expect(merged[0].id).toBe('a');
   });
 
   it('deduplicates items appearing in multiple lists', () => {
     const a = [make('a'), make('b')];
     const b = [make('b'), make('c')];
-    const merged = rrfMerge([a, b]);
+    const merged = rrfMerge([text(a), semantic(b)]);
     expect(merged.filter((r) => r.id === 'b')).toHaveLength(1);
   });
 
   it('handles empty lists', () => {
-    expect(rrfMerge([[], []])).toEqual([]);
+    expect(rrfMerge([text([]), semantic([])])).toEqual([]);
   });
 
   it('items only in one list still appear in output', () => {
-    const merged = rrfMerge([[make('a')], [make('b')]]);
+    const merged = rrfMerge([text([make('a')]), semantic([make('b')])]);
     expect(merged).toHaveLength(2);
     expect(merged.map((r) => r.id).sort()).toEqual(['a', 'b']);
   });
 
   it('score is the sum of RRF contributions', () => {
     // single list, rank 0 → score = 1/(60+1) ≈ 0.01639
-    const merged = rrfMerge([[make('x')]]);
+    const merged = rrfMerge([text([make('x')])]);
     expect(merged[0].score).toBeCloseTo(1 / 61, 5);
+  });
+
+  it('preserves each pass\'s own raw score under text_score/semantic_score', () => {
+    const merged = rrfMerge([
+      text([make('a', 0.9)]),
+      semantic([make('a', 0.72)]),
+    ]);
+    expect(merged[0].text_score).toBe(0.9);
+    expect(merged[0].semantic_score).toBe(0.72);
+    // score itself stays the RRF fusion, not either raw value
+    expect(merged[0].score).toBeCloseTo(1 / 61 + 1 / 61, 5);
+  });
+
+  it('a note that only matched one pass has no score for the other', () => {
+    const merged = rrfMerge([text([make('a', 0.9)]), semantic([make('b', 0.72)])]);
+    const a = merged.find((r) => r.id === 'a')!;
+    expect(a.text_score).toBe(0.9);
+    expect(a.semantic_score).toBeUndefined();
   });
 });
 

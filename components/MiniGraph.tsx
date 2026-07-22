@@ -40,6 +40,7 @@ export default function MiniGraph({ graphData, activeNoteId, onSelectNote, w = 3
                              ({ nodeId: null, startX: 0, startY: 0, lastX: 0, lastY: 0, panning: false });
   const hoveredRef   = useRef<string | null>(null);
   const wakeRef      = useRef<() => void>(() => {});
+  const warmedRef    = useRef(false);
 
   // Controls
   const [showCtrl,    setShowCtrl]    = useState(false);
@@ -203,8 +204,18 @@ export default function MiniGraph({ graphData, activeNoteId, onSelectNote, w = 3
       });
     };
 
-    // Warm-start: 80 synchronous iterations → graph appears settled instantly
-    for (let s = 0; s < 80; s++) step();
+    // Warm-start only on this graph's first-ever layout, and only if not
+    // paused — otherwise every remount (switching notes, new semantic edges,
+    // a resize) replayed 80 synchronous physics steps regardless of the
+    // "Pause physics" toggle, which looked like the layout jittering/nodes
+    // jumping on top of each other even while paused. Later remounts settle
+    // through the normal per-frame tick() below, which already respects it.
+    if (!warmedRef.current) {
+      if (!ctrlRef.current.paused) {
+        for (let s = 0; s < 80; s++) step();
+      }
+      warmedRef.current = true;
+    }
     zoomToFit();
 
     let raf = -1;

@@ -8,6 +8,13 @@ export type SearchResult = {
   excerpt: string;
   tags: string[];
   score: number;
+  // Present only on hybrid results, and only for the pass(es) that actually
+  // matched this note — text_score is FTS ts_rank (or a positional fallback
+  // score for substring matches), semantic_score is raw cosine similarity.
+  // `score` itself stays the RRF rank fusion, used for hybrid's own sort
+  // order — it is NOT a relevance measure (see rrfMerge).
+  text_score?: number;
+  semantic_score?: number;
 };
 
 const RRF_K = 60;
@@ -36,29 +43,37 @@ export function makeExcerpt(content: string, query?: string, maxLen = EXCERPT_LE
   return (start > 0 ? '…' : '') + content.slice(start, end) + (end < content.length ? '…' : '');
 }
 
+export type NamedResultList = { field: 'text_score' | 'semantic_score'; results: SearchResult[] };
+
 /**
  * Reciprocal Rank Fusion — merges multiple ranked result lists into one.
  * Deduplicates by id, re-sorts by combined RRF score.
- * Avoids the incompatible-scale problem (FTS ts_rank vs cosine similarity).
+ * Avoids the incompatible-scale problem (FTS ts_rank vs cosine similarity):
+ * `score` on the merged result is the RRF fusion, which is rank-based and
+ * says nothing about how relevant a hit actually is — only its position
+ * within each pass. Each contributing pass's own score is preserved under
+ * `field` (text_score / semantic_score) so a caller can still tell "this
+ * matched with cosine 0.72" from "this only showed up in the text pass".
  */
-export function rrfMerge(lists: SearchResult[][]): SearchResult[] {
-  const scoreMap = new Map<string, { result: SearchResult; rrfScore: number }>();
+export function rrfMerge(lists: NamedResultList[]): SearchResult[] {
+  const scoreMap = new Map<string, { result: SearchResult; rrfScore: number; extra: Partial<SearchResult> }>();
 
-  for (const list of lists) {
-    list.forEach((item, rank) => {
+  for (const { field, results } of lists) {
+    results.forEach((item, rank) => {
       const rrfScore = 1 / (RRF_K + rank + 1);
       const existing = scoreMap.get(item.id);
       if (existing) {
         existing.rrfScore += rrfScore;
+        existing.extra[field] = item.score;
       } else {
-        scoreMap.set(item.id, { result: item, rrfScore });
+        scoreMap.set(item.id, { result: item, rrfScore, extra: { [field]: item.score } });
       }
     });
   }
 
   return [...scoreMap.values()]
     .sort((a, b) => b.rrfScore - a.rrfScore)
-    .map(({ result, rrfScore }) => ({ ...result, score: rrfScore }));
+    .map(({ result, rrfScore, extra }) => ({ ...result, ...extra, score: rrfScore }));
 }
 
 type FtsRow = { id: string; title: string; tags: string[]; rank: number; headline: string };
@@ -77,12 +92,15 @@ export async function textSearch(query: string, limit = 10): Promise<SearchResul
   );
   if (rows.length === 0) return substringSearch(query, limit);
 
-  return rows.map((n, i) => ({
+  // n.rank is Postgres's actual ts_rank for this query — a genuine
+  // relevance signal, unlike the positional score substringSearch falls
+  // back to below (there is no rank for a plain substring match).
+  return rows.map((n) => ({
     id:      n.id,
     title:   n.title,
     excerpt: n.headline.replace(/<\/?b>/g, ''),
     tags:    n.tags,
-    score:   1 / (i + 1),
+    score:   n.rank,
   }));
 }
 
@@ -118,7 +136,7 @@ async function substringSearch(query: string, limit: number): Promise<SearchResu
  * so the excerpt is the actually-relevant section, not the document head.
  */
 export async function semanticSearch(query: string, limit = 10): Promise<SearchResult[]> {
-  const embedding = await getEmbedding(query);
+  const embedding = await getEmbedding(query, 'query');
 
   const data = await dbQuery(
     'select * from match_chunks($1::vector, $2, $3)',
@@ -143,5 +161,8 @@ export async function hybridSearch(query: string, limit = 10): Promise<SearchRes
     textSearch(query, limit),
     semanticSearch(query, limit),
   ]);
-  return rrfMerge([text, semantic]).slice(0, limit);
+  return rrfMerge([
+    { field: 'text_score', results: text },
+    { field: 'semantic_score', results: semantic },
+  ]).slice(0, limit);
 }

@@ -1,10 +1,12 @@
 // lib/embeddings.ts — embedding provider abstraction (DB settings override env vars)
 import { getEmbeddingConfig } from './settings';
 
-export async function getEmbedding(text: string): Promise<number[]> {
+export type EmbedTask = 'query' | 'document';
+
+export async function getEmbedding(text: string, task: EmbedTask = 'document'): Promise<number[]> {
   const cfg = await getEmbeddingConfig();
   switch (cfg.provider) {
-    case 'ollama': return ollamaEmbed(text, cfg.ollamaModel);
+    case 'ollama': return ollamaEmbed(text, cfg.ollamaModel, task);
     case 'google': return googleEmbed(text, cfg.googleApiKey);
     case 'openai': return openaiEmbed(text, cfg.openaiApiKey);
     default:       throw new Error(`Unknown embedding provider: ${cfg.provider}`);
@@ -31,12 +33,27 @@ async function fetchWithRetry(url: string, init: RequestInit, attempts = 5): Pro
   }
 }
 
-async function ollamaEmbed(text: string, model?: string): Promise<number[]> {
+// nomic-embed-text (the shipped default) requires a task instruction prefix
+// on every input — without it, query and document embeddings land in the
+// same narrow band and cosine similarity stops separating relevant notes
+// from noise (verified live: a DIY-speaker note outscored a genuinely
+// relevant CV note, both sitting at ~0.7 with MIN_SIMILARITY=0.55 in
+// lib/search.ts). Other Ollama embedding models don't share this
+// convention, so only apply it when the configured model is nomic's.
+// https://docs.nomic.ai/atlas/models/text-embedding — search_query: / search_document:
+function nomicPrefix(model: string, task: EmbedTask): string {
+  if (!model.includes('nomic-embed-text')) return '';
+  return task === 'query' ? 'search_query: ' : 'search_document: ';
+}
+
+async function ollamaEmbed(text: string, model: string | undefined, task: EmbedTask): Promise<number[]> {
   const url = process.env.OLLAMA_URL ?? 'http://ollama:11434';
+  const resolvedModel = model ?? 'nomic-embed-text';
+  const input = nomicPrefix(resolvedModel, task) + text;
   const res = await fetch(`${url}/api/embed`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: model ?? 'nomic-embed-text', input: text }),
+    body: JSON.stringify({ model: resolvedModel, input }),
     signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
   });
   // Include the body: Ollama's statusText is just "Bad Request", the real

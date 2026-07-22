@@ -41,6 +41,38 @@ describe('getEmbedding - ollama provider', () => {
     expect(result).toHaveLength(768);
   });
 
+  it('prefixes nomic-embed-text input with search_query:/search_document: per task', async () => {
+    process.env.EMBEDDING_PROVIDER = 'ollama';
+    process.env.OLLAMA_URL = 'http://ollama:11434';
+    process.env.OLLAMA_MODEL = 'nomic-embed-text';
+
+    const fakeEmbedding = Array.from({ length: 768 }, (_, i) => i * 0.001);
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ embeddings: [fakeEmbedding] }) });
+
+    const { getEmbedding } = await import('./embeddings');
+    await getEmbedding('hello world', 'query');
+    await getEmbedding('hello world', 'document');
+
+    const bodies = mockFetch.mock.calls.map(([, init]) => JSON.parse(init.body).input);
+    expect(bodies[0]).toBe('search_query: hello world');
+    expect(bodies[1]).toBe('search_document: hello world');
+  });
+
+  it('does not prefix a non-nomic Ollama model', async () => {
+    process.env.EMBEDDING_PROVIDER = 'ollama';
+    process.env.OLLAMA_URL = 'http://ollama:11434';
+    process.env.OLLAMA_MODEL = 'mxbai-embed-large';
+
+    const fakeEmbedding = Array.from({ length: 768 }, (_, i) => i * 0.001);
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ embeddings: [fakeEmbedding] }) });
+
+    const { getEmbedding } = await import('./embeddings');
+    await getEmbedding('hello world', 'query');
+
+    const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+    expect(body.input).toBe('hello world');
+  });
+
   it('throws when Ollama returns non-ok status', async () => {
     process.env.EMBEDDING_PROVIDER = 'ollama';
     process.env.OLLAMA_URL = 'http://ollama:11434';

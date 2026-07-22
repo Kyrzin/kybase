@@ -29,7 +29,7 @@ async function embedNoteHead(title: string, content: string): Promise<number[]> 
   const full = `${title}\n\n${content}`;
   for (let budget = NOTE_EMBED_MAX_CHARS; ; budget = Math.floor(budget / 2)) {
     try {
-      return await getEmbedding(full.slice(0, budget));
+      return await getEmbedding(full.slice(0, budget), 'document');
     } catch (err) {
       if (budget <= NOTE_EMBED_MIN_CHARS || !isContextOverflow(err)) throw err;
     }
@@ -50,7 +50,7 @@ export async function indexNote(id: string, title: string, content: string): Pro
     const batch = chunks.slice(i, i + EMBED_CONCURRENCY);
     const embedded = await Promise.all(batch.map(async (chunk) => {
       const context = chunk.heading ? `${title} › ${chunk.heading}` : title;
-      const embedding = await getEmbedding(`${context}\n\n${chunk.content}`);
+      const embedding = await getEmbedding(`${context}\n\n${chunk.content}`, 'document');
       return {
         note_id:     id,
         chunk_index: chunk.index,

@@ -1,6 +1,6 @@
 // lib/search.ts — text (FTS + substring fallback), semantic (chunk-based), and hybrid (RRF) search
 import { query as dbQuery, toVector } from './db';
-import { getEmbedding } from './embeddings';
+import { getEmbedding, getMinSimilarity } from './embeddings';
 
 export type SearchResult = {
   id: string;
@@ -18,15 +18,6 @@ export type SearchResult = {
 };
 
 const RRF_K = 60;
-
-// Calibrated for embeddinggemma (the shipped default), which has a wide
-// dynamic range on multilingual text: relevant hits ~0.2–0.65, irrelevant
-// noise craters below ~0.15 (verified live on RU: query→unrelated note ≈0.06–0.11).
-// 0.3 sits comfortably above the noise ceiling without cutting weaker-but-
-// relevant matches. NOTE: this is model-specific — nomic-embed-text kept a
-// compressed ~0.6–0.7 band (needed ~0.55), and text-embedding-004 ~0.62–0.74.
-// Re-measure after switching the embedding model/provider.
-const MIN_SIMILARITY = 0.3;
 
 const EXCERPT_LENGTH = 300;
 
@@ -139,13 +130,25 @@ async function substringSearch(query: string, limit: number): Promise<SearchResu
  * Chunk-based semantic search: each note is indexed as per-section vectors
  * (see lib/indexing.ts), match_chunks returns the best chunk per note,
  * so the excerpt is the actually-relevant section, not the document head.
+ *
+ * Threshold behavior: the cosine floor (getMinSimilarity, model-dependent)
+ * is applied INSIDE match_chunks at the CHUNK level — `where similarity >=
+ * min_similarity` on each note's single best chunk (migration 002). So every
+ * row returned here is at or above the floor, and `score` is that best
+ * chunk's cosine. NOTE: in hybridSearch the FTS/text arm is NOT cosine-
+ * filtered, so a hybrid result CAN sit below this floor (or have no
+ * semantic_score at all) when it entered via the text pass — that's why the
+ * combined output shows notes a pure-semantic pass would have dropped.
  */
 export async function semanticSearch(query: string, limit = 10): Promise<SearchResult[]> {
-  const embedding = await getEmbedding(query, 'query');
+  const [embedding, minSimilarity] = await Promise.all([
+    getEmbedding(query, 'query'),
+    getMinSimilarity(),
+  ]);
 
   const data = await dbQuery(
     'select * from match_chunks($1::vector, $2, $3)',
-    [toVector(embedding), limit, MIN_SIMILARITY]
+    [toVector(embedding), limit, minSimilarity]
   );
 
   return data.map((n: Record<string, unknown>) => {

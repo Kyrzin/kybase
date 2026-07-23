@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kybase — Self-hosted memory for Claude | Markdown knowledge base + MCP server</title>
+  <meta name="description" content="Kybase is a self-hosted markdown knowledge base with a wikilink graph, hybrid semantic search (pgvector + Ollama) and a first-party MCP server — persistent memory for Claude Code and Claude Desktop. One docker compose up.">
+  <link rel="canonical" href="https://kyrzin.github.io/kybase/">
+  <meta property="og:title" content="Kybase — Self-hosted memory for Claude">
+  <meta property="og:description" content="Markdown knowledge base with wikilink graph, hybrid semantic search (pgvector + Ollama) and a first-party MCP server. 100% private, one docker compose up.">
+  <meta property="og:url" content="https://kyrzin.github.io/kybase/">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://raw.githubusercontent.com/Kyrzin/kybase/main/public/banner.png">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "Kybase",
+    "operatingSystem": "Docker, Linux, macOS, Windows",
+    "applicationCategory": "DeveloperApplication",
+    "description": "Self-hosted markdown knowledge base with wikilink graph, hybrid semantic search (pgvector + Ollama) and a first-party MCP server — persistent memory for AI agents.",
+    "url": "https://kyrzin.github.io/kybase/",
+    "codeRepository": "https://github.com/Kyrzin/kybase",
+    "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+    "author": { "@type": "Person", "name": "Denis Kurzin", "url": "https://github.com/Kyrzin" }
+  }
+  </script>
+  <style>
+    :root {
+      --bg: #0d1117; --panel: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #9198a1; --accent: #d29752; --link: #6ca0f6;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: var(--bg); color: var(--text);
+      font: 16px/1.65 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    .wrap { max-width: 860px; margin: 0 auto; padding: 0 24px; }
+    a { color: var(--link); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    header { padding: 56px 0 40px; text-align: center; }
+    header img.banner { max-width: 100%; border-radius: 12px; border: 1px solid var(--border); }
+    h1 { font-size: 2.4rem; margin: 28px 0 10px; }
+    .tagline { font-size: 1.2rem; color: var(--muted); max-width: 640px; margin: 0 auto; }
+    .cta { margin-top: 28px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    .btn {
+      display: inline-block; padding: 11px 22px; border-radius: 8px;
+      font-weight: 600; border: 1px solid var(--border);
+    }
+    .btn-primary { background: var(--accent); color: #1a1208; border-color: var(--accent); }
+    .btn-primary:hover { filter: brightness(1.08); text-decoration: none; }
+    .btn-ghost { color: var(--text); }
+    .btn-ghost:hover { background: var(--panel); text-decoration: none; }
+    section { padding: 36px 0; border-top: 1px solid var(--border); }
+    h2 { font-size: 1.5rem; margin-bottom: 18px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+    .card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 10px; padding: 18px;
+    }
+    .card h3 { font-size: 1.02rem; margin-bottom: 6px; }
+    .card p { color: var(--muted); font-size: 0.93rem; }
+    pre {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+      padding: 16px 18px; overflow-x: auto; font-size: 0.9rem; line-height: 1.55;
+    }
+    code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
+    p.note { color: var(--muted); margin-top: 12px; font-size: 0.93rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.93rem; }
+    th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; }
+    footer { padding: 36px 0 48px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.9rem; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <img class="banner" src="https://raw.githubusercontent.com/Kyrzin/kybase/main/public/banner.png" alt="Kybase — self-hosted memory for Claude">
+      <h1>Kybase</h1>
+      <p class="tagline">A personal, self-hosted knowledge base that your AI agent uses as native, persistent memory. Markdown notes, wikilink graph, hybrid semantic search — and a first-party MCP server.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="https://github.com/Kyrzin/kybase">View on GitHub</a>
+        <a class="btn btn-ghost" href="https://github.com/Kyrzin/kybase#quick-start-docker">Quick Start</a>
+      </div>
+    </header>
+
+    <section>
+      <h2>Why Kybase?</h2>
+      <p>Giving an agent persistent memory usually means assembling a notes app, an MCP bridge, an embedding pipeline, and sync between them yourself. Kybase is that whole stack as one <code>docker compose up</code> — no SaaS, no accounts, 100% private.</p>
+      <div class="grid" style="margin-top:20px">
+        <div class="card">
+          <h3>MCP-native</h3>
+          <p>13 tools (search, graph, backlinks, CRUD for notes and folders) over Streamable HTTP — works with Claude Code, Claude Desktop and claude.ai connectors.</p>
+        </div>
+        <div class="card">
+          <h3>Local semantic search</h3>
+          <p>pgvector + Ollama embeddings, hybrid RRF fusion with bilingual full-text search. Pluggable providers: Ollama, Google, or OpenAI.</p>
+        </div>
+        <div class="card">
+          <h3>Wikilink knowledge graph</h3>
+          <p>[[Title]] links, backlinks panel, interactive graph view with semantic edges computed from embedding similarity.</p>
+        </div>
+        <div class="card">
+          <h3>Zero external services</h3>
+          <p>App, PostgreSQL 16 + pgvector, and Ollama in one compose file. Single-secret auth, plain-markdown export/import.</p>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Quick start</h2>
+      <pre><code>git clone https://github.com/Kyrzin/kybase.git
+cd kybase
+cp .env.example .env
+# set KYBASE_SECRET (openssl rand -hex 32)
+docker compose up -d --build</code></pre>
+      <p class="note">Open <code>http://localhost:3000</code> and log in with your <code>KYBASE_SECRET</code>. Migrations apply automatically; Ollama pulls the embedding model (~270&nbsp;MB) once in the background.</p>
+    </section>
+
+    <section>
+      <h2>Connect Claude (MCP)</h2>
+      <pre><code>{
+  "mcpServers": {
+    "kybase": {
+      "type": "http",
+      "url": "https://your-domain/api/mcp",
+      "headers": { "Authorization": "Bearer &lt;KYBASE_SECRET&gt;" }
+    }
+  }
+}</code></pre>
+      <p class="note">The server ships with MCP instructions that teach the agent to search before writing and to interlink notes — so the knowledge graph grows as the agent works, instead of accumulating orphan notes.</p>
+    </section>
+
+    <section>
+      <h2>Stack</h2>
+      <table>
+        <tr><th>Layer</th><th>Tech</th></tr>
+        <tr><td>Frontend</td><td>Next.js App Router, React 19</td></tr>
+        <tr><td>Database</td><td>PostgreSQL 16 + pgvector</td></tr>
+        <tr><td>Embeddings</td><td>Ollama <code>nomic-embed-text</code> / Google / OpenAI (768-dim)</td></tr>
+        <tr><td>Search</td><td>RRF hybrid: pgvector HNSW cosine + bilingual FTS</td></tr>
+        <tr><td>MCP</td><td><code>@modelcontextprotocol/sdk</code> Streamable HTTP</td></tr>
+      </table>
+    </section>
+
+    <footer>
+      <p><a href="https://github.com/Kyrzin/kybase">github.com/Kyrzin/kybase</a> · AGPL-3.0 · © Denis Kurzin</p>
+    </footer>
+  </div>
+</body>
+</html>

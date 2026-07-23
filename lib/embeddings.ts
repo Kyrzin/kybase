@@ -1,7 +1,27 @@
 // lib/embeddings.ts — embedding provider abstraction (DB settings override env vars)
-import { getEmbeddingConfig } from './settings';
+import { getEmbeddingConfig, type EmbeddingConfig } from './settings';
 
 export type EmbedTask = 'query' | 'document';
+
+// Semantic-search cosine floor, per model — the query/document cosine scale
+// differs by embedding model, so this is model-dependent just like the task
+// prefixes above. Verified live on this RU/DE vault:
+//   - embeddinggemma: wide range, relevant ~0.37–0.64, noise <0.15 → 0.40
+//   - nomic-embed-text: compressed high band ~0.6–0.7 → 0.55
+//   - Google text-embedding-004: relevant ~0.62–0.74 → 0.55
+//   - OpenAI 3-small: unverified here, 0.45 as a conservative middle
+// Used by lib/search.ts semanticSearch (passed to the match_chunks RPC).
+function minSimilarityFor(cfg: EmbeddingConfig): number {
+  if (cfg.provider === 'ollama') {
+    if ((cfg.ollamaModel ?? '').includes('nomic-embed-text')) return 0.55;
+    return 0.40; // embeddinggemma (default) and other local models
+  }
+  return cfg.provider === 'openai' ? 0.45 : 0.55;
+}
+
+export async function getMinSimilarity(): Promise<number> {
+  return minSimilarityFor(await getEmbeddingConfig());
+}
 
 export async function getEmbedding(text: string, task: EmbedTask = 'document'): Promise<number[]> {
   const cfg = await getEmbeddingConfig();

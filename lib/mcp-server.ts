@@ -6,7 +6,7 @@ import { query, queryOne, withTransaction, isUniqueViolation } from './db';
 import { textSearch, semanticSearch, hybridSearch } from './search';
 import { indexNoteAsync } from './indexing';
 import { extractAllWikilinks } from './wikilinks';
-import { getSemanticEdges } from './semantic-edges';
+import { buildGraph } from './graph-data';
 
 /** Escape ilike wildcards so a title containing %/_ can't widen the match. */
 function escapeLike(s: string): string {
@@ -414,32 +414,8 @@ export function createMcpServer(): McpServer {
     'The node titles are the complete dictionary of valid [[wikilink]] targets.',
     {},
     async () => {
-      const notes = await query<{ id: string; title: string; content: string }>(
-        'select id, title, content from notes'
-      );
-
-      const nodes = notes.map((n) => ({ id: n.id, title: n.title }));
-      const titleToId = new Map(notes.map((n) => [n.title.toLowerCase(), n.id]));
-      const edges: { from: string; to: string }[] = [];
-
-      for (const note of notes) {
-        for (const target of extractAllWikilinks(note.content)) {
-          const targetId = titleToId.get(target.toLowerCase());
-          if (targetId && targetId !== note.id) {
-            edges.push({ from: note.id, to: targetId });
-          }
-        }
-      }
-
-      // Semantic edges are supplementary — never fail the wikilink graph over them.
-      let semantic_edges: { from: string; to: string; score: number }[] = [];
-      try {
-        semantic_edges = await getSemanticEdges(0.75, 5);
-      } catch (err) {
-        console.error('[mcp get_graph] semantic edges:', err instanceof Error ? err.message : err);
-      }
-
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ nodes, edges, semantic_edges }, null, 2) }] };
+      const graph = await buildGraph();
+      return { content: [{ type: 'text' as const, text: JSON.stringify(graph, null, 2) }] };
     }
   );
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildWikilinkEdges } from './graph';
+import { buildWikilinkEdges, dedupeEdges } from './graph';
 
 const note = (id: string, title: string, content: string) => ({ id, title, content });
 
@@ -36,11 +36,26 @@ describe('buildWikilinkEdges', () => {
     expect(edges).toEqual([{ from: 'a', to: 'b' }]);
   });
 
-  it('counts repeated links to the same target once', () => {
+  it('emits one edge per occurrence (the client counts each link)', () => {
     const edges = buildWikilinkEdges([
       note('a', 'Alpha', '[[Beta]] and again [[Beta]]'),
       note('b', 'Beta', ''),
     ]);
-    expect(edges).toEqual([{ from: 'a', to: 'b' }]);
+    expect(edges).toEqual([{ from: 'a', to: 'b' }, { from: 'a', to: 'b' }]);
+  });
+});
+
+describe('dedupeEdges', () => {
+  it('collapses repeated pairs to one, preserving first-seen order', () => {
+    expect(dedupeEdges([
+      { from: 'a', to: 'b' },
+      { from: 'c', to: 'd' },
+      { from: 'a', to: 'b' },
+    ])).toEqual([{ from: 'a', to: 'b' }, { from: 'c', to: 'd' }]);
+  });
+
+  it('keeps opposite directions as distinct edges', () => {
+    expect(dedupeEdges([{ from: 'a', to: 'b' }, { from: 'b', to: 'a' }]))
+      .toEqual([{ from: 'a', to: 'b' }, { from: 'b', to: 'a' }]);
   });
 });

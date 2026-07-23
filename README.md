@@ -134,6 +134,14 @@ You can switch the embedding provider (between local Ollama, Google, or OpenAI) 
 
 All supported providers use 768-dimensional embeddings, so switching does not require any database schema changes.
 
+**Local model choice.** The default local model is `embeddinggemma` (Google,
+multilingual) — for multilingual vaults (e.g. Russian/German) set the Ollama
+model to `embeddinggemma`; it separates relevant from irrelevant notes far
+better than English-centric models. `nomic-embed-text` is a smaller,
+English-leaning alternative. The semantic-similarity threshold adapts to the
+model automatically (see `getMinSimilarity` in `lib/embeddings.ts`), so no
+manual tuning is needed when you switch.
+
 > **CLI Alternative:** If you prefer using the terminal, you can trigger re-indexing by calling the admin endpoint:
 > ```bash
 > docker compose exec kybase node -e "

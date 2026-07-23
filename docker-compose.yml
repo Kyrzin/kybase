@@ -35,6 +35,9 @@ services:
     command: ["ollama serve & sleep 3 && ollama pull ${OLLAMA_MODEL:-embeddinggemma}; wait"]
 
   kybase:
+    # Prebuilt multi-arch image (amd64/arm64) from GitHub Packages.
+    # `docker compose pull` fetches it; `--build` rebuilds from source instead.
+    image: ghcr.io/kyrzin/kybase:${KYBASE_TAG:-latest}
     build:
       context: .
       dockerfile: Dockerfile

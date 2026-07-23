@@ -58,8 +58,14 @@ git clone https://github.com/Kyrzin/kybase.git
 cd kybase
 cp .env.example .env
 # edit .env: set KYBASE_SECRET (openssl rand -hex 32)
-docker compose up -d --build
+docker compose pull && docker compose up -d
 ```
+
+This pulls the prebuilt multi-arch image
+([`ghcr.io/kyrzin/kybase`](https://github.com/Kyrzin/kybase/pkgs/container/kybase),
+linux/amd64 + linux/arm64) from GitHub Packages. To build from source instead,
+run `docker compose up -d --build`. Pin a specific version with `KYBASE_TAG` in
+`.env` (e.g. `KYBASE_TAG=v1.0.0`); the default is `latest`.
 
 Open http://localhost:3000 and log in with your `KYBASE_SECRET`.
 

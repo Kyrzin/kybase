@@ -45,6 +45,6 @@ export async function getEmbeddingConfig(): Promise<EmbeddingConfig> {
     provider: (provider ?? process.env.EMBEDDING_PROVIDER ?? 'ollama') as EmbeddingProvider,
     googleApiKey:  googleApiKey  ?? process.env.GOOGLE_API_KEY,
     openaiApiKey:  openaiApiKey  ?? process.env.OPENAI_API_KEY,
-    ollamaModel:   ollamaModel   ?? process.env.OLLAMA_MODEL ?? 'nomic-embed-text',
+    ollamaModel:   ollamaModel   ?? process.env.OLLAMA_MODEL ?? 'embeddinggemma',
   };
 }

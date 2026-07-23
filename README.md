@@ -44,7 +44,7 @@ Kybase is that whole stack as one `docker compose up`:
 |-------|------|
 | Frontend | Next.js App Router, React 19 |
 | Database | PostgreSQL 16 + pgvector (direct `pg` connection) |
-| Embeddings | Ollama `nomic-embed-text` (default) / Google / OpenAI |
+| Embeddings | Ollama `embeddinggemma` (default, multilingual) / Google / OpenAI |
 | Search | RRF hybrid: pgvector HNSW cosine + bilingual FTS |
 | MCP | `@modelcontextprotocol/sdk` Streamable HTTP |
 | Auth | Single `KYBASE_SECRET` env var |
@@ -65,7 +65,7 @@ Open http://localhost:3000 and log in with your `KYBASE_SECRET`.
 
 That's it. On startup the app applies `db/migrations/*.sql` automatically
 (tracked in the `schema_migrations` table) and Ollama downloads the
-embedding model (~270 MB, one time).
+embedding model (embeddinggemma, ~620 MB, one time).
 Change the host port with `KYBASE_PORT` in `.env`.
 
 > **Note on embeddings:** notes and text search work immediately. Semantic

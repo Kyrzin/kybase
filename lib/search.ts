@@ -19,9 +19,14 @@ export type SearchResult = {
 
 const RRF_K = 60;
 
-// Calibrated 2026-06-12 against text-embedding-004 on this vault:
-// relevant hits score 0.62–0.74, noise floor tops out at ~0.53.
-const MIN_SIMILARITY = 0.55;
+// Calibrated for embeddinggemma (the shipped default), which has a wide
+// dynamic range on multilingual text: relevant hits ~0.2–0.65, irrelevant
+// noise craters below ~0.15 (verified live on RU: query→unrelated note ≈0.06–0.11).
+// 0.3 sits comfortably above the noise ceiling without cutting weaker-but-
+// relevant matches. NOTE: this is model-specific — nomic-embed-text kept a
+// compressed ~0.6–0.7 band (needed ~0.55), and text-embedding-004 ~0.62–0.74.
+// Re-measure after switching the embedding model/provider.
+const MIN_SIMILARITY = 0.3;
 
 const EXCERPT_LENGTH = 300;
 

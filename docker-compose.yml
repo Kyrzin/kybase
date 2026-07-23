@@ -32,7 +32,7 @@ services:
       - kybase-ollama:/root/.ollama
     # Serve, then make sure the embedding model is present (no-op if cached)
     entrypoint: ["/bin/sh", "-c"]
-    command: ["ollama serve & sleep 3 && ollama pull ${OLLAMA_MODEL:-nomic-embed-text}; wait"]
+    command: ["ollama serve & sleep 3 && ollama pull ${OLLAMA_MODEL:-embeddinggemma}; wait"]
 
   kybase:
     build:
@@ -48,7 +48,7 @@ services:
       KYBASE_SECRET: ${KYBASE_SECRET:?set KYBASE_SECRET in .env}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
       OLLAMA_URL: http://ollama:11434
-      OLLAMA_MODEL: ${OLLAMA_MODEL:-nomic-embed-text}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-embeddinggemma}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       GOOGLE_MODEL: ${GOOGLE_MODEL:-text-embedding-004}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}

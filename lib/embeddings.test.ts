@@ -58,7 +58,24 @@ describe('getEmbedding - ollama provider', () => {
     expect(bodies[1]).toBe('search_document: hello world');
   });
 
-  it('does not prefix a non-nomic Ollama model', async () => {
+  it('wraps embeddinggemma input in its task/title prompt per task', async () => {
+    process.env.EMBEDDING_PROVIDER = 'ollama';
+    process.env.OLLAMA_URL = 'http://ollama:11434';
+    process.env.OLLAMA_MODEL = 'embeddinggemma';
+
+    const fakeEmbedding = Array.from({ length: 768 }, (_, i) => i * 0.001);
+    mockFetch.mockResolvedValue({ ok: true, json: async () => ({ embeddings: [fakeEmbedding] }) });
+
+    const { getEmbedding } = await import('./embeddings');
+    await getEmbedding('hello world', 'query');
+    await getEmbedding('hello world', 'document');
+
+    const bodies = mockFetch.mock.calls.map(([, init]) => JSON.parse(init.body).input);
+    expect(bodies[0]).toBe('task: search result | query: hello world');
+    expect(bodies[1]).toBe('title: none | text: hello world');
+  });
+
+  it('does not prefix a non-nomic, non-gemma Ollama model', async () => {
     process.env.EMBEDDING_PROVIDER = 'ollama';
     process.env.OLLAMA_URL = 'http://ollama:11434';
     process.env.OLLAMA_MODEL = 'mxbai-embed-large';

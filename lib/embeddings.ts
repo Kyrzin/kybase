@@ -48,23 +48,34 @@ async function fetchWithRetry(url: string, init: RequestInit, attempts = 5): Pro
   }
 }
 
-// nomic-embed-text (the shipped default) requires a task instruction prefix
-// on every input — without it, query and document embeddings land in the
-// same narrow band and cosine similarity stops separating relevant notes
-// from noise (verified live: a DIY-speaker note outscored a genuinely
-// relevant CV note, both sitting at ~0.7 with MIN_SIMILARITY=0.55 in
-// lib/search.ts). Other Ollama embedding models don't share this
-// convention, so only apply it when the configured model is nomic's.
-// https://docs.nomic.ai/atlas/models/text-embedding — search_query: / search_document:
-function nomicPrefix(model: string, task: EmbedTask): string {
-  if (!model.includes('nomic-embed-text')) return '';
-  return task === 'query' ? 'search_query: ' : 'search_document: ';
+// Ollama embedding models expect a task-instruction prefix on every input,
+// and it materially changes retrieval quality — the wrong prefix (or none)
+// collapses cosine separation. Conventions differ per model, so match the
+// prefix to the configured model:
+//   - embeddinggemma (shipped default): Google's multilingual format. Our
+//     document text already carries its title inline, so title: none.
+//     Separates RU/DE far better than nomic (verified live: query→CV 0.32
+//     vs query→borsch 0.11, a ~0.2 gap, versus nomic's compressed ~0.06).
+//     https://ai.google.dev/gemma/docs/embeddinggemma
+//   - nomic-embed-text: search_query: / search_document:
+//     (kept a narrow high band on RU — see lib/search.ts MIN_SIMILARITY note).
+//   - anything else: no prefix.
+function ollamaPromptInput(model: string, task: EmbedTask, text: string): string {
+  if (model.includes('embeddinggemma')) {
+    return task === 'query'
+      ? `task: search result | query: ${text}`
+      : `title: none | text: ${text}`;
+  }
+  if (model.includes('nomic-embed-text')) {
+    return (task === 'query' ? 'search_query: ' : 'search_document: ') + text;
+  }
+  return text;
 }
 
 async function ollamaEmbed(text: string, model: string | undefined, task: EmbedTask): Promise<number[]> {
   const url = process.env.OLLAMA_URL ?? 'http://ollama:11434';
-  const resolvedModel = model ?? 'nomic-embed-text';
-  const input = nomicPrefix(resolvedModel, task) + text;
+  const resolvedModel = model ?? 'embeddinggemma';
+  const input = ollamaPromptInput(resolvedModel, task, text);
   const res = await fetch(`${url}/api/embed`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

@@ -20,7 +20,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   const [settingsProvider, setSettingsProvider] = useState<'ollama' | 'google' | 'openai'>('ollama');
   const [settingsGoogleKey, setSettingsGoogleKey] = useState('');
   const [settingsOpenaiKey, setSettingsOpenaiKey] = useState('');
-  const [settingsOllamaModel, setSettingsOllamaModel] = useState('nomic-embed-text');
+  const [settingsOllamaModel, setSettingsOllamaModel] = useState('embeddinggemma');
   const [settingsSaving, setSettingsSaving]   = useState(false);
   const [settingsStatus, setSettingsStatus]   = useState<string | null>(null);
   const [reindexRunning, setReindexRunning]   = useState(false);
@@ -32,7 +32,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   useEffect(() => {
     apiFetch('/api/settings').then(r => r.json()).then(data => {
       setSettingsProvider(data.provider ?? 'ollama');
-      setSettingsOllamaModel(data.ollamaModel ?? 'nomic-embed-text');
+      setSettingsOllamaModel(data.ollamaModel ?? 'embeddinggemma');
       setSettingsStatus(null);
     });
     apiFetch('/api/oauth/clients')
@@ -177,7 +177,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
             {settingsProvider === 'ollama' && (
               <>
                 <label style={{ fontSize: 12, color: '#a6adc8', display: 'block', marginBottom: 6 }}>Model</label>
-                <input value={settingsOllamaModel} onChange={e => setSettingsOllamaModel(e.target.value)} placeholder="nomic-embed-text" style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', marginBottom: 16, outline: 'none' }} />
+                <input value={settingsOllamaModel} onChange={e => setSettingsOllamaModel(e.target.value)} placeholder="embeddinggemma" style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', marginBottom: 16, outline: 'none' }} />
               </>
             )}
 

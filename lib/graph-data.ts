@@ -4,7 +4,7 @@
 // use lib/graph.ts for the pure edge builder instead.
 import { query } from './db';
 import { getSemanticEdges, type SemanticEdge } from './semantic-edges';
-import { buildWikilinkEdges, type GraphNode, type GraphEdge } from './graph';
+import { buildWikilinkEdges, dedupeEdges, type GraphNode, type GraphEdge } from './graph';
 
 // Semantic edges: undirected embedding-similarity pairs. Same parameters the
 // API route and MCP tool used before this was unified.
@@ -18,7 +18,9 @@ export async function buildGraph(): Promise<Graph> {
     'select id, title, content from notes'
   );
   const nodes = notes.map(n => ({ id: n.id, title: n.title }));
-  const edges = buildWikilinkEdges(notes);
+  // Dedupe to one edge per (from, to) pair — the server graph has always been
+  // unique-per-pair (it built edges from unique wikilink targets per note).
+  const edges = dedupeEdges(buildWikilinkEdges(notes));
 
   // Second edge source — must never take down the wikilink graph if it fails.
   let semantic_edges: SemanticEdge[] = [];

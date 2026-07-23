@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { Folder, SearchHit } from '@/lib/types';
 import { Icons } from './Icons';
 import { type GraphData } from './MiniGraph';
+import { buildWikilinkEdges } from '@/lib/graph';
 import SettingsModal from './SettingsModal';
 import Sidebar from './Sidebar';
 import Editor from './Editor';
@@ -166,17 +167,9 @@ export default function KybaseApp() {
 
   const graphData = useMemo<GraphData>(() => {
     const nodesList: GraphData['nodes'] = visibleNotes.map(n => ({ id: n.id, title: n.title, type: 'note', folderId: n.folder_id }));
-    const edgesList: GraphData['edges'] = [];
-    visibleNotes.forEach(note => {
-      const matches = note.content.match(/\[\[([^\]]+)\]\]/g) ?? [];
-      matches.forEach(m => {
-        const target = m.slice(2, -2).split(/[|#]/)[0].trim();
-        const targetNote = visibleNotes.find(n => n.title.toLowerCase() === target.toLowerCase());
-        if (targetNote && targetNote.id !== note.id) {
-          edgesList.push({ from: note.id, to: targetNote.id });
-        }
-      });
-    });
+    // Explicit [[wikilink]] edges via the shared kernel (same directed,
+    // case-insensitive, self-skipping resolution the server graph uses).
+    const edgesList: GraphData['edges'] = buildWikilinkEdges(visibleNotes);
     // Merge semantic edges: only between visible notes, and never on a pair
     // that already has an explicit wikilink — solid beats dashed.
     const ids = new Set(nodesList.map(n => n.id));

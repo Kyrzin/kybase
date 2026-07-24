@@ -272,6 +272,7 @@ export function useNotes(cb: UseNotesCallbacks) {
   }, [onRenameDone]);
 
   const deleteNote = useCallback(async (id: string) => {
+    if (!confirm('Delete this note?')) return;
     await apiFetch(`/api/notes/${id}`, { method: 'DELETE' });
     setNotes(prev => {
       const next = prev.filter(n => n.id !== id);

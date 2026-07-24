@@ -44,6 +44,10 @@ export default function Sidebar({
   // Which folder is being moved, and the last cycle/error message to show.
   const [movingFolderId, setMovingFolderId] = useState<string | null>(null);
   const [moveError, setMoveError] = useState<string | null>(null);
+  // Kebab menu: which folder's actions dropdown is open, anchored at a fixed
+  // screen position so the tree's overflow scroll can't clip it.
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const menuFolder = menu ? folders.find(f => f.id === menu.id) ?? null : null;
 
   // Descendants of the folder being moved — invalid targets (would form a
   // cycle). Client-side guard; the server rejects cycles too (second line).
@@ -96,12 +100,15 @@ export default function Sidebar({
                     rootLabel="— To root —"
                   />
                 ) : (
-                  <>
-                    <button className="tree-action" title="New note in folder" onClick={e => { e.stopPropagation(); createNote(folder.id); }}>{Icons.plus}</button>
-                    <button className="tree-action" title="New subfolder" onClick={e => { e.stopPropagation(); createFolder(folder.id); }}>{Icons.newFolder}</button>
-                    <button className="tree-action" title="Move folder" onClick={e => { e.stopPropagation(); setMoveError(null); setMovingFolderId(folder.id); }}>{Icons.move}</button>
-                    <button className="tree-action delete" title="Delete folder" onClick={e => { e.stopPropagation(); deleteFolder(folder.id); }}>{Icons.trash}</button>
-                  </>
+                  <button
+                    className={`tree-action ${menu?.id === folder.id ? 'active' : ''}`}
+                    title="Folder actions"
+                    onClick={e => {
+                      e.stopPropagation();
+                      const r = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
+                      setMenu(menu?.id === folder.id ? null : { id: folder.id, x: r.right, y: r.bottom });
+                    }}
+                  >{Icons.more}</button>
                 )}
               </div>
               {movingFolderId === folder.id && moveError && (
@@ -172,6 +179,35 @@ export default function Sidebar({
           )}
         </div>
       </div>
+
+      {/* Folder actions dropdown (fixed, so the tree's scroll can't clip it) */}
+      {menu && menuFolder && (
+        <>
+          <div onClick={() => setMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 90 }} />
+          <div
+            role="menu"
+            style={{ position: 'fixed', top: menu.y + 4, left: Math.max(8, menu.x - 168), zIndex: 100, minWidth: 168, background: 'rgba(30,30,46,0.98)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '1px solid #45475a', borderRadius: 8, padding: 4, boxShadow: '0 12px 32px rgba(0,0,0,0.55)' }}
+          >
+            {([
+              { icon: Icons.plus,      label: 'New note',      danger: false, run: () => createNote(menu.id) },
+              { icon: Icons.newFolder, label: 'New subfolder',  danger: false, run: () => createFolder(menu.id) },
+              { icon: Icons.move,      label: 'Move folder',    danger: false, run: () => { setMoveError(null); setMovingFolderId(menu.id); } },
+              { icon: Icons.trash,     label: 'Delete folder',  danger: true,  run: () => deleteFolder(menu.id) },
+            ] as const).map(item => (
+              <button
+                key={item.label}
+                onClick={() => { const run = item.run; setMenu(null); run(); }}
+                style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%', background: 'none', border: 'none', color: item.danger ? '#f38ba8' : '#cdd6f4', fontSize: 13, fontFamily: 'inherit', padding: '7px 10px', borderRadius: 6, cursor: 'pointer', textAlign: 'left' }}
+                onMouseEnter={e => { (e.currentTarget as HTMLButtonElement).style.background = '#313244'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLButtonElement).style.background = 'none'; }}
+              >
+                <span style={{ display: 'flex', width: 14, justifyContent: 'center', flexShrink: 0 }}>{item.icon}</span>
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
     </>
   );
 }

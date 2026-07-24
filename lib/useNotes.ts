@@ -297,11 +297,31 @@ export function useNotes(cb: UseNotesCallbacks) {
     onMoveDone();
   }, [activeNoteId, onMoveDone]);
 
+  // Re-parent a folder. The Sidebar already hides the folder's own subtree
+  // from the target picker, so a 400 (server's cycle guard) is a fallback,
+  // not the expected path — on it we leave state untouched and return a
+  // message for the caller to show. Returns null on success.
+  const moveFolder = useCallback(async (id: string, parentId: string | null): Promise<string | null> => {
+    const res = await apiFetch(`/api/folders/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ parent_id: parentId }),
+    });
+    if (!res.ok) {
+      return res.status === 400
+        ? "Can't move a folder into itself or one of its subfolders"
+        : 'Move failed';
+    }
+    setFolders(prev => prev.map(f => (f.id === id ? { ...f, parent_id: parentId } : f)));
+    // Reveal the folder in its new home (expandAncestors includes parentId itself).
+    if (parentId) expandAncestors(parentId, folders);
+    return null;
+  }, [folders, expandAncestors]);
+
   return {
     notes, setNotes, folders, setFolders, loading, activeNote, activeNoteId, setActiveNoteId,
     editMode, setEditMode, editContent, setEditContent, editTitle, setEditTitle,
     expandedFolders, toggleFolder, expandAncestors,
     flushSave, selectNote, saveNote, saveTags, addTag, removeTag,
-    createNote, createFolder, deleteFolder, renameFolder, deleteNote, moveNote,
+    createNote, createFolder, deleteFolder, renameFolder, deleteNote, moveNote, moveFolder,
   };
 }

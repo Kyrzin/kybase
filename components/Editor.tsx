@@ -7,6 +7,7 @@
 import { useRef, useCallback } from 'react';
 import type { Note, Folder } from '@/lib/types';
 import { Icons } from './Icons';
+import FolderPicker from './FolderPicker';
 import { parseMarkdown, renderWithWikilinks } from '@/lib/markdown';
 
 type WikilinkPreview = { x: number; y: number; title: string; excerpt: string } | null;
@@ -150,16 +151,12 @@ export default function Editor(p: {
                   </div>
                   <div className="sep" />
                   {movingNote ? (
-                    <select
-                      autoFocus
-                      defaultValue={activeNote.folder_id ?? ''}
-                      onBlur={() => setMovingNote(false)}
-                      onChange={e => moveNote(e.target.value || null)}
-                      style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 4, color: '#cdd6f4', fontSize: 12, padding: '2px 6px', cursor: 'pointer' }}
-                    >
-                      <option value="">— No folder —</option>
-                      {folders.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
-                    </select>
+                    <FolderPicker
+                      folders={folders}
+                      value={activeNote.folder_id}
+                      onPick={moveNote}
+                      onCancel={() => setMovingNote(false)}
+                    />
                   ) : (
                     <button title="Move to folder" onClick={() => setMovingNote(true)} style={{ fontSize: 12, gap: 4 }}>
                       {Icons.folder}<span>Move</span>

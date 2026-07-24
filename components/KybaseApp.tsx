@@ -106,7 +106,7 @@ export default function KybaseApp() {
     editMode, setEditMode, editContent, setEditContent, editTitle, setEditTitle,
     expandedFolders, toggleFolder,
     selectNote, saveNote, addTag, removeTag,
-    createNote, createFolder, deleteFolder, renameFolder, deleteNote, moveNote,
+    createNote, createFolder, deleteFolder, renameFolder, deleteNote, moveNote, moveFolder,
   } = useNotes({ onNoteOpened, onMoveDone, onRenameDone, onTagInputConsumed, restoreFocus });
 
   // Scroll sidebar to active note after folders have expanded
@@ -301,6 +301,7 @@ export default function KybaseApp() {
             createFolder={createFolder}
             deleteNote={deleteNote}
             deleteFolder={deleteFolder}
+            moveFolder={moveFolder}
           />
 
           {/* Editor */}

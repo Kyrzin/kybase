@@ -46,7 +46,7 @@ export default function Sidebar({
   const [moveError, setMoveError] = useState<string | null>(null);
   // Kebab menu: which folder's actions dropdown is open, anchored at a fixed
   // screen position so the tree's overflow scroll can't clip it.
-  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [menu, setMenu] = useState<{ id: string; x: number; top: number; bottom: number } | null>(null);
   const menuFolder = menu ? folders.find(f => f.id === menu.id) ?? null : null;
 
   // Descendants of the folder being moved — invalid targets (would form a
@@ -106,7 +106,7 @@ export default function Sidebar({
                     onClick={e => {
                       e.stopPropagation();
                       const r = (e.currentTarget as HTMLButtonElement).getBoundingClientRect();
-                      setMenu(menu?.id === folder.id ? null : { id: folder.id, x: r.right, y: r.bottom });
+                      setMenu(menu?.id === folder.id ? null : { id: folder.id, x: r.right, top: r.top, bottom: r.bottom });
                     }}
                   >{Icons.more}</button>
                 )}
@@ -181,12 +181,20 @@ export default function Sidebar({
       </div>
 
       {/* Folder actions dropdown (fixed, so the tree's scroll can't clip it) */}
-      {menu && menuFolder && (
+      {menu && menuFolder && (() => {
+        // Flip the menu upward when there isn't room below (bottom folders were
+        // clipped by the viewport / taskbar, hiding Move/Delete).
+        const MENU_H = 172; // 4 items + padding
+        const openUp = typeof window !== 'undefined' && menu.bottom + MENU_H > window.innerHeight;
+        const vPos = openUp
+          ? { bottom: (typeof window !== 'undefined' ? window.innerHeight : 0) - menu.top + 4 }
+          : { top: menu.bottom + 4 };
+        return (
         <>
           <div onClick={() => setMenu(null)} style={{ position: 'fixed', inset: 0, zIndex: 90 }} />
           <div
             role="menu"
-            style={{ position: 'fixed', top: menu.y + 4, left: Math.max(8, menu.x - 168), zIndex: 100, minWidth: 168, background: 'rgba(30,30,46,0.98)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '1px solid #45475a', borderRadius: 8, padding: 4, boxShadow: '0 12px 32px rgba(0,0,0,0.55)' }}
+            style={{ position: 'fixed', ...vPos, left: Math.max(8, menu.x - 168), zIndex: 100, minWidth: 168, background: 'rgba(30,30,46,0.98)', backdropFilter: 'blur(12px)', WebkitBackdropFilter: 'blur(12px)', border: '1px solid #45475a', borderRadius: 8, padding: 4, boxShadow: '0 12px 32px rgba(0,0,0,0.55)' }}
           >
             {([
               { icon: Icons.plus,      label: 'New note',      danger: false, run: () => createNote(menu.id) },
@@ -207,7 +215,8 @@ export default function Sidebar({
             ))}
           </div>
         </>
-      )}
+        );
+      })()}
     </>
   );
 }

@@ -8,6 +8,14 @@
   <strong>A personal, self-hosted knowledge base that your AI agent uses as native, persistent memory.</strong>
 </p>
 
+<p align="center">
+  <a href="https://github.com/Kyrzin/kybase/actions/workflows/ci.yml"><img src="https://github.com/Kyrzin/kybase/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/Kyrzin/kybase/releases"><img src="https://img.shields.io/github/v/release/Kyrzin/kybase" alt="Release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"></a>
+  <img src="https://img.shields.io/badge/MCP-Streamable%20HTTP-8B5CF6" alt="MCP: Streamable HTTP">
+  <img src="https://img.shields.io/badge/100%25-local-success" alt="100% local">
+</p>
+
 ---
 
 Kybase is a complete, self-contained Markdown notes application and MCP (Model Context Protocol) server.

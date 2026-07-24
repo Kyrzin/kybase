@@ -140,6 +140,90 @@ describe('get_note', () => {
   });
 });
 
+// Titles in a real vault are long and composite, so an agent rarely reproduces
+// one verbatim: get_note(title=...) resolves exact, then prefix, then substring.
+describe('get_note title fallback', () => {
+  /** Serve note rows only for the given ilike patterns; everything else (folders, hints) is empty. */
+  function notesMatching(byPattern: Record<string, Record<string, unknown>[]>) {
+    return async (sql: string, params: unknown[]) => {
+      if (!String(sql).includes('from notes where title ilike')) return [];
+      return byPattern[String(params[0])] ?? [];
+    };
+  }
+
+  it('keeps an exact match authoritative and skips the fallbacks entirely', async () => {
+    queryOne.mockResolvedValue({ id: '1', title: 'Exact', content: 'hi' });
+    await call('get_note', { title: 'Exact' });
+    const widened = query.mock.calls.filter(([sql]) => String(sql).includes('from notes where title ilike'));
+    expect(widened).toHaveLength(0);
+  });
+
+  it('resolves a unique prefix to that note', async () => {
+    queryOne.mockResolvedValue(null);
+    query.mockImplementation(notesMatching({
+      'Kybase — открытые пункты%': [{ id: 'n1', title: 'Kybase — открытые пункты и идеи', content: 'body' }],
+    }));
+    const out = await call('get_note', { title: 'Kybase — открытые пункты' }) as Record<string, unknown>;
+    expect(out.id).toBe('n1');
+    expect(out.content).toBe('body');
+  });
+
+  it('returns the candidate list instead of an error string when the prefix is ambiguous', async () => {
+    queryOne.mockResolvedValue(null);
+    query.mockImplementation(notesMatching({
+      'Kybase%': [
+        { id: 'n1', title: 'Kybase — A', content: 'a' },
+        { id: 'n2', title: 'Kybase — B', content: 'b' },
+      ],
+    }));
+    const err = await callExpectingError('get_note', { title: 'Kybase' });
+    expect(err).toContain('matches 2 notes');
+    expect(err).toContain('n1');
+    expect(err).toContain('Kybase — B');
+  });
+
+  it('falls through to a substring match when nothing starts with the title', async () => {
+    queryOne.mockResolvedValue(null);
+    query.mockImplementation(notesMatching({
+      '%Zoho MCP%': [{ id: 'n3', title: 'Хэндофф проектному агенту: Zoho MCP (эталон)', content: 'c' }],
+    }));
+    const out = await call('get_note', { title: 'Zoho MCP' }) as Record<string, unknown>;
+    expect(out.id).toBe('n3');
+  });
+
+  it('suggests the closest titles on a total miss', async () => {
+    queryOne.mockResolvedValue(null);
+    query.mockImplementation(async (sql: string) =>
+      String(sql).includes('select title from notes')
+        ? [{ title: 'Kybase — фидбэк по MCP-инструментам' }]
+        : []);
+    const err = await callExpectingError('get_note', { title: 'Kybase фидбэк отсутствующий' });
+    expect(err).toContain('Note not found');
+    expect(err).toContain('Closest titles');
+    expect(err).toContain('Kybase — фидбэк по MCP-инструментам');
+    expect(err).toContain('search_notes');
+  });
+
+  it('escapes wildcards in the widened patterns too', async () => {
+    queryOne.mockResolvedValue(null);
+    query.mockImplementation(notesMatching({}));
+    await callExpectingError('get_note', { title: '50%_off' });
+    const patterns = query.mock.calls
+      .filter(([sql]) => String(sql).includes('from notes where title ilike'))
+      .map(([, params]) => (params as unknown[])[0]);
+    expect(patterns).toEqual(['50\\%\\_off%', '%50\\%\\_off%']);
+  });
+
+  it('applies the same resolution in get_note_with_links', async () => {
+    queryOne.mockResolvedValue(null);
+    query.mockImplementation(notesMatching({
+      'Хэндофф%': [{ id: 'n9', title: 'Хэндофф проектному агенту: Zoho MCP', content: 'no links here' }],
+    }));
+    const out = await call('get_note_with_links', { title: 'Хэндофф' }) as Record<string, unknown>;
+    expect((out.note as Record<string, unknown>).id).toBe('n9');
+  });
+});
+
 describe('create_note', () => {
   it('inserts and kicks off background indexing', async () => {
     queryOne.mockResolvedValue({ id: 'new-id', title: 'T', content: 'C' });

@@ -14,6 +14,63 @@ function escapeLike(s: string): string {
   return s.replace(/[%_\\]/g, (c) => `\\${c}`);
 }
 
+// get_note(title=...) is the shortcut past search_notes, but real titles are long
+// and composite ("2026-07-24 — Kybase: Move-folder + UX-полировка сайдбара"), and
+// an agent almost never reproduces one verbatim from memory. Exact-only matching
+// made that shortcut a coin flip: title "Kybase" returned a bare "Note not found"
+// while seven notes started with "Kybase — ". An exact (case-insensitive) hit
+// still wins outright; only when there is none do we widen to prefix, then
+// substring — resolving when exactly one note matches and listing the candidates
+// when several do. Wikilink resolution stays exact: a fuzzy match there would
+// wire up an edge the author never wrote.
+const TITLE_CANDIDATE_LIMIT = 10;
+const TITLE_HINT_LIMIT = 5;
+
+type TitleCandidate = { id: string; title: string };
+
+/** Titles sharing a significant word with the query — a "did you mean" for a total miss. */
+async function nearestTitles(title: string): Promise<string[]> {
+  const words = title.split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= 4).slice(0, TITLE_HINT_LIMIT);
+  if (!words.length) return [];
+  const params: unknown[] = words.map((w) => `%${escapeLike(w)}%`);
+  params.push(TITLE_HINT_LIMIT);
+  const rows = await query<{ title: string }>(
+    `select title from notes where ${words.map((_, i) => `title ilike $${i + 1}`).join(' or ')}
+     order by updated_at desc limit $${params.length}`,
+    params
+  );
+  return rows.map((r) => r.title);
+}
+
+/** Resolve a note by title: exact, then prefix, then substring. Throws if ambiguous or missing. */
+async function findNoteByTitle<T>(title: string, cols: string): Promise<T> {
+  const escaped = escapeLike(title);
+  const exact = await queryOne<T>(`select ${cols} from notes where title ilike $1`, [escaped]);
+  if (exact) return exact;
+
+  for (const pattern of [`${escaped}%`, `%${escaped}%`]) {
+    const rows = await query<T & TitleCandidate>(
+      `select ${cols} from notes where title ilike $1 order by length(title), updated_at desc limit $2`,
+      [pattern, TITLE_CANDIDATE_LIMIT]
+    );
+    if (rows.length === 1) return rows[0];
+    if (rows.length > 1) {
+      const candidates = rows.map(({ id, title: t }) => ({ id, title: t }));
+      throw new Error(
+        `"${title}" matches ${rows.length} notes — call get_note again with a full title or an id:\n` +
+        JSON.stringify(candidates, null, 2)
+      );
+    }
+  }
+
+  const hints = await nearestTitles(title);
+  throw new Error(
+    `Note not found: no title matches "${title}" exactly, by prefix, or by substring.` +
+    (hints.length ? ` Closest titles: ${JSON.stringify(hints)}.` : '') +
+    ' Use search_notes to find a note by content.'
+  );
+}
+
 // A note's full content used to go out unconditionally — a ~60k-char note
 // (~25k+ tokens, worse for dense Cyrillic) hard-fails the MCP host's
 // response-size limit with no way to retrieve the rest. 20000 chars keeps
@@ -127,8 +184,10 @@ export function createMcpServer(): McpServer {
   // ── get_note ─────────────────────────────────────────────────────────────
   server.tool(
     'get_note',
-    'Get full note content by id or title (case-insensitive). Large notes are windowed: content ' +
-    `is capped at ${DEFAULT_CONTENT_LIMIT} chars by default (see limit/offset) — check ` +
+    'Get full note content by id or title. Title matching is case-insensitive and forgiving: an ' +
+    'exact match wins, otherwise it falls back to prefix then substring, so a unique partial title ' +
+    'resolves. An ambiguous title returns the candidate list (id + title) to retry with. Large ' +
+    `notes are windowed: content is capped at ${DEFAULT_CONTENT_LIMIT} chars by default (see limit/offset) — check ` +
     'content_truncated and content_total_length in the response, and pass next_offset back as ' +
     '`offset` to fetch the rest.',
     {
@@ -141,12 +200,12 @@ export function createMcpServer(): McpServer {
     async ({ id, title, offset, limit }) => {
       if (!id && !title) throw new Error('Provide either id or title');
       const cols = 'id, title, content, folder_id, tags, created_at, updated_at';
-      // escapeLike: ilike here means "case-insensitive exact title", so
-      // %/_ in a real title must not act as wildcards and match another note.
+      // findNoteByTitle escapes %/_ at every stage, so wildcards in a real
+      // title can't widen the match beyond the step being attempted.
       const [data, paths] = await Promise.all([
         id
           ? queryOne<{ content: string; folder_id: string | null }>(`select ${cols} from notes where id = $1`, [id])
-          : queryOne<{ content: string; folder_id: string | null }>(`select ${cols} from notes where title ilike $1`, [escapeLike(title!)]),
+          : findNoteByTitle<{ content: string; folder_id: string | null }>(title!, cols),
         folderPathMap(),
       ]);
       if (!data) throw new Error('Note not found');
@@ -451,7 +510,8 @@ export function createMcpServer(): McpServer {
     'get_note_with_links',
     'Get a note and automatically resolve all [[wikilinks]] inside it (1 level deep). Returns the ' +
     'main note plus the content of every linked note found in the knowledge base. Unresolved links ' +
-    `(notes not found) are listed separately. The main note's content is windowed like get_note ` +
+    `(notes not found) are listed separately. The main note is resolved by title exactly like ` +
+    `get_note (exact, then prefix, then substring) and its content is windowed the same way ` +
     `(limit/offset, default ${DEFAULT_CONTENT_LIMIT} chars); each linked note is capped at ` +
     `${LINKED_NOTE_CONTENT_LIMIT} chars — call get_note on its id for the full text.`,
     {
@@ -470,8 +530,7 @@ export function createMcpServer(): McpServer {
         id
           ? queryOne<{ id: string; title: string; content: string; folder_id: string | null }>(
               `select ${cols} from notes where id = $1`, [id])
-          : queryOne<{ id: string; title: string; content: string; folder_id: string | null }>(
-              `select ${cols} from notes where title ilike $1`, [escapeLike(title!)]),
+          : findNoteByTitle<{ id: string; title: string; content: string; folder_id: string | null }>(title!, cols),
         folderPathMap(),
       ]);
       if (!note) throw new Error('Note not found');

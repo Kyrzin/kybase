@@ -21,11 +21,20 @@ vi.mock('./db', () => ({
 const textSearch = vi.fn();
 const semanticSearch = vi.fn();
 const hybridSearch = vi.fn();
-vi.mock('./search', () => ({
-  textSearch: (...a: unknown[]) => textSearch(...a),
-  semanticSearch: (...a: unknown[]) => semanticSearch(...a),
-  hybridSearch: (...a: unknown[]) => hybridSearch(...a),
-}));
+const bestSemanticScore = vi.fn();
+vi.mock('./search', async () => {
+  const actual = await vi.importActual<typeof import('./search')>('./search');
+  return {
+    textSearch: (...a: unknown[]) => textSearch(...a),
+    semanticSearch: (...a: unknown[]) => semanticSearch(...a),
+    hybridSearch: (...a: unknown[]) => hybridSearch(...a),
+    bestSemanticScore: (...a: unknown[]) => bestSemanticScore(...a),
+    makeExcerpt: actual.makeExcerpt,
+  };
+});
+
+const getMinSimilarity = vi.fn();
+vi.mock('./embeddings', () => ({ getMinSimilarity: (...a: unknown[]) => getMinSimilarity(...a) }));
 
 const indexNoteAsync = vi.fn();
 vi.mock('./indexing', () => ({ indexNoteAsync: (...a: unknown[]) => indexNoteAsync(...a) }));
@@ -70,6 +79,8 @@ beforeEach(() => {
   textSearch.mockReset().mockResolvedValue([]);
   semanticSearch.mockReset().mockResolvedValue([]);
   hybridSearch.mockReset().mockResolvedValue([]);
+  bestSemanticScore.mockReset().mockResolvedValue(null);
+  getMinSimilarity.mockReset().mockResolvedValue(0.55);
   indexNoteAsync.mockReset();
   getSemanticEdges.mockReset().mockResolvedValue([]);
 });
@@ -186,13 +197,46 @@ describe('update_note', () => {
 });
 
 describe('search_notes', () => {
+  const noFilters = { folderId: undefined, tag: undefined, updatedAfter: undefined, updatedBefore: undefined };
+
   it('routes by type', async () => {
     await call('search_notes', { query: 'q', type: 'text' });
-    expect(textSearch).toHaveBeenCalledWith('q', 5);
+    expect(textSearch).toHaveBeenCalledWith('q', 5, noFilters);
     await call('search_notes', { query: 'q', type: 'semantic', limit: 3 });
-    expect(semanticSearch).toHaveBeenCalledWith('q', 3);
+    expect(semanticSearch).toHaveBeenCalledWith('q', 3, noFilters);
     await call('search_notes', { query: 'q' }); // default hybrid
-    expect(hybridSearch).toHaveBeenCalledWith('q', 5);
+    expect(hybridSearch).toHaveBeenCalledWith('q', 5, noFilters);
+  });
+
+  it('passes folder_id/tag/updated_after/updated_before through as filters', async () => {
+    await call('search_notes', {
+      query: 'q', type: 'text',
+      folder_id: '11111111-1111-4111-8111-111111111111',
+      tag: 'work', updated_after: '2026-01-01', updated_before: '2026-12-31',
+    });
+    expect(textSearch).toHaveBeenCalledWith('q', 5, {
+      folderId: '11111111-1111-4111-8111-111111111111',
+      tag: 'work', updatedAfter: '2026-01-01', updatedBefore: '2026-12-31',
+    });
+  });
+
+  it('an empty text-search result stays a bare array — no diagnostics', async () => {
+    textSearch.mockResolvedValue([]);
+    const out = await call('search_notes', { query: 'q', type: 'text' });
+    expect(out).toEqual([]);
+  });
+
+  it('an empty semantic/hybrid result is wrapped with threshold/best_score/pending_embeddings', async () => {
+    semanticSearch.mockResolvedValue([]);
+    bestSemanticScore.mockResolvedValue(0.31);
+    query.mockResolvedValue([{ count: 2 }]); // pending_embeddings count
+    const out = await call('search_notes', { query: 'q', type: 'semantic' }) as {
+      results: unknown[]; threshold: number; best_score: number; pending_embeddings: number;
+    };
+    expect(out.results).toEqual([]);
+    expect(out.threshold).toBe(0.55);
+    expect(out.best_score).toBe(0.31);
+    expect(out.pending_embeddings).toBe(2);
   });
 });
 
@@ -227,14 +271,43 @@ describe('folders', () => {
 });
 
 describe('get_backlinks', () => {
-  it('escapes the title and keeps only exact wikilink matches', async () => {
-    query.mockResolvedValue([
-      { id: '1', title: 'Real', content: 'see [[Target]] here' },
-      { id: '2', title: 'False', content: 'mentions Target but no link' },
-    ]);
-    const out = await call('get_backlinks', { title: 'Target' }) as { id: string }[];
+  it('escapes the title, keeps only exact wikilink matches, and returns a snippet by default', async () => {
+    query
+      .mockResolvedValueOnce([
+        { id: '1', title: 'Real', content: 'see [[Target]] here' },
+        { id: '2', title: 'False', content: 'mentions Target but no link' },
+      ])
+      .mockResolvedValueOnce([]); // folderPathMap's folders query
+    const out = await call('get_backlinks', { title: 'Target' }) as {
+      results: { id: string; content?: string; snippet?: string }[]; total: number;
+    };
     expect(query.mock.calls[0][1]).toEqual(['%[[Target%']);
-    expect(out.map(n => n.id)).toEqual(['1']); // precise filter drops the false positive
+    expect(out.results.map(n => n.id)).toEqual(['1']); // precise filter drops the false positive
+    expect(out.total).toBe(1);
+    expect(out.results[0].content).toBeUndefined();
+    expect(out.results[0].snippet).toContain('Target');
+  });
+
+  it('include_content:true returns full content instead of a snippet', async () => {
+    query
+      .mockResolvedValueOnce([{ id: '1', title: 'Real', content: 'see [[Target]] here' }])
+      .mockResolvedValueOnce([]);
+    const out = await call('get_backlinks', { title: 'Target', include_content: true }) as {
+      results: { content?: string; snippet?: string }[];
+    };
+    expect(out.results[0].content).toBe('see [[Target]] here');
+    expect(out.results[0].snippet).toBeUndefined();
+  });
+
+  it('paginates with limit/offset and reports next_offset', async () => {
+    const notes = Array.from({ length: 5 }, (_, i) => ({ id: String(i), title: `N${i}`, content: '[[Target]]' }));
+    query.mockResolvedValueOnce(notes).mockResolvedValueOnce([]);
+    const out = await call('get_backlinks', { title: 'Target', limit: 2, offset: 1 }) as {
+      results: { id: string }[]; total: number; next_offset?: number;
+    };
+    expect(out.results.map(n => n.id)).toEqual(['1', '2']);
+    expect(out.total).toBe(5);
+    expect(out.next_offset).toBe(3);
   });
 });
 

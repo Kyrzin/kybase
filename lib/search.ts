@@ -15,11 +15,66 @@ export type SearchResult = {
   // order — it is NOT a relevance measure (see rrfMerge).
   text_score?: number;
   semantic_score?: number;
+  // Which pass(es) actually matched this note — derivable from which of
+  // text_score/semantic_score are present, but spelled out explicitly so an
+  // agent doesn't have to infer it. A result present in only one pass lost
+  // out on the other pass's rank contribution entirely (RRF's known
+  // single-arm penalty), which this makes visible instead of implicit.
+  matched_by?: ('text_score' | 'semantic_score')[];
 };
 
 const RRF_K = 60;
 
 const EXCERPT_LENGTH = 300;
+
+export type SearchFilters = {
+  folderId?: string;
+  tag?: string;
+  updatedAfter?: string;
+  updatedBefore?: string;
+};
+
+// search_notes_fts / match_chunks don't carry folder_id or updated_at, and
+// giving them extra params would mean a migration for what's a rarely-used,
+// small-vault filter. Instead: resolve the filter to an id set once, overfetch
+// candidates from the existing RPCs, then keep only ids in the set. Cheap and
+// exact as long as the vault is a few hundred notes, not exact at huge scale
+// (a heavily-filtered query against a huge unfiltered candidate pool could
+// still come back short) — acceptable for what this targets.
+const OVERFETCH_FACTOR = 8;
+const OVERFETCH_CAP = 300;
+
+function hasFilters(f?: SearchFilters): f is SearchFilters {
+  return !!f && (f.folderId !== undefined || f.tag !== undefined || f.updatedAfter !== undefined || f.updatedBefore !== undefined);
+}
+
+async function filteredNoteIds(filters: SearchFilters): Promise<Set<string>> {
+  const conds: string[] = [];
+  const params: unknown[] = [];
+  if (filters.folderId)      { params.push(filters.folderId);      conds.push(`folder_id = $${params.length}`); }
+  if (filters.tag)           { params.push([filters.tag]);         conds.push(`tags @> $${params.length}`); }
+  if (filters.updatedAfter)  { params.push(filters.updatedAfter);  conds.push(`updated_at >= $${params.length}`); }
+  if (filters.updatedBefore) { params.push(filters.updatedBefore); conds.push(`updated_at <= $${params.length}`); }
+  const rows = await dbQuery<{ id: string }>(
+    `select id from notes where ${conds.join(' and ')}`,
+    params
+  );
+  return new Set(rows.map((r) => r.id));
+}
+
+async function applyFilters(
+  results: SearchResult[],
+  limit: number,
+  filters: SearchFilters | undefined
+): Promise<SearchResult[]> {
+  if (!hasFilters(filters)) return results.slice(0, limit);
+  const allowed = await filteredNoteIds(filters);
+  return results.filter((r) => allowed.has(r.id)).slice(0, limit);
+}
+
+function overfetchLimit(limit: number, filters: SearchFilters | undefined): number {
+  return hasFilters(filters) ? Math.min(OVERFETCH_CAP, limit * OVERFETCH_FACTOR) : limit;
+}
 
 /**
  * Build a short excerpt from note content.
@@ -69,7 +124,12 @@ export function rrfMerge(lists: NamedResultList[]): SearchResult[] {
 
   return [...scoreMap.values()]
     .sort((a, b) => b.rrfScore - a.rrfScore)
-    .map(({ result, rrfScore, extra }) => ({ ...result, ...extra, score: rrfScore }));
+    .map(({ result, rrfScore, extra }) => ({
+      ...result,
+      ...extra,
+      score: rrfScore,
+      matched_by: Object.keys(extra) as ('text_score' | 'semantic_score')[],
+    }));
 }
 
 type FtsRow = { id: string; title: string; tags: string[]; rank: number; headline: string };
@@ -81,32 +141,35 @@ type NoteRow = { id: string; title: string; content: string; tags: string[] };
  * substring matching when FTS finds nothing — partial words and code
  * fragments like "kmv" or "tsconfig" don't survive stemming.
  */
-export async function textSearch(query: string, limit = 10): Promise<SearchResult[]> {
+export async function textSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
+  const fetchLimit = overfetchLimit(limit, filters);
   const rows = await dbQuery<FtsRow>(
     'select * from search_notes_fts($1, $2)',
-    [query, limit]
+    [query, fetchLimit]
   );
-  if (rows.length === 0) return substringSearch(query, limit);
+  if (rows.length === 0) return substringSearch(query, limit, filters);
 
   // n.rank is Postgres's actual ts_rank for this query — a genuine
   // relevance signal, unlike the positional score substringSearch falls
   // back to below (there is no rank for a plain substring match).
-  return rows.map((n) => ({
+  const results = rows.map((n) => ({
     id:      n.id,
     title:   n.title,
     excerpt: n.headline.replace(/<\/?b>/g, ''),
     tags:    n.tags,
     score:   n.rank,
   }));
+  return applyFilters(results, limit, filters);
 }
 
 /** Title matches rank above content matches (queried separately, merged in order). */
-async function substringSearch(query: string, limit: number): Promise<SearchResult[]> {
+async function substringSearch(query: string, limit: number, filters?: SearchFilters): Promise<SearchResult[]> {
   const cols = 'id, title, content, tags';
   const escapedQuery = query.replace(/[%_]/g, '\\$&');
+  const fetchLimit = overfetchLimit(limit, filters);
   const [byTitle, byContent] = await Promise.all([
-    dbQuery<NoteRow>(`select ${cols} from notes where title ilike $1 limit $2`, [`%${escapedQuery}%`, limit]),
-    dbQuery<NoteRow>(`select ${cols} from notes where content ilike $1 limit $2`, [`%${escapedQuery}%`, limit]),
+    dbQuery<NoteRow>(`select ${cols} from notes where title ilike $1 limit $2`, [`%${escapedQuery}%`, fetchLimit]),
+    dbQuery<NoteRow>(`select ${cols} from notes where content ilike $1 limit $2`, [`%${escapedQuery}%`, fetchLimit]),
   ]);
 
   const seen = new Set<string>();
@@ -117,13 +180,14 @@ async function substringSearch(query: string, limit: number): Promise<SearchResu
     merged.push(row);
   }
 
-  return merged.slice(0, limit).map((n, i) => ({
+  const results = merged.map((n, i) => ({
     id:      n.id,
     title:   n.title,
     excerpt: makeExcerpt(n.content, query),
     tags:    n.tags,
     score:   1 / (i + 1),
   }));
+  return applyFilters(results, limit, filters);
 }
 
 /**
@@ -140,18 +204,19 @@ async function substringSearch(query: string, limit: number): Promise<SearchResu
  * semantic_score at all) when it entered via the text pass — that's why the
  * combined output shows notes a pure-semantic pass would have dropped.
  */
-export async function semanticSearch(query: string, limit = 10): Promise<SearchResult[]> {
+export async function semanticSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
   const [embedding, minSimilarity] = await Promise.all([
     getEmbedding(query, 'query'),
     getMinSimilarity(),
   ]);
 
+  const fetchLimit = overfetchLimit(limit, filters);
   const data = await dbQuery(
     'select * from match_chunks($1::vector, $2, $3)',
-    [toVector(embedding), limit, minSimilarity]
+    [toVector(embedding), fetchLimit, minSimilarity]
   );
 
-  return data.map((n: Record<string, unknown>) => {
+  const results = data.map((n: Record<string, unknown>) => {
     const heading = n.heading as string | null;
     const excerpt = makeExcerpt(n.chunk_content as string, query);
     return {
@@ -162,12 +227,28 @@ export async function semanticSearch(query: string, limit = 10): Promise<SearchR
       score:   n.similarity as number,
     };
   });
+  return applyFilters(results, limit, filters);
 }
 
-export async function hybridSearch(query: string, limit = 10): Promise<SearchResult[]> {
+/**
+ * Best chunk similarity ignoring the configured floor (call match_chunks with
+ * min_similarity=0). Lets a caller distinguish "nothing came close" from
+ * "just under the threshold" when a real semantic/hybrid search came back
+ * empty — a bare [] can't tell those apart.
+ */
+export async function bestSemanticScore(query: string): Promise<number | null> {
+  const embedding = await getEmbedding(query, 'query');
+  const [row] = await dbQuery<{ similarity: number }>(
+    'select similarity from match_chunks($1::vector, 1, 0)',
+    [toVector(embedding)]
+  );
+  return row?.similarity ?? null;
+}
+
+export async function hybridSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
   const [text, semantic] = await Promise.all([
-    textSearch(query, limit),
-    semanticSearch(query, limit),
+    textSearch(query, limit, filters),
+    semanticSearch(query, limit, filters),
   ]);
   return rrfMerge([
     { field: 'text_score', results: text },

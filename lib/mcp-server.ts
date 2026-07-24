@@ -3,7 +3,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { query, queryOne, withTransaction, isUniqueViolation } from './db';
-import { textSearch, semanticSearch, hybridSearch } from './search';
+import { textSearch, semanticSearch, hybridSearch, makeExcerpt, bestSemanticScore, type SearchResult } from './search';
+import { getMinSimilarity } from './embeddings';
 import { indexNoteAsync } from './indexing';
 import { extractAllWikilinks } from './wikilinks';
 import { buildGraph } from './graph-data';
@@ -24,6 +25,36 @@ const DEFAULT_CONTENT_LIMIT = 20_000;
 // can't blow the response budget by themselves. Call get_note on a specific
 // link for its full content.
 const LINKED_NOTE_CONTENT_LIMIT = 4_000;
+
+// A bare folder_id UUID tells an agent nothing — it had to call list_folders
+// and join client-side just to know where a note lives. Folder counts are
+// tiny, so building the full id->path map once per call (rather than a
+// per-row join) is cheap and handles nesting correctly.
+type FolderRow = { id: string; name: string; parent_id: string | null };
+
+async function folderPathMap(): Promise<Map<string, string>> {
+  const folders = await query<FolderRow>('select id, name, parent_id from folders');
+  const byId = new Map(folders.map((f) => [f.id, f]));
+  const paths = new Map<string, string>();
+  const resolve = (id: string): string => {
+    const cached = paths.get(id);
+    if (cached !== undefined) return cached;
+    const f = byId.get(id);
+    if (!f) return '';
+    const path = f.parent_id ? `${resolve(f.parent_id)}/${f.name}` : f.name;
+    paths.set(id, path);
+    return path;
+  };
+  folders.forEach((f) => resolve(f.id));
+  return paths;
+}
+
+function withFolderPath<T extends { folder_id: string | null }>(
+  row: T,
+  paths: Map<string, string>
+): T & { folder_path: string | null } {
+  return { ...row, folder_path: row.folder_id ? paths.get(row.folder_id) ?? null : null };
+}
 
 export function windowContent<T extends { content: string }>(
   note: T,
@@ -80,13 +111,16 @@ export function createMcpServer(): McpServer {
       if (folder_id) { params.push(folder_id); conds.push(`folder_id = $${params.length}`); }
       if (tag)       { params.push([tag]);     conds.push(`tags @> $${params.length}`); }
       params.push(limit);
-      const data = await query(
-        `select id, title, folder_id, tags, updated_at from notes
-         ${conds.length ? 'where ' + conds.join(' and ') : ''}
-         order by updated_at desc limit $${params.length}`,
-        params
-      );
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      const [data, paths] = await Promise.all([
+        query<{ id: string; title: string; folder_id: string | null; tags: string[]; updated_at: string }>(
+          `select id, title, folder_id, tags, updated_at from notes
+           ${conds.length ? 'where ' + conds.join(' and ') : ''}
+           order by updated_at desc limit $${params.length}`,
+          params
+        ),
+        folderPathMap(),
+      ]);
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data.map((n) => withFolderPath(n, paths)), null, 2) }] };
     }
   );
 
@@ -109,11 +143,14 @@ export function createMcpServer(): McpServer {
       const cols = 'id, title, content, folder_id, tags, created_at, updated_at';
       // escapeLike: ilike here means "case-insensitive exact title", so
       // %/_ in a real title must not act as wildcards and match another note.
-      const data = id
-        ? await queryOne<{ content: string }>(`select ${cols} from notes where id = $1`, [id])
-        : await queryOne<{ content: string }>(`select ${cols} from notes where title ilike $1`, [escapeLike(title!)]);
+      const [data, paths] = await Promise.all([
+        id
+          ? queryOne<{ content: string; folder_id: string | null }>(`select ${cols} from notes where id = $1`, [id])
+          : queryOne<{ content: string; folder_id: string | null }>(`select ${cols} from notes where title ilike $1`, [escapeLike(title!)]),
+        folderPathMap(),
+      ]);
       if (!data) throw new Error('Note not found');
-      return { content: [{ type: 'text' as const, text: JSON.stringify(windowContent(data, offset, limit), null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify(withFolderPath(windowContent(data, offset, limit), paths), null, 2) }] };
     }
   );
 
@@ -229,18 +266,46 @@ export function createMcpServer(): McpServer {
     'On hybrid results, `score` is rank fusion, not a relevance measure — use the per-hit ' +
     'text_score (FTS relevance) / semantic_score (raw cosine similarity) to judge how strong a ' +
     'match actually is; higher is more relevant within each field, but the two are not comparable ' +
-    'to each other.',
+    'to each other. Optional filters (folder_id, tag, updated_after/before) narrow to notes matching ' +
+    'ALL given ones. An empty semantic/hybrid result includes threshold/best_score/pending_embeddings ' +
+    'so you can tell "nothing this relevant exists" from "just under the threshold" from "embeddings ' +
+    'not generated yet" — a bare [] can\'t distinguish those.',
     {
-      query: z.string().min(1),
-      type:  z.enum(['text', 'semantic', 'hybrid']).default('hybrid'),
-      limit: z.number().int().min(1).max(50).default(5),
+      query:          z.string().min(1),
+      type:           z.enum(['text', 'semantic', 'hybrid']).default('hybrid'),
+      limit:          z.number().int().min(1).max(50).default(5),
+      folder_id:      z.string().uuid().optional().describe('Restrict to notes in this folder'),
+      tag:            z.string().optional().describe('Restrict to notes with this tag'),
+      updated_after:  z.string().optional().describe('ISO timestamp — only notes updated at or after this'),
+      updated_before: z.string().optional().describe('ISO timestamp — only notes updated at or before this'),
     },
-    async ({ query, type, limit }) => {
-      let results;
-      if      (type === 'semantic') results = await semanticSearch(query, limit);
-      else if (type === 'hybrid')   results = await hybridSearch(query, limit);
-      else                          results = await textSearch(query, limit);
-      return { content: [{ type: 'text' as const, text: JSON.stringify(results, null, 2) }] };
+    async ({ query: q, type, limit, folder_id, tag, updated_after, updated_before }) => {
+      const filters = { folderId: folder_id, tag, updatedAfter: updated_after, updatedBefore: updated_before };
+      let results: SearchResult[];
+      if      (type === 'semantic') results = await semanticSearch(q, limit, filters);
+      else if (type === 'hybrid')   results = await hybridSearch(q, limit, filters);
+      else                          results = await textSearch(q, limit, filters);
+
+      if (results.length > 0 || type === 'text') {
+        return { content: [{ type: 'text' as const, text: JSON.stringify(results, null, 2) }] };
+      }
+
+      const [threshold, bestScore, pendingRows] = await Promise.all([
+        getMinSimilarity(),
+        bestSemanticScore(q),
+        query<{ count: number }>('select count(*)::int as count from notes where embedding_pending = true'),
+      ]);
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            results,
+            threshold,
+            best_score: bestScore,
+            pending_embeddings: pendingRows[0]?.count ?? 0,
+          }, null, 2),
+        }],
+      };
     }
   );
 
@@ -333,13 +398,24 @@ export function createMcpServer(): McpServer {
   // ── get_backlinks ────────────────────────────────────────────────────────
   server.tool(
     'get_backlinks',
-    'Get all notes that contain [[Title]] wikilinks pointing to the given note.',
-    { title: z.string().min(1) },
-    async ({ title }) => {
-      const data = await query<{ id: string; title: string; content: string }>(
-        'select id, title, content from notes where content ilike $1',
-        [`%[[${escapeLike(title)}%`]
-      );
+    'Get notes that link to the given note via [[Title]] wikilinks. By default returns id/title/' +
+    'folder_path plus a short snippet around the link occurrence, not full content — pass ' +
+    'include_content:true for the full text of each (expensive if many notes link here; prefer the ' +
+    'default and call get_note on specific ids instead). Paginated like get_note.',
+    {
+      title:           z.string().min(1),
+      include_content: z.boolean().default(false),
+      limit:           z.number().int().min(1).max(200).default(50),
+      offset:          z.number().int().min(0).default(0),
+    },
+    async ({ title, include_content, limit, offset }) => {
+      const [data, paths] = await Promise.all([
+        query<{ id: string; title: string; content: string; folder_id: string | null }>(
+          'select id, title, content, folder_id from notes where content ilike $1',
+          [`%[[${escapeLike(title)}%`]
+        ),
+        folderPathMap(),
+      ]);
 
       // Precise filter: ilike is approximate, extractAllWikilinks is exact
       const backlinks = data.filter((n) =>
@@ -347,7 +423,26 @@ export function createMcpServer(): McpServer {
           (t) => t.toLowerCase() === title.toLowerCase()
         )
       );
-      return { content: [{ type: 'text' as const, text: JSON.stringify(backlinks, null, 2) }] };
+
+      const total = backlinks.length;
+      const page = backlinks.slice(offset, offset + limit);
+      const results = page.map((n) => {
+        const base = withFolderPath({ id: n.id, title: n.title, folder_id: n.folder_id }, paths);
+        return include_content
+          ? { ...base, content: n.content }
+          : { ...base, snippet: makeExcerpt(n.content, `[[${title}`, 200) };
+      });
+
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            results,
+            total,
+            ...(offset + limit < total ? { next_offset: offset + limit } : {}),
+          }, null, 2),
+        }],
+      };
     }
   );
 
@@ -371,11 +466,14 @@ export function createMcpServer(): McpServer {
 
       // Fetch the main note
       const cols = 'id, title, content, folder_id, tags, created_at, updated_at';
-      const note = id
-        ? await queryOne<{ id: string; title: string; content: string }>(
-            `select ${cols} from notes where id = $1`, [id])
-        : await queryOne<{ id: string; title: string; content: string }>(
-            `select ${cols} from notes where title ilike $1`, [escapeLike(title!)]);
+      const [note, paths] = await Promise.all([
+        id
+          ? queryOne<{ id: string; title: string; content: string; folder_id: string | null }>(
+              `select ${cols} from notes where id = $1`, [id])
+          : queryOne<{ id: string; title: string; content: string; folder_id: string | null }>(
+              `select ${cols} from notes where title ilike $1`, [escapeLike(title!)]),
+        folderPathMap(),
+      ]);
       if (!note) throw new Error('Note not found');
 
       // Extract all wikilink targets
@@ -388,17 +486,17 @@ export function createMcpServer(): McpServer {
       await Promise.all(
         linkTargets.map(async (target) => {
           if (target.toLowerCase() === note.title.toLowerCase()) return;
-          const linked = await queryOne<{ content: string }>(
+          const linked = await queryOne<{ content: string; folder_id: string | null }>(
             'select id, title, content, folder_id, tags, updated_at from notes where title ilike $1',
             [escapeLike(target)]
           );
-          if (linked) resolved.push(windowContent(linked, 0, LINKED_NOTE_CONTENT_LIMIT));
+          if (linked) resolved.push(withFolderPath(windowContent(linked, 0, LINKED_NOTE_CONTENT_LIMIT), paths));
           else        missing.push(target);
         })
       );
 
       const result = {
-        note: windowContent(note, offset, limit),
+        note: withFolderPath(windowContent(note, offset, limit), paths),
         linked_notes: resolved,
         unresolved_links: missing,
       };
@@ -409,12 +507,31 @@ export function createMcpServer(): McpServer {
   // ── get_graph ─────────────────────────────────────────────────────────────
   server.tool(
     'get_graph',
-    'Get the knowledge graph: all note nodes, directed edges from [[wikilinks]], and undirected ' +
-    'semantic_edges (embedding cosine similarity ≥ 0.75) between related notes that may lack explicit links. ' +
-    'The node titles are the complete dictionary of valid [[wikilink]] targets.',
-    {},
-    async () => {
-      const graph = await buildGraph();
+    'Get the knowledge graph: note nodes, directed edges from [[wikilinks]], and undirected ' +
+    'semantic_edges (embedding cosine similarity) between related notes that may lack explicit links. ' +
+    'Unfiltered, this returns the ENTIRE vault in one response — fine for small vaults, but it will ' +
+    'stop fitting in context as the vault grows. Scope it with folder_id (a subtree) or root_title+depth ' +
+    '(the neighborhood around one note) when you only need part of the graph. Node titles in the result ' +
+    'are valid [[wikilink]] targets — but only within whatever scope you asked for.',
+    {
+      folder_id:        z.string().uuid().optional()
+        .describe('Restrict to notes in this folder and its descendant folders'),
+      root_title:       z.string().optional()
+        .describe('Keep only nodes within `depth` wikilink-hops of this note (case-insensitive)'),
+      depth:            z.number().int().min(1).max(10).default(2)
+        .describe('Hop count for root_title; ignored without it'),
+      include_semantic: z.boolean().default(true).describe('Include semantic_edges at all'),
+      min_score:        z.number().min(0).max(1).default(0.75)
+        .describe('Cosine floor for semantic_edges — lower to see more (noisier) edges'),
+    },
+    async ({ folder_id, root_title, depth, include_semantic, min_score }) => {
+      const graph = await buildGraph({
+        folderId: folder_id,
+        rootTitle: root_title,
+        depth,
+        includeSemantic: include_semantic,
+        minScore: min_score,
+      });
       return { content: [{ type: 'text' as const, text: JSON.stringify(graph, null, 2) }] };
     }
   );

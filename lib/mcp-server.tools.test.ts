@@ -95,6 +95,18 @@ describe('tools/list', () => {
       'search_notes', 'update_folder', 'update_note',
     ]);
   });
+
+  // A `+`-concatenation of two interpolated template literals loses the left
+  // operand's trailing text in the Next build, which shipped a description
+  // reading "default 200004000 chars" to every agent. Keep the numbers apart.
+  it('states both content limits intelligibly', async () => {
+    const client = await connectClient();
+    const { tools } = await client.listTools();
+    const withLinks = tools.find((t) => t.name === 'get_note_with_links')!;
+    expect(withLinks.description).toContain('default 20000 chars');
+    expect(withLinks.description).toContain('capped at 4000 chars');
+    for (const t of tools) expect(t.description).not.toMatch(/\d{6,}/);
+  });
 });
 
 describe('list_notes', () => {

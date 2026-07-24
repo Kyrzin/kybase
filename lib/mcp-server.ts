@@ -508,12 +508,15 @@ export function createMcpServer(): McpServer {
   // ── get_note_with_links ──────────────────────────────────────────────────
   server.tool(
     'get_note_with_links',
+    // The tail below is ONE template literal on purpose: this Next build drops the
+    // trailing static text of a template literal that is `+`-concatenated with
+    // another interpolated one, which silently shipped "default 200004000 chars"
+    // to every agent. Keep the two limits inside a single literal.
     'Get a note and automatically resolve all [[wikilinks]] inside it (1 level deep). Returns the ' +
     'main note plus the content of every linked note found in the knowledge base. Unresolved links ' +
-    `(notes not found) are listed separately. The main note is resolved by title exactly like ` +
-    `get_note (exact, then prefix, then substring) and its content is windowed the same way ` +
-    `(limit/offset, default ${DEFAULT_CONTENT_LIMIT} chars); each linked note is capped at ` +
-    `${LINKED_NOTE_CONTENT_LIMIT} chars — call get_note on its id for the full text.`,
+    '(notes not found) are listed separately. The main note is resolved by title exactly like ' +
+    'get_note (exact, then prefix, then substring) and its content is windowed the same way ' +
+    `(limit/offset, default ${DEFAULT_CONTENT_LIMIT} chars); each linked note is capped at ${LINKED_NOTE_CONTENT_LIMIT} chars — call get_note on its id for the full text.`,
     {
       id:     z.string().uuid().optional(),
       title:  z.string().optional(),

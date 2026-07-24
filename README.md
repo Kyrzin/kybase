@@ -1,11 +1,5 @@
 <p align="center">
-  <img src="public/banner.png" alt="Kybase Banner" width="100%">
-</p>
-
-<h1 align="center">Kybase</h1>
-
-<p align="center">
-  <strong>A personal, self-hosted knowledge base that your AI agent uses as native, persistent memory.</strong>
+  <img src="public/readme/hero.svg" width="100%" alt="Kybase — self-hosted memory for AI agents: a markdown knowledge base you read and edit, and your agent never forgets. Next.js, PostgreSQL + pgvector, Ollama, MCP, one docker compose up.">
 </p>
 
 <p align="center">
@@ -16,14 +10,16 @@
   <img src="https://img.shields.io/badge/100%25-local-success" alt="100% local">
 </p>
 
----
+Your AI agent forgets everything between sessions. Kybase fixes that: a
+self-hosted Markdown knowledge base **you** browse and edit in the browser,
+that **Claude** uses as persistent memory over MCP. The agent writes notes as
+you work, links them with `[[wikilinks]]`, and finds them again next session —
+no re-onboarding, no lost decisions.
 
-Kybase is a complete, self-contained Markdown notes application and MCP (Model Context Protocol) server.
+Everything runs on your machine via Docker: PostgreSQL for notes,
+pgvector + Ollama for embeddings. **No SaaS, no accounts, 100% private.**
 
-* **For You:** A sleek web-based notes editor with wikilinks `[[Title]]`, an interactive visual knowledge graph, backlinks, and bilingual hybrid search.
-* **For Claude (Claude Code / Desktop):** A persistent memory vault that survives across chats, automatically growing and linking notes as you work.
-
-Everything runs locally on your machine via Docker: PostgreSQL for notes, pgvector + Ollama for embeddings. **No SaaS, no accounts, 100% private.**
+<!-- screenshots: graph spotlight PNG + demo GIF land here (public/readme/) -->
 
 ## Why Kybase?
 
@@ -32,32 +28,10 @@ a notes app, an MCP bridge, an embedding pipeline, and sync between them.
 Kybase is that whole stack as one `docker compose up`:
 
 - **MCP-native** — 13 tools (`search_notes`, `get_note_with_links`, `get_graph`, `get_backlinks`, CRUD for notes/folders) over Streamable HTTP, with instructions that teach the agent to interlink notes properly
-- **Local semantic search** — pgvector + Ollama embeddings, private by default; hybrid RRF fusion with bilingual full-text search
+- **Local semantic search** — pgvector + Ollama embeddings, private by default; hybrid RRF fusion with bilingual full-text search and chunked, excerpt-based results
 - **Agent-friendly graph** — explicit wikilink edges plus *semantic edges* computed from embedding similarity, so the agent discovers related notes that were never linked
-- **Zero external services** — app, Postgres+pgvector, and Ollama in one compose file; single-secret auth
-
-## Features
-
-- **Markdown notes with wikilinks** — `[[Title]]` links between notes, backlinks panel; renaming a note rewrites its wikilinks everywhere
-- **Graph view** — link edges plus semantic edges with a similarity slider
-- **Hybrid search** — RRF fusion of pgvector cosine similarity and bilingual FTS, chunked embeddings, excerpt-based results
-- **Workspace focus mode** — filter tree, graph, and search down to one top-level folder
-- **Pluggable embeddings** — Ollama (local, default), Google, or OpenAI, all 768-dim, switchable without schema changes
-
----
-
-## Stack
-
-| Layer | Tech |
-|-------|------|
-| Frontend | Next.js App Router, React 19 |
-| Database | PostgreSQL 16 + pgvector (direct `pg` connection) |
-| Embeddings | Ollama `embeddinggemma` (default, multilingual) / Google / OpenAI |
-| Search | RRF hybrid: pgvector HNSW cosine + bilingual FTS |
-| MCP | `@modelcontextprotocol/sdk` Streamable HTTP |
-| Auth | Single `KYBASE_SECRET` env var |
-
----
+- **A real notes app, not a black box** — web editor with backlinks, graph view with a similarity slider, workspace focus mode; renaming a note rewrites its wikilinks everywhere
+- **Zero external services** — app, Postgres+pgvector, and Ollama in one compose file; single-secret auth, revocable per-client OAuth tokens for MCP
 
 ## Quick Start (Docker)
 
@@ -107,7 +81,8 @@ The app exposes a Streamable HTTP MCP endpoint at `/api/mcp`.
 ```
 
 **claude.ai** — Settings → Connectors → Add custom connector, same URL
-(requires the instance to be reachable over HTTPS).
+(requires the instance to be reachable over HTTPS). Each client gets its own
+revocable OAuth token — see **Settings → Connected clients** in the web UI.
 
 Available tools: `list_notes`, `get_note`, `get_note_with_links`,
 `create_note`, `update_note`, `delete_note`, `search_notes`, `list_folders`,
@@ -117,18 +92,16 @@ The server ships with MCP instructions that teach the agent to search before
 writing and to add `[[wikilinks]]` to related notes — so the knowledge graph
 grows as the agent uses it, instead of accumulating orphan notes.
 
----
+## Stack
 
-## Local development
-
-```bash
-# Postgres only (app runs on the host)
-docker compose up -d db
-cp .env.example .env.local
-# in .env.local: set KYBASE_SECRET and uncomment DATABASE_URL
-npm install
-npm run dev                  # http://localhost:3000
-```
+| Layer | Tech |
+|-------|------|
+| Frontend | Next.js App Router, React 19 |
+| Database | PostgreSQL 16 + pgvector (direct `pg` connection) |
+| Embeddings | Ollama `embeddinggemma` (default, multilingual) / Google / OpenAI |
+| Search | RRF hybrid: pgvector HNSW cosine + bilingual FTS |
+| MCP | `@modelcontextprotocol/sdk` Streamable HTTP |
+| Auth | Single `KYBASE_SECRET` env var |
 
 ---
 
@@ -211,10 +184,17 @@ Migrations apply automatically on startup. Details: [docs/upgrading.md](docs/upg
 
 ---
 
-## Development
+## Local development
 
 ```bash
-npm test          # Vitest unit tests (wikilinks, embeddings, search/RRF)
+# Postgres only (app runs on the host)
+docker compose up -d db
+cp .env.example .env.local
+# in .env.local: set KYBASE_SECRET and uncomment DATABASE_URL
+npm install
+npm run dev                  # http://localhost:3000
+
+npm test          # Vitest unit tests
 npm run build     # Production build check
 npx tsc --noEmit  # Type check
 ```

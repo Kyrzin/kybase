@@ -273,7 +273,7 @@ export default function KybaseApp() {
           {activeNote && <span className="topbar-note-title">{editMode ? editTitle : activeNote.title}</span>}
           <div className="topbar-sep" />
           <button className={`topbar-btn ${rightPanel === 'backlinks' ? 'active' : ''}`} onClick={() => { const n = rightPanel === 'backlinks' ? null : 'backlinks'; setRightPanel(n); setPanelWidth(300); }} title="Backlinks">{Icons.link}</button>
-          <button className={`topbar-btn ${rightPanel === 'graph' ? 'active' : ''}`} onClick={() => { const n = rightPanel === 'graph' ? null : 'graph'; setRightPanel(n); setGraphFullscreen(false); setPanelWidth(n === 'graph' && window.innerWidth >= 768 ? Math.floor(window.innerWidth * 0.5) : 300); }} title="Graph View">{Icons.graph}</button>
+          <button className={`topbar-btn ${rightPanel === 'graph' ? 'active' : ''}`} onClick={() => { const n = rightPanel === 'graph' ? null : 'graph'; setRightPanel(n); setGraphFullscreen(false); setPanelWidth(n === 'graph' && window.innerWidth >= 768 ? Math.min(Math.floor(window.innerWidth * 0.38), 560) : 300); }} title="Graph View">{Icons.graph}</button>
           <button className={`topbar-btn ${rightPanel === 'ai' ? 'active' : ''}`} onClick={() => { const n = rightPanel === 'ai' ? null : 'ai'; setRightPanel(n); setPanelWidth(300); }} title="AI Search">{Icons.ai}</button>
           <button className="topbar-btn" onClick={() => setSettingsOpen(true)} title="Settings">{Icons.settings}</button>
         </div>

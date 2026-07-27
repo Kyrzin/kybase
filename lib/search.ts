@@ -27,6 +27,11 @@ const RRF_K = 60;
 
 const EXCERPT_LENGTH = 300;
 
+// How far makeExcerpt will nudge a cut to land on whitespace. Bounded so a
+// long unbroken run (a URL, a CJK sentence, the x/y fillers in tests) keeps
+// its hard cut instead of losing half the window to the snap.
+const EXCERPT_SNAP_WINDOW = 24;
+
 export type SearchFilters = {
   folderId?: string;
   tag?: string;
@@ -77,9 +82,23 @@ function overfetchLimit(limit: number, filters: SearchFilters | undefined): numb
 }
 
 /**
+ * A chunk keeps its section's `# Heading` line as its first line (see
+ * lib/chunking.ts). semanticSearch surfaces that heading separately as a
+ * `[Heading]` context prefix, so leaving the line in the excerpt body printed
+ * it twice ("[Heading] # Heading …"). Strip a single leading heading line so
+ * the heading shows once, as context.
+ */
+export function stripLeadingHeading(content: string): string {
+  return content.replace(/^\s*#{1,6}[ \t]+.*(?:\r?\n)+/, '');
+}
+
+/**
  * Build a short excerpt from note content.
  * If `query` occurs in the content (case-insensitive), the window is centered
- * on the first match; otherwise the head of the document is used.
+ * on the first match; otherwise the head of the document is used. The window
+ * is one contiguous slice (never stitched from several places), and its cut
+ * points are snapped to nearby whitespace so it doesn't begin or end
+ * mid-word; the "…" markers appear only where content was actually dropped.
  */
 export function makeExcerpt(content: string, query?: string, maxLen = EXCERPT_LENGTH): string {
   if (content.length <= maxLen) return content;
@@ -89,9 +108,22 @@ export function makeExcerpt(content: string, query?: string, maxLen = EXCERPT_LE
     const idx = content.toLowerCase().indexOf(query.toLowerCase());
     if (idx > 0) start = Math.max(0, idx - Math.floor((maxLen - query.length) / 2));
   }
-  const end = Math.min(content.length, start + maxLen);
+  let end = Math.min(content.length, start + maxLen);
 
-  return (start > 0 ? '…' : '') + content.slice(start, end) + (end < content.length ? '…' : '');
+  // Snap the start forward to just after the next whitespace, and the end back
+  // to just before the last whitespace, so neither edge splits a word.
+  if (start > 0) {
+    const ws = content.slice(start, start + EXCERPT_SNAP_WINDOW).search(/\s/);
+    if (ws !== -1) start += ws + 1;
+  }
+  if (end < content.length) {
+    const from = Math.max(start + 1, end - EXCERPT_SNAP_WINDOW);
+    const ws = content.slice(from, end).search(/\s\S*$/); // start of the last (partial) word
+    if (ws !== -1) end = from + ws;
+  }
+
+  const body = content.slice(start, end).trim();
+  return (start > 0 ? '…' : '') + body + (end < content.length ? '…' : '');
 }
 
 export type NamedResultList = { field: 'text_score' | 'semantic_score'; results: SearchResult[] };
@@ -218,7 +250,9 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
 
   const results = data.map((n: Record<string, unknown>) => {
     const heading = n.heading as string | null;
-    const excerpt = makeExcerpt(n.chunk_content as string, query);
+    // Drop the chunk's own `# Heading` line so it isn't repeated by the
+    // `[heading]` context prefix below.
+    const excerpt = makeExcerpt(stripLeadingHeading(n.chunk_content as string), query);
     return {
       id:      n.id as string,
       title:   n.title as string,

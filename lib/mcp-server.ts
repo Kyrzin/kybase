@@ -1,4 +1,4 @@
-// lib/mcp-server.ts — MCP server factory with 13 tools
+// lib/mcp-server.ts — MCP server factory with 14 tools
 // Uses @modelcontextprotocol/sdk McpServer (high-level API)
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -218,7 +218,8 @@ export function createMcpServer(): McpServer {
     'create_note',
     'Create a new note. Embedding is generated automatically in the background. ' +
     'Before creating, search_notes for the topic and include [[wikilinks]] to related existing notes ' +
-    '(copy titles exactly from tool results — never invent them).',
+    '(copy titles exactly from tool results — never invent them). Before adding tags, call list_tags ' +
+    'and reuse an existing tag if one matches — do not create RU/EN duplicates.',
     {
       title:     z.string().trim().min(1).max(500),
       content:   z.string().default(''),
@@ -252,7 +253,8 @@ export function createMcpServer(): McpServer {
     'update_note',
     'Update note fields. Re-embeds if title or content changed. Updates wikilinks if title changed. ' +
     'When substantially rewriting content, consider adding [[wikilinks]] to related notes found via ' +
-    'search_notes (copy titles exactly from tool results).',
+    'search_notes (copy titles exactly from tool results). Before adding tags, call list_tags and ' +
+    'reuse an existing tag if one matches — do not create RU/EN duplicates.',
     {
       id:        z.string().uuid(),
       title:     z.string().trim().min(1).max(500).optional(),
@@ -321,6 +323,8 @@ export function createMcpServer(): McpServer {
   server.tool(
     'search_notes',
     'Search notes. type: "text" (fast), "semantic" (meaning-based), "hybrid" (best, uses RRF). ' +
+    'Hybrid is the right default; prefer type=text for exact identifiers, code fragments, or quoted ' +
+    'phrases, where FTS beats meaning-matching. ' +
     'Returns short excerpts, not full notes — call get_note with the id to read a full note. ' +
     'On hybrid results, `score` is rank fusion, not a relevance measure — use the per-hit ' +
     'text_score (FTS relevance) / semantic_score (raw cosine similarity) to judge how strong a ' +
@@ -365,6 +369,23 @@ export function createMcpServer(): McpServer {
           }, null, 2),
         }],
       };
+    }
+  );
+
+  // ── list_tags ────────────────────────────────────────────────────────────
+  server.tool(
+    'list_tags',
+    'List every tag in use with the number of notes carrying it, most-used first. Call this before ' +
+    'tagging a note and reuse an existing tag when one fits, rather than coining a near-duplicate — ' +
+    'the vault has no tag synonyms, so "workflow" and "воркфлоу" are two separate tags that fragment ' +
+    'the same concept.',
+    {},
+    async () => {
+      const rows = await query<{ tag: string; count: number }>(
+        `select unnest(tags) as tag, count(*)::int as count
+         from notes group by 1 order by count desc, tag`
+      );
+      return { content: [{ type: 'text' as const, text: JSON.stringify(rows, null, 2) }] };
     }
   );
 

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseMarkdown, renderWithWikilinks, stripWikilinks, escapeAttr, safeUrl } from './markdown';
+import { parseMarkdown, renderWithWikilinks, stripWikilinks, escapeAttr, safeUrl, extractHeadings } from './markdown';
 import type { WikilinkNote } from './markdown';
 
 const notes: WikilinkNote[] = [];
@@ -126,5 +126,56 @@ describe('escapeAttr / safeUrl', () => {
     expect(safeUrl('/notes/1')).toBe('/notes/1');
     expect(safeUrl('javascript:alert(1)')).toBe('#');
     expect(safeUrl('data:text/html,<script>alert(1)</script>')).toBe('#');
+  });
+});
+
+describe('heading ids and extractHeadings', () => {
+  it('puts document-order deduped slug ids on h1-h3', () => {
+    const html = parseMarkdown('# Setup\n\n## Setup\n\n### Details');
+    expect(html).toContain('<h1 id="setup">Setup</h1>');
+    expect(html).toContain('<h2 id="setup-2">Setup</h2>');
+    expect(html).toContain('<h3 id="details">Details</h3>');
+  });
+
+  it('slugifies cyrillic and strips punctuation', () => {
+    const html = parseMarkdown('## Открыто — план (приоритет)');
+    expect(html).toContain('<h2 id="открыто-план-приоритет">');
+  });
+
+  it('gives identical slugs for escaped-entity headings on both paths', () => {
+    const content = '# A & B';
+    const html = parseMarkdown(content);
+    const [h] = extractHeadings(content);
+    expect(html).toContain(`<h1 id="${h.slug}">`);
+    expect(h.slug).toBe('a-b');
+  });
+
+  it('ignores # lines inside fenced code blocks in both paths', () => {
+    const content = '# Real\n\n```bash\n# not a heading\n```\n\n## Also real';
+    expect(extractHeadings(content)).toEqual([
+      { level: 1, text: 'Real', slug: 'real' },
+      { level: 2, text: 'Also real', slug: 'also-real' },
+    ]);
+    const html = parseMarkdown(content);
+    expect(html).not.toContain('id="not-a-heading"');
+    expect(html).toContain('# not a heading');
+  });
+
+  it('extractHeadings matches parseMarkdown ids across duplicate mixed levels', () => {
+    const content = '### Foo\n\n# Foo\n\n## Bar';
+    const heads = extractHeadings(content);
+    expect(heads.map(h => h.slug)).toEqual(['foo', 'foo-2', 'bar']);
+    const html = parseMarkdown(content);
+    expect(html).toContain('<h3 id="foo">');
+    expect(html).toContain('<h1 id="foo-2">');
+  });
+
+  it('falls back to "section" for a heading with no word characters', () => {
+    expect(extractHeadings('# ---')[0].slug).toBe('section');
+  });
+
+  it('escapes quotes that survive slugification into the id attribute', () => {
+    const html = parseMarkdown('# "quoted"');
+    expect(html).toContain('<h1 id="quoted">');
   });
 });

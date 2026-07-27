@@ -1,14 +1,16 @@
 'use client';
 
 // components/RightPanel.tsx — the collapsible right dock: backlinks list,
-// knowledge graph, or AI search, selected by `rightPanel`. Extracted from
-// KybaseApp; all data and view state comes in as props.
+// knowledge graph, AI search, or the note outline, selected by `rightPanel`.
+// Extracted from KybaseApp; all data and view state comes in as props.
+import { useMemo } from 'react';
 import type { Note, SearchHit } from '@/lib/types';
+import { extractHeadings } from '@/lib/markdown';
 import { Icons } from './Icons';
 import MiniGraph, { type GraphData } from './MiniGraph';
 
 export default function RightPanel(p: {
-  rightPanel: 'backlinks' | 'graph' | 'ai';
+  rightPanel: 'backlinks' | 'graph' | 'ai' | 'outline';
   graphFullscreen: boolean;
   setGraphFullscreen: (fn: (v: boolean) => boolean) => void;
   panelWidth: number;
@@ -22,20 +24,44 @@ export default function RightPanel(p: {
   graphFitRef: React.MutableRefObject<(() => void) | null>;
   toggleFolder: (id: string) => void;
   setSidebarOpen: (v: boolean) => void;
-  setRightPanel: (v: 'backlinks' | 'graph' | 'ai' | null) => void;
+  setRightPanel: (v: 'backlinks' | 'graph' | 'ai' | 'outline' | null) => void;
   aiQuery: string;
   setAiQuery: (v: string) => void;
   handleAiSearch: () => void;
   aiLoading: boolean;
   aiResults: SearchHit[] | null;
   filterByTag: (tag: string) => void;
+  editMode: boolean;
+  setEditMode: (v: boolean) => void;
+  editContent: string;
 }) {
   const {
     rightPanel, graphFullscreen, setGraphFullscreen, panelWidth, panelResizeRef,
     backlinks, activeNote, activeNoteId, selectNote, winSize, graphData, graphFitRef,
     toggleFolder, setSidebarOpen, setRightPanel,
     aiQuery, setAiQuery, handleAiSearch, aiLoading, aiResults, filterByTag,
+    editMode, setEditMode, editContent,
   } = p;
+
+  // Outline follows the live draft while editing, the saved note otherwise.
+  const outlineSource = editMode ? editContent : (activeNote?.content ?? '');
+  const headings = useMemo(
+    () => (rightPanel === 'outline' ? extractHeadings(outlineSource) : []),
+    [rightPanel, outlineSource]
+  );
+
+  const jumpToHeading = (slug: string) => {
+    const scroll = () => document.getElementById(slug)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (editMode) {
+      // The textarea has no anchors — switch to Preview, then scroll once the
+      // rendered headings (with their ids) are in the DOM.
+      setEditMode(false);
+      setTimeout(scroll, 80);
+    } else {
+      scroll();
+    }
+    if (winSize.w < 768) setRightPanel(null);
+  };
   return (
     <div
       className={`right-panel${rightPanel === 'graph' && graphFullscreen ? ' graph-fullscreen' : ''}`}
@@ -118,6 +144,41 @@ export default function RightPanel(p: {
           </>
         );
       })()}
+
+      {rightPanel === 'outline' && (
+        <>
+          <div className="right-panel-header">Outline{headings.length > 0 && ` (${headings.length})`}</div>
+          <div className="right-panel-body">
+            {!activeNote ? (
+              <div style={{ color: '#585b70', fontSize: 13, textAlign: 'center', padding: 24 }}>No note selected</div>
+            ) : headings.length === 0 ? (
+              <div style={{ color: '#585b70', fontSize: 13, textAlign: 'center', padding: 24 }}>No headings in this note</div>
+            ) : headings.map(h => (
+              <div
+                key={h.slug}
+                onClick={() => jumpToHeading(h.slug)}
+                title={h.text}
+                style={{
+                  padding: '5px 10px',
+                  paddingLeft: 10 + (h.level - 1) * 16,
+                  fontSize: h.level === 1 ? 13.5 : 12.5,
+                  fontWeight: h.level === 1 ? 600 : 400,
+                  color: h.level === 1 ? '#cdd6f4' : '#a6adc8',
+                  cursor: 'pointer',
+                  borderRadius: 6,
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap',
+                }}
+                onMouseEnter={e => { (e.currentTarget as HTMLElement).style.background = 'rgba(137,180,250,0.08)'; }}
+                onMouseLeave={e => { (e.currentTarget as HTMLElement).style.background = 'transparent'; }}
+              >
+                {h.text}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       {rightPanel === 'ai' && (
         <>

@@ -10,6 +10,54 @@ export function escapeAttr(s: string): string {
   return s.replace(/"/g, '&quot;');
 }
 
+/**
+ * Slug for a heading, shared by parseMarkdown (which sees &-escaped text) and
+ * extractHeadings (which sees raw text): entities are unescaped first so both
+ * inputs yield the same slug. Unicode letters/digits survive (Cyrillic titles
+ * are the norm in real vaults); everything else collapses to "-". Duplicate
+ * slugs are the CALLER's job (slugDeduper) so both call sites number
+ * repeats in document order and stay in sync.
+ */
+export function slugifyHeading(text: string): string {
+  const slug = text
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
+    .replace(/^-+|-+$/g, '');
+  return slug || 'section';
+}
+
+export function slugDeduper(): (slug: string) => string {
+  const seen = new Map<string, number>();
+  return (slug: string) => {
+    const n = (seen.get(slug) ?? 0) + 1;
+    seen.set(slug, n);
+    return n === 1 ? slug : `${slug}-${n}`;
+  };
+}
+
+export type Heading = { level: 1 | 2 | 3; text: string; slug: string };
+
+/**
+ * Headings (H1–H3) of a note in document order, with the same slugs
+ * parseMarkdown puts on the rendered <h1>–<h3> ids. Skips headings inside
+ * fenced code blocks — mirroring both the renderer (fences are extracted to
+ * placeholders before heading markup runs) and the chunker's fence handling.
+ */
+export function extractHeadings(content: string): Heading[] {
+  const out: Heading[] = [];
+  const dedupe = slugDeduper();
+  let inFence = false;
+  for (const line of content.split('\n')) {
+    if (/^```/.test(line.trim())) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    const m = line.match(/^(#{1,3}) (.+)$/);
+    if (!m) continue;
+    out.push({ level: m[1].length as 1 | 2 | 3, text: m[2].trim(), slug: dedupe(slugifyHeading(m[2])) });
+  }
+  return out;
+}
+
 export function safeUrl(url: string): string {
   return /^(https?:|mailto:|\/|#)/i.test(url.trim()) ? url : '#';
 }
@@ -21,6 +69,10 @@ export function parseMarkdown(text: string): string {
   // mangling the code. NUL delimits the placeholder because it cannot occur
   // in note text (Postgres rejects NUL in strings), so content can't forge it.
   const codeBlocks: string[] = [];
+  // One heading pass (not one per level) so duplicate headings get their
+  // -2/-3 suffixes in DOCUMENT order — the same order extractHeadings uses;
+  // three per-level passes would number them h3-first and desync the ids.
+  const dedupe = slugDeduper();
   const html = text
     .replace(/\u0000/g, '')
     .replace(/&/g, '&amp;')
@@ -31,9 +83,10 @@ export function parseMarkdown(text: string): string {
         `<pre style="background:#1e1e2e;padding:12px;border-radius:6px;overflow-x:auto;margin:8px 0"><code>${code.trim()}</code></pre>`);
       return `\u0000${codeBlocks.length - 1}\u0000`;
     })
-    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
+    .replace(/^(#{1,3}) (.+)$/gm, (_: string, hashes: string, heading: string) => {
+      const level = hashes.length;
+      return `<h${level} id="${escapeAttr(dedupe(slugifyHeading(heading)))}">${heading}</h${level}>`;
+    })
     .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.+?)\*/g, '<em>$1</em>')

@@ -74,6 +74,21 @@ describe('buildGraph — rootTitle + depth', () => {
     query.mockResolvedValueOnce([note('a', 'A', '')]);
     await expect(buildGraph({ rootTitle: 'Missing' })).rejects.toThrow('No note titled "Missing" found');
   });
+
+  it('resolves root_title by unique prefix/substring, not just exact match', async () => {
+    query.mockResolvedValue([
+      note('a', 'Kybase — Поиск v2', 'to [[Roadmap]]'),
+      note('b', 'Roadmap', ''),
+    ]);
+    // partial title that get_note already accepts — graph must too
+    const graph = await buildGraph({ rootTitle: 'Kybase — Поиск', depth: 1 });
+    expect(graph.nodes.map((n) => n.id).sort()).toEqual(['a', 'b']);
+  });
+
+  it('throws with candidates when root_title is ambiguous', async () => {
+    query.mockResolvedValue([note('a', 'Kybase A', ''), note('b', 'Kybase B', '')]);
+    await expect(buildGraph({ rootTitle: 'Kybase' })).rejects.toThrow(/matches 2 notes/);
+  });
 });
 
 describe('buildGraph — semantic edge options', () => {

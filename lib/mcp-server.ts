@@ -149,7 +149,9 @@ export function createMcpServer(): McpServer {
         '3. Copy linked titles VERBATIM from tool results (search_notes, list_notes, get_graph). Never ' +
         'write a [[link]] to a title you have not seen in a tool result in this conversation — invented ' +
         'or misremembered titles produce broken links.\n' +
-        '4. Do not force links: if nothing is related, create the note without any.',
+        '4. Do not force links: if nothing is related, create the note without any.\n\n' +
+        'Tagging: new tags are English, lowercase, kebab-case. Call list_tags first and reuse an ' +
+        'existing tag when one fits, rather than coining an RU/EN or case-variant duplicate.',
     }
   );
 

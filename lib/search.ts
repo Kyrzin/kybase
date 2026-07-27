@@ -1,6 +1,8 @@
 // lib/search.ts — text (FTS + substring fallback), semantic (chunk-based), and hybrid (RRF) search
 import { query as dbQuery, toVector } from './db';
-import { getEmbedding, getMinSimilarity } from './embeddings';
+import { getEmbedding, getRelevanceAnchors, type RelevanceAnchors } from './embeddings';
+
+export type Confidence = 'strong' | 'moderate' | 'weak';
 
 export type SearchResult = {
   id: string;
@@ -8,11 +10,20 @@ export type SearchResult = {
   excerpt: string;
   tags: string[];
   score: number;
+  // The one number an agent should act on: 0..1, normalized per arm against
+  // calibrated anchors (cosine → model-dependent floor/strong from
+  // lib/embeddings.ts; ts_rank → measured TS_RANK_ANCHORS; substring →
+  // fixed title/content levels). On hybrid results it is the MAX of the
+  // contributing arms — arms corroborate a hit, they don't add up.
+  // Comparable within one query's results; NOT across models or queries.
+  relevance: number;
+  confidence: Confidence;
   // Present only on hybrid results, and only for the pass(es) that actually
   // matched this note — text_score is FTS ts_rank (or a positional fallback
   // score for substring matches), semantic_score is raw cosine similarity.
   // `score` itself stays the RRF rank fusion, used for hybrid's own sort
-  // order — it is NOT a relevance measure (see rrfMerge).
+  // order — it is NOT a relevance measure (see rrfMerge); keep using
+  // relevance/confidence for decisions and these raw fields for debugging.
   text_score?: number;
   semantic_score?: number;
   // Which pass(es) actually matched this note — derivable from which of
@@ -22,6 +33,30 @@ export type SearchResult = {
   // single-arm penalty), which this makes visible instead of implicit.
   matched_by?: ('text_score' | 'semantic_score')[];
 };
+
+/**
+ * Linear normalization between two calibrated anchors: at `floor` (the
+ * search threshold — barely admitted) relevance is 0, at `strong` (a
+ * confident hit on the live battery) it is 1, clamped outside.
+ */
+export function normalizeRelevance(value: number, anchors: RelevanceAnchors): number {
+  if (anchors.strong <= anchors.floor) return 0;
+  return Math.max(0, Math.min(1, (value - anchors.floor) / (anchors.strong - anchors.floor)));
+}
+
+export function confidenceFor(relevance: number): Confidence {
+  return relevance >= 0.7 ? 'strong' : relevance >= 0.35 ? 'moderate' : 'weak';
+}
+
+// Anchors for the FTS arm's ts_rank, which is unbounded and NOT comparable
+// to cosines. Measured on this vault's live queries: clear keyword hits rank
+// ~0.066–0.099, weak tail matches sit under ~0.02.
+const TS_RANK_ANCHORS: RelevanceAnchors = { floor: 0.01, strong: 0.09 };
+
+// The substring fallback has no rank at all — an exact-substring hit on a
+// title is a decent match for identifier-ish queries, one buried in content
+// is weaker. Fixed levels, deliberately capped below "strong".
+const SUBSTRING_RELEVANCE = { title: 0.65, content: 0.5 };
 
 const RRF_K = 60;
 
@@ -139,7 +174,7 @@ export type NamedResultList = { field: 'text_score' | 'semantic_score'; results:
  * matched with cosine 0.72" from "this only showed up in the text pass".
  */
 export function rrfMerge(lists: NamedResultList[]): SearchResult[] {
-  const scoreMap = new Map<string, { result: SearchResult; rrfScore: number; extra: Partial<SearchResult> }>();
+  const scoreMap = new Map<string, { result: SearchResult; rrfScore: number; relevance: number; extra: Partial<SearchResult> }>();
 
   for (const { field, results } of lists) {
     results.forEach((item, rank) => {
@@ -147,19 +182,26 @@ export function rrfMerge(lists: NamedResultList[]): SearchResult[] {
       const existing = scoreMap.get(item.id);
       if (existing) {
         existing.rrfScore += rrfScore;
+        // Arms corroborate a hit rather than add up: the merged relevance is
+        // the best arm's normalized score, so a note that only one arm found
+        // keeps that arm's full relevance (unlike its RRF rank, which the
+        // single-arm penalty halves).
+        existing.relevance = Math.max(existing.relevance, item.relevance);
         existing.extra[field] = item.score;
       } else {
-        scoreMap.set(item.id, { result: item, rrfScore, extra: { [field]: item.score } });
+        scoreMap.set(item.id, { result: item, rrfScore, relevance: item.relevance, extra: { [field]: item.score } });
       }
     });
   }
 
   return [...scoreMap.values()]
     .sort((a, b) => b.rrfScore - a.rrfScore)
-    .map(({ result, rrfScore, extra }) => ({
+    .map(({ result, rrfScore, relevance, extra }) => ({
       ...result,
       ...extra,
       score: rrfScore,
+      relevance,
+      confidence: confidenceFor(relevance),
       matched_by: Object.keys(extra) as ('text_score' | 'semantic_score')[],
     }));
 }
@@ -184,13 +226,18 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // n.rank is Postgres's actual ts_rank for this query — a genuine
   // relevance signal, unlike the positional score substringSearch falls
   // back to below (there is no rank for a plain substring match).
-  const results = rows.map((n) => ({
-    id:      n.id,
-    title:   n.title,
-    excerpt: n.headline.replace(/<\/?b>/g, ''),
-    tags:    n.tags,
-    score:   n.rank,
-  }));
+  const results = rows.map((n) => {
+    const relevance = normalizeRelevance(n.rank, TS_RANK_ANCHORS);
+    return {
+      id:      n.id,
+      title:   n.title,
+      excerpt: n.headline.replace(/<\/?b>/g, ''),
+      tags:    n.tags,
+      score:   n.rank,
+      relevance,
+      confidence: confidenceFor(relevance),
+    };
+  });
   return applyFilters(results, limit, filters);
 }
 
@@ -205,20 +252,26 @@ async function substringSearch(query: string, limit: number, filters?: SearchFil
   ]);
 
   const seen = new Set<string>();
-  const merged: NoteRow[] = [];
+  const merged: (NoteRow & { viaTitle: boolean })[] = [];
+  const titleIds = new Set(byTitle.map(r => r.id));
   for (const row of [...byTitle, ...byContent]) {
     if (seen.has(row.id)) continue;
     seen.add(row.id);
-    merged.push(row);
+    merged.push({ ...row, viaTitle: titleIds.has(row.id) });
   }
 
-  const results = merged.map((n, i) => ({
-    id:      n.id,
-    title:   n.title,
-    excerpt: makeExcerpt(n.content, query),
-    tags:    n.tags,
-    score:   1 / (i + 1),
-  }));
+  const results = merged.map((n, i) => {
+    const relevance = n.viaTitle ? SUBSTRING_RELEVANCE.title : SUBSTRING_RELEVANCE.content;
+    return {
+      id:      n.id,
+      title:   n.title,
+      excerpt: makeExcerpt(n.content, query),
+      tags:    n.tags,
+      score:   1 / (i + 1),
+      relevance,
+      confidence: confidenceFor(relevance),
+    };
+  });
   return applyFilters(results, limit, filters);
 }
 
@@ -237,15 +290,15 @@ async function substringSearch(query: string, limit: number, filters?: SearchFil
  * combined output shows notes a pure-semantic pass would have dropped.
  */
 export async function semanticSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
-  const [embedding, minSimilarity] = await Promise.all([
+  const [embedding, anchors] = await Promise.all([
     getEmbedding(query, 'query'),
-    getMinSimilarity(),
+    getRelevanceAnchors(),
   ]);
 
   const fetchLimit = overfetchLimit(limit, filters);
   const data = await dbQuery(
     'select * from match_chunks($1::vector, $2, $3)',
-    [toVector(embedding), fetchLimit, minSimilarity]
+    [toVector(embedding), fetchLimit, anchors.floor]
   );
 
   const results = data.map((n: Record<string, unknown>) => {
@@ -253,12 +306,15 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
     // Drop the chunk's own `# Heading` line so it isn't repeated by the
     // `[heading]` context prefix below.
     const excerpt = makeExcerpt(stripLeadingHeading(n.chunk_content as string), query);
+    const relevance = normalizeRelevance(n.similarity as number, anchors);
     return {
       id:      n.id as string,
       title:   n.title as string,
       excerpt: heading ? `[${heading}] ${excerpt}` : excerpt,
       tags:    n.tags as string[],
       score:   n.similarity as number,
+      relevance,
+      confidence: confidenceFor(relevance),
     };
   });
   return applyFilters(results, limit, filters);

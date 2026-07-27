@@ -23,6 +23,30 @@ export async function getMinSimilarity(): Promise<number> {
   return minSimilarityFor(await getEmbeddingConfig());
 }
 
+export type RelevanceAnchors = { floor: number; strong: number };
+
+// Anchors for normalizing a cosine into a 0..1 relevance (lib/search.ts):
+// `floor` is the model's search threshold above; `strong` is the cosine of a
+// confident hit, read off the same live battery runs the floors came from —
+//   - embeddinggemma: precise hits landed ~0.55–0.64 → strong 0.60
+//   - nomic-embed-text: its compressed band tops out ~0.76 → strong 0.75
+//   - Google text-embedding-004: clear hits ~0.73–0.78 → strong 0.75
+//   - OpenAI 3-small: unverified, 0.65 as a conservative middle
+// Like the floors, these are per-model calibration — re-derive both with the
+// battery (see the "методика оценки embedding-моделей" note) on model changes.
+function strongSimilarityFor(cfg: EmbeddingConfig): number {
+  if (cfg.provider === 'ollama') {
+    if ((cfg.ollamaModel ?? '').includes('nomic-embed-text')) return 0.75;
+    return 0.60; // embeddinggemma (default) and other local models
+  }
+  return cfg.provider === 'openai' ? 0.65 : 0.75;
+}
+
+export async function getRelevanceAnchors(): Promise<RelevanceAnchors> {
+  const cfg = await getEmbeddingConfig();
+  return { floor: minSimilarityFor(cfg), strong: strongSimilarityFor(cfg) };
+}
+
 export async function getEmbedding(text: string, task: EmbedTask = 'document'): Promise<number[]> {
   const cfg = await getEmbeddingConfig();
   switch (cfg.provider) {

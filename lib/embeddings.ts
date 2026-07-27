@@ -3,24 +3,38 @@ import { getEmbeddingConfig, type EmbeddingConfig } from './settings';
 
 export type EmbedTask = 'query' | 'document';
 
-// Semantic-search cosine floor, per model — the query/document cosine scale
-// differs by embedding model, so this is model-dependent just like the task
-// prefixes above. Verified live on this RU/DE vault:
-//   - embeddinggemma: wide range, relevant ~0.37–0.64, noise <0.15 → 0.40
-//   - nomic-embed-text: compressed high band ~0.6–0.7 → 0.55
-//   - Google text-embedding-004: relevant ~0.62–0.74 → 0.55
-//   - OpenAI 3-small: unverified here, 0.45 as a conservative middle
-// Used by lib/search.ts semanticSearch (passed to the match_chunks RPC).
-function minSimilarityFor(cfg: EmbeddingConfig): number {
+// Two cosine anchors per model, used to map a raw similarity onto a 0..1
+// relevance (lib/search.ts). Both are model-dependent because the query/
+// document cosine scale differs by embedding model, just like the task
+// prefixes above.
+//   - floor  = the search threshold: at or below it a hit is not relevant
+//              (relevance 0). Passed to match_chunks as min_similarity.
+//   - strong = the cosine of a confident hit: at or above it relevance is 1.
+// Verified live on this RU/DE vault (91 notes, embeddinggemma):
+//   noise (борщ) ~0.15; barely-relevant ~0.40–0.41; good ~0.42–0.48;
+//   a spot-on conceptual match tops out ~0.53. So floor 0.40 / strong 0.55
+//   puts real matches in the moderate band and only near-perfect ones strong.
+// nomic sits in a compressed high band (~0.6–0.7); Google similar; OpenAI
+// unverified here (conservative middle).
+export type RelevanceAnchors = { floor: number; strong: number };
+
+function relevanceAnchorsFor(cfg: EmbeddingConfig): RelevanceAnchors {
   if (cfg.provider === 'ollama') {
-    if ((cfg.ollamaModel ?? '').includes('nomic-embed-text')) return 0.55;
-    return 0.40; // embeddinggemma (default) and other local models
+    if ((cfg.ollamaModel ?? '').includes('nomic-embed-text')) return { floor: 0.55, strong: 0.72 };
+    return { floor: 0.40, strong: 0.55 }; // embeddinggemma (default) and other local models
   }
-  return cfg.provider === 'openai' ? 0.45 : 0.55;
+  if (cfg.provider === 'openai') return { floor: 0.45, strong: 0.62 };
+  return { floor: 0.55, strong: 0.72 }; // google
 }
 
+export async function getRelevanceAnchors(): Promise<RelevanceAnchors> {
+  return relevanceAnchorsFor(await getEmbeddingConfig());
+}
+
+// The floor is the single source of truth for the search threshold — derive
+// it from the same anchors so the two can never drift apart.
 export async function getMinSimilarity(): Promise<number> {
-  return minSimilarityFor(await getEmbeddingConfig());
+  return (await getRelevanceAnchors()).floor;
 }
 
 export async function getEmbedding(text: string, task: EmbedTask = 'document'): Promise<number[]> {

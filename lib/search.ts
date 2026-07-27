@@ -1,6 +1,8 @@
 // lib/search.ts — text (FTS + substring fallback), semantic (chunk-based), and hybrid (RRF) search
 import { query as dbQuery, toVector } from './db';
-import { getEmbedding, getMinSimilarity } from './embeddings';
+import { getEmbedding, getRelevanceAnchors, type RelevanceAnchors } from './embeddings';
+
+export type Confidence = 'strong' | 'moderate' | 'weak';
 
 export type SearchResult = {
   id: string;
@@ -21,9 +23,66 @@ export type SearchResult = {
   // out on the other pass's rank contribution entirely (RRF's known
   // single-arm penalty), which this makes visible instead of implicit.
   matched_by?: ('text_score' | 'semantic_score')[];
+  // A single 0..1 measure of how well this result matches the query, and its
+  // coarse bucket. Unlike score/text_score/semantic_score (raw, per-arm, on
+  // incompatible scales), relevance is one comparable number: the semantic
+  // cosine mapped through the model's floor/strong anchors, the text rank
+  // capped and normalized, and — for hybrid — the max of the two arms (they
+  // corroborate, so the stronger wins; they are not summed). Comparable
+  // WITHIN one query's results, not across queries or models. The raw scores
+  // stay for debugging.
+  relevance?: number;
+  confidence?: Confidence;
 };
 
 const RRF_K = 60;
+
+// ── relevance normalization ──────────────────────────────────────────────
+// ts_rank (Postgres FTS) is unbounded in theory but, with our default
+// normalization, a genuine lexical hit on this vault lands ~0.08–0.10
+// regardless of how central the term is — the rank barely graduates. So we
+// cap-and-scale: TEXT_RANK_STRONG is the ts_rank at which a text match is
+// treated as fully relevant. 0.15 keeps ordinary FTS hits in the "moderate"
+// band and reserves "strong" for high-proximity multi-term matches, rather
+// than calling every lexical hit strong.
+const TEXT_RANK_STRONG = 0.15;
+
+// Confidence buckets over the 0..1 relevance. strong ≥ 0.70, weak < 0.35,
+// moderate between — calibrated against the live battery (see search.test.ts
+// and the pass report).
+const CONFIDENCE_STRONG = 0.70;
+const CONFIDENCE_WEAK = 0.35;
+
+function clamp01(x: number): number {
+  return x < 0 ? 0 : x > 1 ? 1 : x;
+}
+
+function round3(x: number): number {
+  return Math.round(x * 1000) / 1000;
+}
+
+/** Map a raw cosine similarity onto 0..1 via the model's floor/strong anchors. */
+export function semanticRelevance(cosine: number, anchors: RelevanceAnchors): number {
+  if (cosine <= anchors.floor) return 0;
+  return clamp01((cosine - anchors.floor) / (anchors.strong - anchors.floor));
+}
+
+/** Map an FTS ts_rank onto 0..1 (capped — raw ts_rank is unbounded). */
+export function textRankRelevance(rank: number): number {
+  return clamp01(rank / TEXT_RANK_STRONG);
+}
+
+export function confidenceFor(relevance: number): Confidence {
+  if (relevance >= CONFIDENCE_STRONG) return 'strong';
+  if (relevance < CONFIDENCE_WEAK) return 'weak';
+  return 'moderate';
+}
+
+/** Attach relevance (rounded) and its confidence bucket to a result. */
+function withRelevance<T extends SearchResult>(result: T, relevance: number): T {
+  const r = round3(relevance);
+  return { ...result, relevance: r, confidence: confidenceFor(r) };
+}
 
 const EXCERPT_LENGTH = 300;
 
@@ -139,7 +198,7 @@ export type NamedResultList = { field: 'text_score' | 'semantic_score'; results:
  * matched with cosine 0.72" from "this only showed up in the text pass".
  */
 export function rrfMerge(lists: NamedResultList[]): SearchResult[] {
-  const scoreMap = new Map<string, { result: SearchResult; rrfScore: number; extra: Partial<SearchResult> }>();
+  const scoreMap = new Map<string, { result: SearchResult; rrfScore: number; extra: Partial<SearchResult>; relevance: number }>();
 
   for (const { field, results } of lists) {
     results.forEach((item, rank) => {
@@ -148,20 +207,27 @@ export function rrfMerge(lists: NamedResultList[]): SearchResult[] {
       if (existing) {
         existing.rrfScore += rrfScore;
         existing.extra[field] = item.score;
+        // Arms corroborate: keep the stronger arm's relevance, don't add them.
+        existing.relevance = Math.max(existing.relevance, item.relevance ?? 0);
       } else {
-        scoreMap.set(item.id, { result: item, rrfScore, extra: { [field]: item.score } });
+        scoreMap.set(item.id, { result: item, rrfScore, extra: { [field]: item.score }, relevance: item.relevance ?? 0 });
       }
     });
   }
 
   return [...scoreMap.values()]
     .sort((a, b) => b.rrfScore - a.rrfScore)
-    .map(({ result, rrfScore, extra }) => ({
-      ...result,
-      ...extra,
-      score: rrfScore,
-      matched_by: Object.keys(extra) as ('text_score' | 'semantic_score')[],
-    }));
+    .map(({ result, rrfScore, extra, relevance }) => {
+      const r = round3(relevance);
+      return {
+        ...result,
+        ...extra,
+        score: rrfScore,
+        matched_by: Object.keys(extra) as ('text_score' | 'semantic_score')[],
+        relevance: r,
+        confidence: confidenceFor(r),
+      };
+    });
 }
 
 type FtsRow = { id: string; title: string; tags: string[]; rank: number; headline: string };
@@ -184,13 +250,13 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // n.rank is Postgres's actual ts_rank for this query — a genuine
   // relevance signal, unlike the positional score substringSearch falls
   // back to below (there is no rank for a plain substring match).
-  const results = rows.map((n) => ({
+  const results = rows.map((n) => withRelevance({
     id:      n.id,
     title:   n.title,
     excerpt: n.headline.replace(/<\/?b>/g, ''),
     tags:    n.tags,
     score:   n.rank,
-  }));
+  }, textRankRelevance(n.rank)));
   return applyFilters(results, limit, filters);
 }
 
@@ -212,13 +278,19 @@ async function substringSearch(query: string, limit: number, filters?: SearchFil
     merged.push(row);
   }
 
-  const results = merged.map((n, i) => ({
-    id:      n.id,
-    title:   n.title,
-    excerpt: makeExcerpt(n.content, query),
-    tags:    n.tags,
-    score:   1 / (i + 1),
-  }));
+  // A substring hit is exact literal containment (title matches lead), but
+  // there is no ts_rank — so relevance is positional: the top hit reads as a
+  // confident match and it tapers from there.
+  const results = merged.map((n, i) => {
+    const positional = 1 / (i + 1);
+    return withRelevance({
+      id:      n.id,
+      title:   n.title,
+      excerpt: makeExcerpt(n.content, query),
+      tags:    n.tags,
+      score:   positional,
+    }, positional);
+  });
   return applyFilters(results, limit, filters);
 }
 
@@ -237,15 +309,15 @@ async function substringSearch(query: string, limit: number, filters?: SearchFil
  * combined output shows notes a pure-semantic pass would have dropped.
  */
 export async function semanticSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
-  const [embedding, minSimilarity] = await Promise.all([
+  const [embedding, anchors] = await Promise.all([
     getEmbedding(query, 'query'),
-    getMinSimilarity(),
+    getRelevanceAnchors(),
   ]);
 
   const fetchLimit = overfetchLimit(limit, filters);
   const data = await dbQuery(
     'select * from match_chunks($1::vector, $2, $3)',
-    [toVector(embedding), fetchLimit, minSimilarity]
+    [toVector(embedding), fetchLimit, anchors.floor]
   );
 
   const results = data.map((n: Record<string, unknown>) => {
@@ -253,13 +325,14 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
     // Drop the chunk's own `# Heading` line so it isn't repeated by the
     // `[heading]` context prefix below.
     const excerpt = makeExcerpt(stripLeadingHeading(n.chunk_content as string), query);
-    return {
+    const cosine = n.similarity as number;
+    return withRelevance({
       id:      n.id as string,
       title:   n.title as string,
       excerpt: heading ? `[${heading}] ${excerpt}` : excerpt,
       tags:    n.tags as string[],
-      score:   n.similarity as number,
-    };
+      score:   cosine,
+    }, semanticRelevance(cosine, anchors));
   });
   return applyFilters(results, limit, filters);
 }

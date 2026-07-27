@@ -151,7 +151,10 @@ export function createMcpServer(): McpServer {
         'or misremembered titles produce broken links.\n' +
         '4. Do not force links: if nothing is related, create the note without any.\n\n' +
         'Tagging: new tags are English, lowercase, kebab-case. Call list_tags first and reuse an ' +
-        'existing tag when one fits, rather than coining an RU/EN or case-variant duplicate.',
+        'existing tag when one fits, rather than coining an RU/EN or case-variant duplicate.\n\n' +
+        'Searching: read each result\'s relevance/confidence to decide whether the hits suffice to ' +
+        'answer or you should open a note or refine the query; fall back to the raw scores only for ' +
+        'debugging.',
     }
   );
 
@@ -328,10 +331,12 @@ export function createMcpServer(): McpServer {
     'Hybrid is the right default; prefer type=text for exact identifiers, code fragments, or quoted ' +
     'phrases, where FTS beats meaning-matching. ' +
     'Returns short excerpts, not full notes — call get_note with the id to read a full note. ' +
-    'On hybrid results, `score` is rank fusion, not a relevance measure — use the per-hit ' +
-    'text_score (FTS relevance) / semantic_score (raw cosine similarity) to judge how strong a ' +
-    'match actually is; higher is more relevant within each field, but the two are not comparable ' +
-    'to each other. Optional filters (folder_id, tag, updated_after/before) narrow to notes matching ' +
+    'Each result carries relevance (0..1) and confidence ("strong" | "moderate" | "weak") — one ' +
+    'comparable measure of match quality: use it to decide whether the results suffice to answer, ' +
+    'or whether to open a note / refine the query. It is comparable WITHIN one query\'s results, ' +
+    'not across queries or models. The raw per-arm scores stay for debugging: `score` is rank ' +
+    'fusion (hybrid) or the raw arm score; text_score is FTS ts_rank; semantic_score is raw cosine. ' +
+    'Optional filters (folder_id, tag, updated_after/before) narrow to notes matching ' +
     'ALL given ones. An empty semantic/hybrid result includes threshold/best_score/pending_embeddings ' +
     'so you can tell "nothing this relevant exists" from "just under the threshold" from "embeddings ' +
     'not generated yet" — a bare [] can\'t distinguish those.',

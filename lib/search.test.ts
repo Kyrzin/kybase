@@ -8,18 +8,23 @@ vi.mock('./db', () => ({
 }));
 
 const getEmbedding = vi.fn();
-const getMinSimilarity = vi.fn();
+const getRelevanceAnchors = vi.fn();
 vi.mock('./embeddings', () => ({
   getEmbedding: (...a: unknown[]) => getEmbedding(...a),
-  getMinSimilarity: (...a: unknown[]) => getMinSimilarity(...a),
+  getRelevanceAnchors: (...a: unknown[]) => getRelevanceAnchors(...a),
 }));
 
-import { rrfMerge, makeExcerpt, stripLeadingHeading, textSearch, semanticSearch, bestSemanticScore } from './search';
+import {
+  rrfMerge, makeExcerpt, stripLeadingHeading, textSearch, semanticSearch, bestSemanticScore,
+  semanticRelevance, textRankRelevance, confidenceFor,
+} from './search';
+
+const ANCHORS = { floor: 0.40, strong: 0.55 };
 
 beforeEach(() => {
   dbQuery.mockReset().mockResolvedValue([]);
   getEmbedding.mockReset().mockResolvedValue([0.1, 0.2]);
-  getMinSimilarity.mockReset().mockResolvedValue(0.55);
+  getRelevanceAnchors.mockReset().mockResolvedValue(ANCHORS);
 });
 
 const make = (id: string, score = 0) => ({ id, title: id, excerpt: '', tags: [] as string[], score });
@@ -79,6 +84,14 @@ describe('rrfMerge', () => {
     const merged = rrfMerge([text([make('a', 0.9)]), semantic([make('b', 0.72)])]);
     expect(merged.find((r) => r.id === 'a')!.matched_by).toEqual(['text_score']);
     expect(merged.find((r) => r.id === 'b')!.matched_by).toEqual(['semantic_score']);
+  });
+
+  it('takes the max relevance across arms (they corroborate, not sum)', () => {
+    const strongText = { ...make('a', 0.9), relevance: 0.9, confidence: 'strong' as const };
+    const weakSem    = { ...make('a', 0.42), relevance: 0.13, confidence: 'weak' as const };
+    const merged = rrfMerge([text([strongText]), semantic([weakSem])]);
+    expect(merged[0].relevance).toBe(0.9);
+    expect(merged[0].confidence).toBe('strong');
   });
 
   it('matched_by lists both passes for a note present in each', () => {
@@ -163,6 +176,67 @@ describe('stripLeadingHeading', () => {
   it('leaves headingless content and mid-text hashes alone', () => {
     expect(stripLeadingHeading('plain body\n# not the first line')).toBe('plain body\n# not the first line');
     expect(stripLeadingHeading('C# is a language')).toBe('C# is a language');
+  });
+});
+
+describe('relevance normalization', () => {
+  it('semanticRelevance maps cosine through floor/strong, clamped', () => {
+    expect(semanticRelevance(0.30, ANCHORS)).toBe(0);   // below floor
+    expect(semanticRelevance(0.40, ANCHORS)).toBe(0);   // at floor
+    expect(semanticRelevance(0.475, ANCHORS)).toBeCloseTo(0.5, 5); // midpoint
+    expect(semanticRelevance(0.55, ANCHORS)).toBe(1);   // at strong
+    expect(semanticRelevance(0.90, ANCHORS)).toBe(1);   // clamp above strong
+  });
+
+  it('textRankRelevance caps and scales ts_rank', () => {
+    expect(textRankRelevance(0)).toBe(0);
+    expect(textRankRelevance(0.075)).toBeCloseTo(0.5, 5);
+    expect(textRankRelevance(0.15)).toBe(1);
+    expect(textRankRelevance(0.30)).toBe(1); // clamp
+  });
+
+  it('confidenceFor buckets by the strong/weak thresholds', () => {
+    expect(confidenceFor(0.70)).toBe('strong');
+    expect(confidenceFor(0.699)).toBe('moderate');
+    expect(confidenceFor(0.35)).toBe('moderate');
+    expect(confidenceFor(0.349)).toBe('weak');
+    expect(confidenceFor(0)).toBe('weak');
+  });
+});
+
+describe('relevance annotation on results', () => {
+  it('semanticSearch attaches relevance/confidence from the cosine', async () => {
+    dbQuery.mockResolvedValueOnce([
+      { id: 'a', title: 'A', chunk_content: 'body', heading: null, tags: [], similarity: 0.52 },
+      { id: 'b', title: 'B', chunk_content: 'body', heading: null, tags: [], similarity: 0.41 },
+    ]);
+    const [a, b] = await semanticSearch('q', 5);
+    expect(a.relevance).toBeCloseTo(0.8, 3);   // (0.52-0.40)/0.15
+    expect(a.confidence).toBe('strong');
+    expect(b.confidence).toBe('weak');          // (0.41-0.40)/0.15 ≈ 0.067
+  });
+
+  it('textSearch (FTS) attaches relevance from ts_rank', async () => {
+    dbQuery.mockResolvedValueOnce([
+      { id: 'a', title: 'A', tags: [], rank: 0.15, headline: 'hi' },
+      { id: 'b', title: 'B', tags: [], rank: 0.05, headline: 'hi' },
+    ]);
+    const [a, b] = await textSearch('q', 5);
+    expect(a.relevance).toBe(1);
+    expect(a.confidence).toBe('strong');
+    expect(b.confidence).toBe('weak');          // 0.05/0.15 ≈ 0.333
+  });
+
+  it('substring fallback attaches positional relevance (top hit reads confident)', async () => {
+    dbQuery
+      .mockResolvedValueOnce([])                                                   // FTS: nothing
+      .mockResolvedValueOnce([{ id: 'a', title: 'kmv8 box', content: 'x', tags: [] }]) // byTitle
+      .mockResolvedValueOnce([{ id: 'b', title: 'B', content: 'kmv8', tags: [] }]);    // byContent
+    const [a, b] = await textSearch('kmv8', 5);
+    expect(a.relevance).toBe(1);   // 1/(0+1)
+    expect(a.confidence).toBe('strong');
+    expect(b.relevance).toBe(0.5); // 1/(1+1)
+    expect(b.confidence).toBe('moderate');
   });
 });
 

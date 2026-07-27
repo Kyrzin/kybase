@@ -86,13 +86,13 @@ beforeEach(() => {
 });
 
 describe('tools/list', () => {
-  it('registers all 13 tools', async () => {
+  it('registers all 14 tools', async () => {
     const client = await connectClient();
     const { tools } = await client.listTools();
     expect(tools.map(t => t.name).sort()).toEqual([
       'create_folder', 'create_note', 'delete_folder', 'delete_note', 'get_backlinks',
       'get_graph', 'get_note', 'get_note_with_links', 'list_folders', 'list_notes',
-      'search_notes', 'update_folder', 'update_note',
+      'list_tags', 'search_notes', 'update_folder', 'update_note',
     ]);
   });
 
@@ -124,6 +124,26 @@ describe('list_notes', () => {
     const [sql, params] = query.mock.calls[0];
     expect(sql).not.toContain('where');
     expect(params).toEqual([50]); // default limit
+  });
+});
+
+describe('list_tags', () => {
+  it('returns the tag/count rows from an unnest+group-by, most-used first', async () => {
+    query.mockResolvedValue([{ tag: 'workflow', count: 9 }, { tag: 'проект', count: 3 }]);
+    const out = await call('list_tags', {}) as { tag: string; count: number }[];
+    const [sql] = query.mock.calls[0];
+    expect(sql).toContain('unnest(tags)');
+    expect(sql).toContain('count(*)');
+    expect(sql).toContain('order by count desc');
+    expect(out).toEqual([{ tag: 'workflow', count: 9 }, { tag: 'проект', count: 3 }]);
+  });
+
+  it('is advertised in the create_note/update_note tag guidance', async () => {
+    const client = await connectClient();
+    const { tools } = await client.listTools();
+    for (const name of ['create_note', 'update_note']) {
+      expect(tools.find(t => t.name === name)!.description).toContain('list_tags');
+    }
   });
 });
 

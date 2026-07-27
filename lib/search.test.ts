@@ -14,7 +14,7 @@ vi.mock('./embeddings', () => ({
   getMinSimilarity: (...a: unknown[]) => getMinSimilarity(...a),
 }));
 
-import { rrfMerge, makeExcerpt, textSearch, semanticSearch, bestSemanticScore } from './search';
+import { rrfMerge, makeExcerpt, stripLeadingHeading, textSearch, semanticSearch, bestSemanticScore } from './search';
 
 beforeEach(() => {
   dbQuery.mockReset().mockResolvedValue([]);
@@ -130,6 +130,40 @@ describe('makeExcerpt', () => {
   it('handles empty content', () => {
     expect(makeExcerpt('')).toBe('');
   });
+
+  it('snaps a mid-word cut back to a whitespace boundary at both edges', () => {
+    // Real prose (spaces throughout) so the snap can find boundaries.
+    const words = 'alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike';
+    const content = words + ' ' + words + ' ' + words;
+    const out = makeExcerpt(content, 'hotel india', 60);
+    expect(out).toContain('hotel india');
+    expect(out.startsWith('…')).toBe(true);
+    expect(out.endsWith('…')).toBe(true);
+    // Every token between the ellipses is a complete word from the source —
+    // neither edge left a half-word dangling against its "…".
+    const vocab = new Set(words.split(' '));
+    for (const w of out.replace(/^…|…$/g, '').trim().split(/\s+/)) {
+      expect(vocab.has(w)).toBe(true);
+    }
+  });
+
+  it('keeps a hard cut when there is no nearby whitespace to snap to', () => {
+    const long = 'a'.repeat(500);
+    const out = makeExcerpt(long, undefined, 300);
+    expect(out).toBe('a'.repeat(300) + '…'); // unchanged: no boundary within the snap window
+  });
+});
+
+describe('stripLeadingHeading', () => {
+  it('drops a leading markdown heading line', () => {
+    expect(stripLeadingHeading('## Раздел\n\nтело секции')).toBe('тело секции');
+    expect(stripLeadingHeading('# H\nbody')).toBe('body');
+  });
+
+  it('leaves headingless content and mid-text hashes alone', () => {
+    expect(stripLeadingHeading('plain body\n# not the first line')).toBe('plain body\n# not the first line');
+    expect(stripLeadingHeading('C# is a language')).toBe('C# is a language');
+  });
 });
 
 describe('textSearch — filters', () => {
@@ -187,6 +221,17 @@ describe('semanticSearch — filters', () => {
     const results = await semanticSearch('q', 3, { tag: 'work' });
     expect(dbQuery.mock.calls[0][1][1]).toBe(24); // 3 * 8
     expect(results.map((r) => r.id)).toEqual(['b']);
+  });
+
+  it('shows the section heading once, not duplicated by the chunk\'s own heading line', async () => {
+    dbQuery.mockResolvedValueOnce([{
+      id: 'a', title: 'A',
+      chunk_content: '## Диагностика\n\nnomic оказалась непригодна на русском',
+      heading: 'Диагностика', tags: [], similarity: 0.6,
+    }]);
+    const [r] = await semanticSearch('nomic русский', 5);
+    expect(r.excerpt).toBe('[Диагностика] nomic оказалась непригодна на русском');
+    expect(r.excerpt).not.toContain('##'); // markdown heading line stripped from the body
   });
 });
 

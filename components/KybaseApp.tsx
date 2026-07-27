@@ -23,7 +23,7 @@ export default function KybaseApp() {
   const [aiResults, setAiResults]     = useState<SearchHit[] | null>(null);
   const [aiLoading, setAiLoading]     = useState(false);
   const [sidebarOpen, setSidebarOpen]   = useState(typeof window !== 'undefined' ? window.innerWidth >= 768 : true);
-  const [rightPanel, setRightPanel]     = useState<'backlinks' | 'graph' | 'ai' | null>(null);
+  const [rightPanel, setRightPanel]     = useState<'backlinks' | 'graph' | 'ai' | 'outline' | null>(null);
   const [graphFullscreen, setGraphFullscreen] = useState(false);
   const [semanticEdges, setSemanticEdges] = useState<{ from: string; to: string; score: number }[]>([]);
   const graphFitRef = useRef<(() => void) | null>(null);
@@ -272,6 +272,7 @@ export default function KybaseApp() {
           <div className="topbar-sep" />
           {activeNote && <span className="topbar-note-title">{editMode ? editTitle : activeNote.title}</span>}
           <div className="topbar-sep" />
+          <button className={`topbar-btn ${rightPanel === 'outline' ? 'active' : ''}`} onClick={() => { const n = rightPanel === 'outline' ? null : 'outline'; setRightPanel(n); setPanelWidth(300); }} title="Outline">{Icons.outline}</button>
           <button className={`topbar-btn ${rightPanel === 'backlinks' ? 'active' : ''}`} onClick={() => { const n = rightPanel === 'backlinks' ? null : 'backlinks'; setRightPanel(n); setPanelWidth(300); }} title="Backlinks">{Icons.link}</button>
           <button className={`topbar-btn ${rightPanel === 'graph' ? 'active' : ''}`} onClick={() => { const n = rightPanel === 'graph' ? null : 'graph'; setRightPanel(n); setGraphFullscreen(false); setPanelWidth(n === 'graph' && window.innerWidth >= 768 ? Math.min(Math.floor(window.innerWidth * 0.38), 560) : 300); }} title="Graph View">{Icons.graph}</button>
           <button className={`topbar-btn ${rightPanel === 'ai' ? 'active' : ''}`} onClick={() => { const n = rightPanel === 'ai' ? null : 'ai'; setRightPanel(n); setPanelWidth(300); }} title="AI Search">{Icons.ai}</button>
@@ -384,6 +385,9 @@ export default function KybaseApp() {
               aiLoading={aiLoading}
               aiResults={aiResults}
               filterByTag={filterByTag}
+              editMode={editMode}
+              setEditMode={setEditMode}
+              editContent={editContent}
             />
           )}
         </div>

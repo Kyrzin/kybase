@@ -26,6 +26,36 @@ export type BuildGraphOptions = {
   minScore?: number;
 };
 
+type TitledNote = { id: string; title: string };
+
+/**
+ * Resolve root_title the same forgiving way get_note/get_backlinks do
+ * (findNoteByTitle in mcp-server.ts): exact, then unique prefix, then unique
+ * substring — case-insensitive. In-memory because buildGraph already loaded
+ * every note. Throws with candidates on ambiguity, or a clear miss otherwise,
+ * so a partial title stops failing where it succeeds elsewhere.
+ */
+function resolveRootTitle<T extends TitledNote>(notes: T[], rootTitle: string, folderId?: string): T {
+  const q = rootTitle.toLowerCase();
+  const exact = notes.find((n) => n.title.toLowerCase() === q);
+  if (exact) return exact;
+
+  for (const test of [
+    (t: string) => t.startsWith(q),
+    (t: string) => t.includes(q),
+  ]) {
+    const hits = notes.filter((n) => test(n.title.toLowerCase()));
+    if (hits.length === 1) return hits[0];
+    if (hits.length > 1) {
+      throw new Error(
+        `root_title "${rootTitle}" matches ${hits.length} notes — pass a fuller title:\n` +
+        JSON.stringify(hits.map(({ id, title }) => ({ id, title })), null, 2)
+      );
+    }
+  }
+  throw new Error(`No note titled "${rootTitle}" found${folderId ? ' within the given folder' : ''}`);
+}
+
 export async function buildGraph(opts: BuildGraphOptions = {}): Promise<Graph> {
   const { folderId, rootTitle, depth = 2, includeSemantic = true, minScore = SEMANTIC_THRESHOLD } = opts;
 
@@ -55,10 +85,7 @@ export async function buildGraph(opts: BuildGraphOptions = {}): Promise<Graph> {
   let edges = dedupeEdges(buildWikilinkEdges(notes));
 
   if (rootTitle) {
-    const root = notes.find((n) => n.title.toLowerCase() === rootTitle.toLowerCase());
-    if (!root) {
-      throw new Error(`No note titled "${rootTitle}" found${folderId ? ' within the given folder' : ''}`);
-    }
+    const root = resolveRootTitle(notes, rootTitle, folderId);
     // BFS over wikilink edges, treated as undirected for neighborhood purposes
     // (a note two hops away via an inbound link is still "nearby").
     const adjacency = new Map<string, Set<string>>();

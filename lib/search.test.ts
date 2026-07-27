@@ -9,20 +9,24 @@ vi.mock('./db', () => ({
 
 const getEmbedding = vi.fn();
 const getMinSimilarity = vi.fn();
+const getRelevanceAnchors = vi.fn();
 vi.mock('./embeddings', () => ({
   getEmbedding: (...a: unknown[]) => getEmbedding(...a),
   getMinSimilarity: (...a: unknown[]) => getMinSimilarity(...a),
+  getRelevanceAnchors: (...a: unknown[]) => getRelevanceAnchors(...a),
 }));
 
-import { rrfMerge, makeExcerpt, stripLeadingHeading, textSearch, semanticSearch, bestSemanticScore } from './search';
+import { rrfMerge, makeExcerpt, stripLeadingHeading, textSearch, semanticSearch, bestSemanticScore, normalizeRelevance, confidenceFor } from './search';
 
 beforeEach(() => {
   dbQuery.mockReset().mockResolvedValue([]);
   getEmbedding.mockReset().mockResolvedValue([0.1, 0.2]);
   getMinSimilarity.mockReset().mockResolvedValue(0.55);
+  getRelevanceAnchors.mockReset().mockResolvedValue({ floor: 0.55, strong: 0.75 });
 });
 
-const make = (id: string, score = 0) => ({ id, title: id, excerpt: '', tags: [] as string[], score });
+const make = (id: string, score = 0, relevance = 0.5) =>
+  ({ id, title: id, excerpt: '', tags: [] as string[], score, relevance, confidence: confidenceFor(relevance) });
 const text     = (results: ReturnType<typeof make>[]) => ({ field: 'text_score' as const, results });
 const semantic = (results: ReturnType<typeof make>[]) => ({ field: 'semantic_score' as const, results });
 
@@ -246,5 +250,72 @@ describe('bestSemanticScore', () => {
   it('returns null when nothing matches at all', async () => {
     dbQuery.mockResolvedValueOnce([]);
     expect(await bestSemanticScore('q')).toBeNull();
+  });
+});
+
+describe('relevance normalization', () => {
+  it('maps floor to 0, strong to 1, clamps outside', () => {
+    const a = { floor: 0.4, strong: 0.6 };
+    expect(normalizeRelevance(0.4, a)).toBe(0);
+    expect(normalizeRelevance(0.6, a)).toBe(1);
+    expect(normalizeRelevance(0.5, a)).toBeCloseTo(0.5, 5);
+    expect(normalizeRelevance(0.2, a)).toBe(0);
+    expect(normalizeRelevance(0.9, a)).toBe(1);
+  });
+
+  it('returns 0 for degenerate anchors instead of dividing by zero', () => {
+    expect(normalizeRelevance(0.5, { floor: 0.5, strong: 0.5 })).toBe(0);
+  });
+
+  it('confidence bands: >=0.7 strong, >=0.35 moderate, else weak', () => {
+    expect(confidenceFor(0.7)).toBe('strong');
+    expect(confidenceFor(0.5)).toBe('moderate');
+    expect(confidenceFor(0.34)).toBe('weak');
+  });
+
+  it('rrfMerge keeps the MAX relevance across arms, not a sum', () => {
+    const merged = rrfMerge([
+      { field: 'text_score', results: [make('a', 0.09, 0.3)] },
+      { field: 'semantic_score', results: [make('a', 0.62, 0.9)] },
+    ]);
+    expect(merged[0].relevance).toBe(0.9);
+    expect(merged[0].confidence).toBe('strong');
+  });
+
+  it('a single-arm hit keeps its full relevance despite the RRF rank penalty', () => {
+    const merged = rrfMerge([
+      { field: 'text_score', results: [make('both', 0.09, 0.6), make('solo-text', 0.05, 0.4)] },
+      { field: 'semantic_score', results: [make('both', 0.6, 0.6)] },
+    ]);
+    const solo = merged.find(r => r.id === 'solo-text')!;
+    expect(solo.relevance).toBe(0.4);
+    expect(solo.matched_by).toEqual(['text_score']);
+  });
+
+  it('semanticSearch normalizes cosine against the model anchors', async () => {
+    dbQuery.mockResolvedValue([
+      { id: 'n1', title: 'N1', chunk_content: 'body', heading: null, tags: [], similarity: 0.75 },
+      { id: 'n2', title: 'N2', chunk_content: 'body', heading: null, tags: [], similarity: 0.55 },
+    ]);
+    const out = await semanticSearch('q', 5);
+    expect(out[0].relevance).toBe(1);
+    expect(out[0].confidence).toBe('strong');
+    expect(out[1].relevance).toBe(0);
+    expect(out[1].confidence).toBe('weak');
+    // the RPC still receives the floor as its cosine threshold
+    expect(dbQuery.mock.calls[0][1][2]).toBe(0.55);
+  });
+
+  it('substring fallback: title hits rate above content hits', async () => {
+    // FTS returns nothing → fallback; first query is byTitle, second byContent
+    dbQuery
+      .mockResolvedValueOnce([])                                              // search_notes_fts
+      .mockResolvedValueOnce([{ id: 't', title: 'kmv', content: 'x', tags: [] }])   // ilike title
+      .mockResolvedValueOnce([{ id: 'c', title: 'other', content: 'kmv', tags: [] }]); // ilike content
+    const out = await textSearch('kmv', 5);
+    const byId = Object.fromEntries(out.map(r => [r.id, r]));
+    expect(byId['t'].relevance).toBe(0.65);
+    expect(byId['c'].relevance).toBe(0.5);
+    expect(byId['t'].confidence).toBe('moderate');
   });
 });

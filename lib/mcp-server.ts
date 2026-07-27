@@ -328,10 +328,13 @@ export function createMcpServer(): McpServer {
     'Hybrid is the right default; prefer type=text for exact identifiers, code fragments, or quoted ' +
     'phrases, where FTS beats meaning-matching. ' +
     'Returns short excerpts, not full notes — call get_note with the id to read a full note. ' +
-    'On hybrid results, `score` is rank fusion, not a relevance measure — use the per-hit ' +
-    'text_score (FTS relevance) / semantic_score (raw cosine similarity) to judge how strong a ' +
-    'match actually is; higher is more relevant within each field, but the two are not comparable ' +
-    'to each other. Optional filters (folder_id, tag, updated_after/before) narrow to notes matching ' +
+    'Every hit carries `relevance` (0..1, normalized against model-calibrated anchors) and ' +
+    '`confidence` ("strong" | "moderate" | "weak") — use THESE to decide whether the results ' +
+    'suffice to answer: strong hits can be quoted directly, moderate ones deserve a get_note check, ' +
+    'an all-weak page means reformulate. Relevance is comparable within one query\'s results, not ' +
+    'across queries or models. The raw fields remain for debugging: `score` is RRF rank fusion ' +
+    '(hybrid sort order, NOT relevance), text_score is FTS ts_rank, semantic_score is raw cosine. ' +
+    'Optional filters (folder_id, tag, updated_after/before) narrow to notes matching ' +
     'ALL given ones. An empty semantic/hybrid result includes threshold/best_score/pending_embeddings ' +
     'so you can tell "nothing this relevant exists" from "just under the threshold" from "embeddings ' +
     'not generated yet" — a bare [] can\'t distinguish those.',

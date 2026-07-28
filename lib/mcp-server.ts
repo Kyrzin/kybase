@@ -3,16 +3,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { query, queryOne, withTransaction, isUniqueViolation } from './db';
+import { escapeLike } from './sql';
 import { textSearch, semanticSearch, hybridSearch, makeExcerpt, bestSemanticScore, type SearchResult } from './search';
 import { getMinSimilarity } from './embeddings';
 import { indexNoteAsync } from './indexing';
 import { extractAllWikilinks } from './wikilinks';
 import { buildGraph } from './graph-data';
 
-/** Escape ilike wildcards so a title containing %/_ can't widen the match. */
-function escapeLike(s: string): string {
-  return s.replace(/[%_\\]/g, (c) => `\\${c}`);
-}
 
 // get_note(title=...) is the shortcut past search_notes, but real titles are long
 // and composite ("2026-07-24 — Kybase: Move-folder + UX-полировка сайдбара"), and

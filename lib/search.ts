@@ -1,6 +1,7 @@
 // lib/search.ts — text (FTS + substring fallback), semantic (chunk-based), and hybrid (RRF) search
 import { query as dbQuery, toVector } from './db';
 import { getEmbedding, getRelevanceAnchors, type RelevanceAnchors } from './embeddings';
+import { escapeLike } from './sql';
 
 export type Confidence = 'strong' | 'moderate' | 'weak';
 
@@ -244,7 +245,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
 /** Title matches rank above content matches (queried separately, merged in order). */
 async function substringSearch(query: string, limit: number, filters?: SearchFilters): Promise<SearchResult[]> {
   const cols = 'id, title, content, tags';
-  const escapedQuery = query.replace(/[%_]/g, '\\$&');
+  const escapedQuery = escapeLike(query);
   const fetchLimit = overfetchLimit(limit, filters);
   const [byTitle, byContent] = await Promise.all([
     dbQuery<NoteRow>(`select ${cols} from notes where title ilike $1 limit $2`, [`%${escapedQuery}%`, fetchLimit]),

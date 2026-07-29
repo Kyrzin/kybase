@@ -29,7 +29,7 @@ async function reindexRows(rows: { id: string; title: string; content: string }[
 
 export async function reindexPending(): Promise<ReindexResult> {
   const pending = await query<{ id: string; title: string; content: string }>(
-    'select id, title, content from notes where embedding_pending = true'
+    'select id, title, content from notes where embedding_pending = true and deleted_at is null'
   );
   return reindexRows(pending);
 }
@@ -41,7 +41,7 @@ export async function reindexPending(): Promise<ReindexResult> {
 // exposed as the "Reindex all" button in Settings.
 export async function reindexAll(): Promise<ReindexResult> {
   const all = await query<{ id: string; title: string; content: string }>(
-    'select id, title, content from notes order by created_at'
+    'select id, title, content from notes where deleted_at is null order by created_at'
   );
   return reindexRows(all);
 }

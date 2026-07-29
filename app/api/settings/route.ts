@@ -41,9 +41,9 @@ export async function PUT(req: NextRequest) {
   if (body.openaiApiKey) await setSetting('openai_api_key',     body.openaiApiKey);
   if (body.ollamaModel)  await setSetting('ollama_model',       body.ollamaModel);
 
-  // Mark all notes for reindex when provider changes
+  // Mark all live notes for reindex when provider changes
   if (providerChanged) {
-    await query('update notes set embedding_pending = true');
+    await query('update notes set embedding_pending = true where deleted_at is null');
   }
 
   return NextResponse.json({ ok: true, reindexTriggered: providerChanged });

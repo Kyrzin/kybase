@@ -44,7 +44,7 @@ describe('reindexPending', () => {
 });
 
 describe('reindexAll', () => {
-  it('selects every note regardless of embedding_pending', async () => {
+  it('selects every live note regardless of embedding_pending, excluding trashed ones', async () => {
     mockQuery.mockResolvedValue([
       { id: '1', title: 'a', content: 'x' },
       { id: '2', title: 'b', content: 'y' },
@@ -53,7 +53,8 @@ describe('reindexAll', () => {
 
     const result = await reindexAll();
 
-    expect(mockQuery.mock.calls[0][0]).not.toContain('where');
+    expect(mockQuery.mock.calls[0][0]).not.toContain('embedding_pending');
+    expect(mockQuery.mock.calls[0][0]).toContain('deleted_at is null');
     expect(mockIndexNote).toHaveBeenCalledTimes(2);
     expect(result).toEqual({ reindexed: 2, errors: [], total: 2 });
   });

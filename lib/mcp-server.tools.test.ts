@@ -86,13 +86,13 @@ beforeEach(() => {
 });
 
 describe('tools/list', () => {
-  it('registers all 14 tools', async () => {
+  it('registers all 15 tools', async () => {
     const client = await connectClient();
     const { tools } = await client.listTools();
     expect(tools.map(t => t.name).sort()).toEqual([
       'create_folder', 'create_note', 'delete_folder', 'delete_note', 'get_backlinks',
       'get_graph', 'get_note', 'get_note_with_links', 'list_folders', 'list_notes',
-      'list_tags', 'search_notes', 'update_folder', 'update_note',
+      'list_tags', 'restore_note', 'search_notes', 'update_folder', 'update_note',
     ]);
   });
 
@@ -119,11 +119,19 @@ describe('list_notes', () => {
     expect(params).toEqual(['11111111-1111-4111-8111-111111111111', ['x'], 10]);
   });
 
-  it('omits the WHERE clause when unfiltered', async () => {
+  it('always excludes trashed notes, even unfiltered', async () => {
     await call('list_notes', {});
     const [sql, params] = query.mock.calls[0];
-    expect(sql).not.toContain('where');
+    expect(sql).toContain('deleted_at is null');
     expect(params).toEqual([50]); // default limit
+  });
+
+  it('trashed:true lists soft-deleted notes instead, ignoring folder_id/tag', async () => {
+    query.mockResolvedValue([{ id: '1', title: 'Gone', deleted_at: '2026-01-01T00:00:00Z' }]);
+    await call('list_notes', { trashed: true, limit: 20 });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain('deleted_at is not null');
+    expect(params).toEqual([20]);
   });
 });
 
@@ -309,6 +317,35 @@ describe('update_note', () => {
     withTransaction.mockRejectedValueOnce(Object.assign(new Error('dup'), { code: '23505' }));
     expect(await callExpectingError('update_note', { id: '11111111-1111-4111-8111-111111111111', title: 'Taken' }))
       .toContain('already exists');
+  });
+});
+
+describe('delete_note / restore_note', () => {
+  const id = '11111111-1111-4111-8111-111111111111';
+
+  it('delete_note soft-deletes: sets deleted_at instead of removing the row', async () => {
+    queryOne.mockResolvedValueOnce({ id }); // softDeleteNote's update ... returning id
+    const out = await call('delete_note', { id });
+    expect(queryOne.mock.calls[0][0]).toMatch(/update notes set deleted_at = now\(\)/);
+    expect(queryOne.mock.calls[0][1]).toEqual([id]);
+    expect(out).toContain('trash');
+  });
+
+  it('delete_note errors on an unknown or already-deleted note', async () => {
+    queryOne.mockResolvedValueOnce(null);
+    expect(await callExpectingError('delete_note', { id })).toContain('not found');
+  });
+
+  it('restore_note clears deleted_at on a trashed note', async () => {
+    queryOne.mockResolvedValueOnce({ id });
+    const out = await call('restore_note', { id });
+    expect(queryOne.mock.calls[0][0]).toMatch(/update notes set deleted_at = null/);
+    expect(out).toContain('restored');
+  });
+
+  it('restore_note errors when the note is not in the trash', async () => {
+    queryOne.mockResolvedValueOnce(null);
+    expect(await callExpectingError('restore_note', { id })).toContain('not in trash');
   });
 });
 

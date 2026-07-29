@@ -88,8 +88,10 @@ export async function POST(req: NextRequest) {
 
       // btrim both sides: titles created before write-time trimming existed
       // may carry invisible padding and must still match their export.
+      // deleted_at is null: a title held only by a trashed note is free —
+      // import creates a fresh live note rather than resurrecting the old one.
       const existing = await queryOne<{ id: string }>(
-        'select id from notes where lower(btrim(title)) = lower(btrim($1))', [title]
+        'select id from notes where lower(btrim(title)) = lower(btrim($1)) and deleted_at is null', [title]
       );
       if (existing) {
         if (mode === 'skip') { skipped++; continue; }

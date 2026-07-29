@@ -14,7 +14,7 @@ export async function GET(req: NextRequest) {
   const limit  = Math.min(Math.max(parseInt(searchParams.get('limit')  ?? '', 10) || 0, 0), 1000);
   const offset = Math.max(parseInt(searchParams.get('offset') ?? '', 10) || 0, 0);
 
-  const conds: string[] = [];
+  const conds: string[] = ['deleted_at is null'];
   const params: unknown[] = [];
   if (folder_id) { params.push(folder_id); conds.push(`folder_id = $${params.length}`); }
   if (tag)       { params.push([tag]);     conds.push(`tags @> $${params.length}`); }
@@ -26,7 +26,7 @@ export async function GET(req: NextRequest) {
   try {
     const data = await query(
       `select ${NOTE_SELECT} from notes
-       ${conds.length ? 'where ' + conds.join(' and ') : ''}
+       where ${conds.join(' and ')}
        order by updated_at desc${paging}`,
       params
     );

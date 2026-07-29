@@ -11,7 +11,7 @@ export async function GET() {
   let notes: ExportNote[], folders: ExportFolder[];
   try {
     [notes, folders] = await Promise.all([
-      query<ExportNote>('select title, content, folder_id, tags, created_at, updated_at from notes order by title'),
+      query<ExportNote>('select title, content, folder_id, tags, created_at, updated_at from notes where deleted_at is null order by title'),
       query<ExportFolder>('select id, name, parent_id from folders'),
     ]);
   } catch (err) {

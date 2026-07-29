@@ -3,6 +3,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { query, queryOne, withTransaction, isUniqueViolation } from './db';
+import { softDeleteNote, restoreNote, TRASH_RETENTION_DAYS } from './trash';
 import { escapeLike } from './sql';
 import { textSearch, semanticSearch, hybridSearch, makeExcerpt, bestSemanticScore, type SearchResult } from './search';
 import { getMinSimilarity } from './embeddings';
@@ -32,7 +33,8 @@ async function nearestTitles(title: string): Promise<string[]> {
   const params: unknown[] = words.map((w) => `%${escapeLike(w)}%`);
   params.push(TITLE_HINT_LIMIT);
   const rows = await query<{ title: string }>(
-    `select title from notes where ${words.map((_, i) => `title ilike $${i + 1}`).join(' or ')}
+    `select title from notes where (${words.map((_, i) => `title ilike $${i + 1}`).join(' or ')})
+     and deleted_at is null
      order by updated_at desc limit $${params.length}`,
     params
   );
@@ -42,12 +44,12 @@ async function nearestTitles(title: string): Promise<string[]> {
 /** Resolve a note by title: exact, then prefix, then substring. Throws if ambiguous or missing. */
 async function findNoteByTitle<T>(title: string, cols: string): Promise<T> {
   const escaped = escapeLike(title);
-  const exact = await queryOne<T>(`select ${cols} from notes where title ilike $1`, [escaped]);
+  const exact = await queryOne<T>(`select ${cols} from notes where title ilike $1 and deleted_at is null`, [escaped]);
   if (exact) return exact;
 
   for (const pattern of [`${escaped}%`, `%${escaped}%`]) {
     const rows = await query<T & TitleCandidate>(
-      `select ${cols} from notes where title ilike $1 order by length(title), updated_at desc limit $2`,
+      `select ${cols} from notes where title ilike $1 and deleted_at is null order by length(title), updated_at desc limit $2`,
       [pattern, TITLE_CANDIDATE_LIMIT]
     );
     if (rows.length === 1) return rows[0];
@@ -155,14 +157,25 @@ export function createMcpServer(): McpServer {
   // ── list_notes ───────────────────────────────────────────────────────────
   server.tool(
     'list_notes',
-    'List notes. Optional filters: folder_id, tag, limit (max 200).',
+    'List notes. Optional filters: folder_id, tag, limit (max 200). Pass trashed:true to see ' +
+    'soft-deleted notes instead (deleted via delete_note, recoverable with restore_note until ' +
+    'they age out of the trash) — folder_id/tag are ignored in that mode.',
     {
       folder_id: z.string().uuid().optional().describe('Filter by folder UUID'),
       tag:       z.string().optional().describe('Filter by tag'),
       limit:     z.number().int().min(1).max(200).default(50),
+      trashed:   z.boolean().default(false).describe('List soft-deleted notes instead of live ones'),
     },
-    async ({ folder_id, tag, limit }) => {
-      const conds: string[] = [];
+    async ({ folder_id, tag, limit, trashed }) => {
+      if (trashed) {
+        const data = await query<{ id: string; title: string; folder_id: string | null; deleted_at: string }>(
+          'select id, title, folder_id, deleted_at from notes where deleted_at is not null order by deleted_at desc limit $1',
+          [limit]
+        );
+        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      }
+
+      const conds: string[] = ['deleted_at is null'];
       const params: unknown[] = [];
       if (folder_id) { params.push(folder_id); conds.push(`folder_id = $${params.length}`); }
       if (tag)       { params.push([tag]);     conds.push(`tags @> $${params.length}`); }
@@ -170,7 +183,7 @@ export function createMcpServer(): McpServer {
       const [data, paths] = await Promise.all([
         query<{ id: string; title: string; folder_id: string | null; tags: string[]; updated_at: string }>(
           `select id, title, folder_id, tags, updated_at from notes
-           ${conds.length ? 'where ' + conds.join(' and ') : ''}
+           where ${conds.join(' and ')}
            order by updated_at desc limit $${params.length}`,
           params
         ),
@@ -203,7 +216,7 @@ export function createMcpServer(): McpServer {
       // title can't widen the match beyond the step being attempted.
       const [data, paths] = await Promise.all([
         id
-          ? queryOne<{ content: string; folder_id: string | null }>(`select ${cols} from notes where id = $1`, [id])
+          ? queryOne<{ content: string; folder_id: string | null }>(`select ${cols} from notes where id = $1 and deleted_at is null`, [id])
           : findNoteByTitle<{ content: string; folder_id: string | null }>(title!, cols),
         folderPathMap(),
       ]);
@@ -263,7 +276,7 @@ export function createMcpServer(): McpServer {
     },
     async ({ id, title, content, folder_id, tags }) => {
       const existing = await queryOne<{ title: string; content: string }>(
-        'select title, content from notes where id = $1', [id]
+        'select title, content from notes where id = $1 and deleted_at is null', [id]
       );
       if (!existing) throw new Error('Note not found');
 
@@ -286,7 +299,7 @@ export function createMcpServer(): McpServer {
         // rewrite — a failure between the two leaves [[OldTitle]] links broken.
         note = await withTransaction(async (client) => {
           const { rows } = await client.query(
-            `update notes set ${sets.join(', ')} where id = $${params.length}
+            `update notes set ${sets.join(', ')} where id = $${params.length} and deleted_at is null
              returning id, title, content, folder_id, tags, updated_at`,
             params
           );
@@ -310,11 +323,27 @@ export function createMcpServer(): McpServer {
   // ── delete_note ──────────────────────────────────────────────────────────
   server.tool(
     'delete_note',
-    'Delete a note by id.',
+    `Soft-delete a note by id — it disappears from list_notes/search/get_note/the graph, but is ` +
+    `recoverable with restore_note for ${TRASH_RETENTION_DAYS} days before being purged for good. ` +
+    'Use list_notes with trashed:true to see what\'s currently in the trash.',
     { id: z.string().uuid() },
     async ({ id }) => {
-      await query('delete from notes where id = $1', [id]);
-      return { content: [{ type: 'text' as const, text: `Note ${id} deleted.` }] };
+      const deleted = await softDeleteNote(id);
+      if (!deleted) throw new Error('Note not found (already deleted, or no such note)');
+      return { content: [{ type: 'text' as const, text: `Note ${id} moved to trash — restore_note undoes this within ${TRASH_RETENTION_DAYS} days.` }] };
+    }
+  );
+
+  // ── restore_note ─────────────────────────────────────────────────────────
+  server.tool(
+    'restore_note',
+    'Undo delete_note: brings a soft-deleted note back. No-op error if the note isn\'t in the trash ' +
+    '(never deleted, already restored, or purged past the retention window).',
+    { id: z.string().uuid() },
+    async ({ id }) => {
+      const restored = await restoreNote(id);
+      if (!restored) throw new Error('Note not in trash (never deleted, already restored, or purged)');
+      return { content: [{ type: 'text' as const, text: `Note ${id} restored.` }] };
     }
   );
 
@@ -358,7 +387,7 @@ export function createMcpServer(): McpServer {
       const [threshold, bestScore, pendingRows] = await Promise.all([
         getMinSimilarity(),
         bestSemanticScore(q),
-        query<{ count: number }>('select count(*)::int as count from notes where embedding_pending = true'),
+        query<{ count: number }>('select count(*)::int as count from notes where embedding_pending = true and deleted_at is null'),
       ]);
       return {
         content: [{
@@ -385,7 +414,7 @@ export function createMcpServer(): McpServer {
     async () => {
       const rows = await query<{ tag: string; count: number }>(
         `select unnest(tags) as tag, count(*)::int as count
-         from notes group by 1 order by count desc, tag`
+         from notes where deleted_at is null group by 1 order by count desc, tag`
       );
       return { content: [{ type: 'text' as const, text: JSON.stringify(rows, null, 2) }] };
     }
@@ -493,7 +522,7 @@ export function createMcpServer(): McpServer {
     async ({ title, include_content, limit, offset }) => {
       const [data, paths] = await Promise.all([
         query<{ id: string; title: string; content: string; folder_id: string | null }>(
-          'select id, title, content, folder_id from notes where content ilike $1',
+          'select id, title, content, folder_id from notes where content ilike $1 and deleted_at is null',
           [`%[[${escapeLike(title)}%`]
         ),
         folderPathMap(),
@@ -555,7 +584,7 @@ export function createMcpServer(): McpServer {
       const [note, paths] = await Promise.all([
         id
           ? queryOne<{ id: string; title: string; content: string; folder_id: string | null }>(
-              `select ${cols} from notes where id = $1`, [id])
+              `select ${cols} from notes where id = $1 and deleted_at is null`, [id])
           : findNoteByTitle<{ id: string; title: string; content: string; folder_id: string | null }>(title!, cols),
         folderPathMap(),
       ]);
@@ -572,7 +601,7 @@ export function createMcpServer(): McpServer {
         linkTargets.map(async (target) => {
           if (target.toLowerCase() === note.title.toLowerCase()) return;
           const linked = await queryOne<{ content: string; folder_id: string | null }>(
-            'select id, title, content, folder_id, tags, updated_at from notes where title ilike $1',
+            'select id, title, content, folder_id, tags, updated_at from notes where title ilike $1 and deleted_at is null',
             [escapeLike(target)]
           );
           if (linked) resolved.push(withFolderPath(windowContent(linked, 0, LINKED_NOTE_CONTENT_LIMIT), paths));

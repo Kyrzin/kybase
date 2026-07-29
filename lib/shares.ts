@@ -11,11 +11,11 @@ export async function createShare(noteId: string, expiresInDays?: number): Promi
   const expiresAt = expiresInDays ? new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000) : null;
   const row = await queryOne<Share>(
     `insert into note_shares (token, note_id, expires_at)
-     select $1, id, $2 from notes where id = $3
+     select $1, id, $2 from notes where id = $3 and deleted_at is null
      returning token, note_id, created_at, expires_at`,
     [token, expiresAt, noteId]
   );
-  return row; // null when the note doesn't exist
+  return row; // null when the note doesn't exist (or is trashed)
 }
 
 export async function revokeShare(noteId: string, token: string): Promise<boolean> {
@@ -30,7 +30,7 @@ export async function listShares(): Promise<ShareListItem[]> {
   return query<ShareListItem>(
     `select s.token, s.note_id, s.created_at, s.expires_at, n.title as note_title
      from note_shares s join notes n on n.id = s.note_id
-     where s.expires_at is null or s.expires_at > now()
+     where (s.expires_at is null or s.expires_at > now()) and n.deleted_at is null
      order by s.created_at desc`
   );
 }
@@ -40,13 +40,18 @@ export async function listShares(): Promise<ShareListItem[]> {
  * and expired tokens all take this same path and all return null — the
  * caller can't distinguish them by response or by timing. Only fields safe
  * to show anonymously are selected.
+ *
+ * n.deleted_at is null matters here specifically: soft-deleting a note no
+ * longer cascades away its note_shares row (that only happens on the real,
+ * post-retention purge), so without this check a trashed note's share link
+ * would keep serving its content to the public indefinitely.
  */
 export async function getSharedNote(token: string): Promise<SharedNote | null> {
   if (!token) return null;
   return queryOne<SharedNote>(
     `select n.title, n.content, n.updated_at
      from note_shares s join notes n on n.id = s.note_id
-     where s.token = $1 and (s.expires_at is null or s.expires_at > now())`,
+     where s.token = $1 and (s.expires_at is null or s.expires_at > now()) and n.deleted_at is null`,
     [token]
   );
 }

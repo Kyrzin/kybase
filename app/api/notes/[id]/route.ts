@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { query, queryOne, withTransaction, isUniqueViolation } from '@/lib/db';
+import { queryOne, withTransaction, isUniqueViolation } from '@/lib/db';
 import { indexNoteAsync } from '@/lib/indexing';
+import { softDeleteNote } from '@/lib/trash';
 import { z } from 'zod';
 
 const NOTE_SELECT = 'id, title, content, folder_id, tags, embedding_pending, created_at, updated_at';
@@ -11,7 +12,7 @@ export async function GET(
 ) {
   const { id } = await params;
   const data = await queryOne(
-    `select ${NOTE_SELECT} from notes where id = $1`,
+    `select ${NOTE_SELECT} from notes where id = $1 and deleted_at is null`,
     [id]
   ).catch(() => null);
   if (!data) return NextResponse.json({ error: 'Not found' }, { status: 404 });
@@ -36,9 +37,10 @@ export async function PATCH(
     return NextResponse.json({ error: parsed.error.format() }, { status: 400 });
   }
 
-  // Fetch current to detect changes
+  // Fetch current to detect changes — trashed notes are edited via
+  // restore_note first, not silently resurrected through an update.
   const existing = await queryOne<{ title: string; content: string }>(
-    'select title, content from notes where id = $1',
+    'select title, content from notes where id = $1 and deleted_at is null',
     [id]
   ).catch(() => null);
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
@@ -66,7 +68,7 @@ export async function PATCH(
     // rewrite — a failure between the two leaves [[OldTitle]] links broken.
     note = await withTransaction(async (client) => {
       const { rows } = await client.query(
-        `update notes set ${sets.join(', ')} where id = $${sqlParams.length}
+        `update notes set ${sets.join(', ')} where id = $${sqlParams.length} and deleted_at is null
          returning ${NOTE_SELECT}`,
         sqlParams
       );
@@ -98,11 +100,10 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  try {
-    await query('delete from notes where id = $1', [id]);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : 'Delete failed';
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  // Soft delete (lib/trash.ts): hides the note rather than destroying it —
+  // recoverable via restore_note / POST /api/notes/:id/restore for
+  // TRASH_RETENTION_DAYS, after which it's purged for real.
+  const deleted = await softDeleteNote(id).catch(() => false);
+  if (!deleted) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   return new NextResponse(null, { status: 204 });
 }

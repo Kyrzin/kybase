@@ -60,7 +60,7 @@ export async function buildGraph(opts: BuildGraphOptions = {}): Promise<Graph> {
   const { folderId, rootTitle, depth = 2, includeSemantic = true, minScore = SEMANTIC_THRESHOLD } = opts;
 
   let notes = await query<{ id: string; title: string; content: string; folder_id: string | null }>(
-    'select id, title, content, folder_id from notes'
+    'select id, title, content, folder_id from notes where deleted_at is null'
   );
 
   if (folderId) {

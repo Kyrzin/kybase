@@ -90,7 +90,7 @@ function hasFilters(f?: SearchFilters): f is SearchFilters {
 }
 
 async function filteredNoteIds(filters: SearchFilters): Promise<Set<string>> {
-  const conds: string[] = [];
+  const conds: string[] = ['deleted_at is null'];
   const params: unknown[] = [];
   if (filters.folderId)      { params.push(filters.folderId);      conds.push(`folder_id = $${params.length}`); }
   if (filters.tag)           { params.push([filters.tag]);         conds.push(`tags @> $${params.length}`); }
@@ -248,8 +248,8 @@ async function substringSearch(query: string, limit: number, filters?: SearchFil
   const escapedQuery = escapeLike(query);
   const fetchLimit = overfetchLimit(limit, filters);
   const [byTitle, byContent] = await Promise.all([
-    dbQuery<NoteRow>(`select ${cols} from notes where title ilike $1 limit $2`, [`%${escapedQuery}%`, fetchLimit]),
-    dbQuery<NoteRow>(`select ${cols} from notes where content ilike $1 limit $2`, [`%${escapedQuery}%`, fetchLimit]),
+    dbQuery<NoteRow>(`select ${cols} from notes where title ilike $1 and deleted_at is null limit $2`, [`%${escapedQuery}%`, fetchLimit]),
+    dbQuery<NoteRow>(`select ${cols} from notes where content ilike $1 and deleted_at is null limit $2`, [`%${escapedQuery}%`, fetchLimit]),
   ]);
 
   const seen = new Set<string>();

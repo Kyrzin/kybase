@@ -7,7 +7,7 @@ vi.mock('./db', () => ({
   queryOne: (...args: unknown[]) => mockQueryOne(...args),
 }));
 
-import { softDeleteNote, restoreNote, listTrash, purgeExpiredTrash, TRASH_RETENTION_DAYS } from './trash';
+import { softDeleteNote, restoreNote, listTrash, purgeExpiredTrash, purgeNote, TRASH_RETENTION_DAYS } from './trash';
 
 beforeEach(() => {
   mockQuery.mockReset().mockResolvedValue([]);
@@ -60,5 +60,19 @@ describe('purgeExpiredTrash', () => {
   it('returns the number of rows actually purged', async () => {
     mockQuery.mockResolvedValueOnce([{ id: 'a' }, { id: 'b' }]);
     expect(await purgeExpiredTrash()).toBe(2);
+  });
+});
+
+describe('purgeNote', () => {
+  it('permanently deletes a trashed note and reports success', async () => {
+    mockQueryOne.mockResolvedValueOnce({ id: 'n1' });
+    expect(await purgeNote('n1')).toBe(true);
+    expect(mockQueryOne.mock.calls[0][0]).toMatch(/delete from notes where id = \$1 and deleted_at is not null/);
+    expect(mockQueryOne.mock.calls[0][1]).toEqual(['n1']);
+  });
+
+  it('refuses to purge a note that is not in the trash (still live, or unknown id)', async () => {
+    mockQueryOne.mockResolvedValueOnce(null);
+    expect(await purgeNote('live-note')).toBe(false);
   });
 });

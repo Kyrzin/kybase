@@ -75,6 +75,14 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
     apiFetch('/api/notes').then(r => r.json()).then(setNotes).catch(() => {});
   };
 
+  const purgeNote = async (id: string, title: string) => {
+    if (!window.confirm(`Permanently delete "${title}"? This cannot be undone.`)) return;
+    const res = await apiFetch(`/api/notes/trash/${id}`, { method: 'DELETE' });
+    if (res.ok || res.status === 404) {
+      setTrash(prev => prev.filter(n => n.id !== id));
+    }
+  };
+
   // Permanent links first (they're the ones to worry about), then newest.
   const sortedShares = [...shares].sort((a, b) => {
     if (!a.expires_at !== !b.expires_at) return a.expires_at ? 1 : -1;
@@ -402,6 +410,13 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
                         style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#a6e3a1', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
                       >
                         Restore
+                      </button>
+                      <button
+                        onClick={() => purgeNote(n.id, n.title)}
+                        title="Permanently delete — skips the rest of the 30-day trash window"
+                        style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#f38ba8', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                      >
+                        Delete forever
                       </button>
                     </div>
                   ))}

@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { setSetting, getEmbeddingConfig } from '@/lib/settings';
-import { bearerToken, safeEqual } from '@/lib/auth';
 import { z } from 'zod';
 
 const UpdateSettingsSchema = z.object({
@@ -11,14 +10,12 @@ const UpdateSettingsSchema = z.object({
   ollamaModel:  z.string().min(1).optional(),
 });
 
-function authorized(req: NextRequest): boolean {
-  const secret = process.env.KYBASE_SECRET;
-  return !!secret && safeEqual(bearerToken(req), secret);
-}
-
-export async function GET(req: NextRequest) {
-  if (!authorized(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
+// Auth is middleware.ts (session cookie or master-secret bearer) — this
+// route used to re-check the bearer itself too, which only re-verified the
+// same secret through a second code path and went stale the moment the UI
+// stopped sending it (see the session-cookie change): the browser started
+// getting 401s here even though middleware had already let it through.
+export async function GET() {
   const cfg = await getEmbeddingConfig();
   return NextResponse.json({
     provider: cfg.provider,
@@ -29,8 +26,6 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
-  if (!authorized(req)) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
   const raw    = await req.json().catch(() => ({}));
   const parsed = UpdateSettingsSchema.safeParse(raw);
   if (!parsed.success) {

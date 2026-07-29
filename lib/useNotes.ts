@@ -23,6 +23,14 @@ export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   });
 }
 
+/** Smallest free "Untitled"/"Untitled N" name given lower-cased titles already in use. */
+export function nextUntitledTitle(takenLowercase: Set<string>): string {
+  if (!takenLowercase.has('untitled')) return 'Untitled';
+  let n = 2;
+  while (takenLowercase.has(`untitled ${n}`)) n++;
+  return `Untitled ${n}`;
+}
+
 export type UseNotesCallbacks = {
   onNoteOpened: () => void;                 // selectNote: close mobile sidebar + reset share popover
   onMoveDone: () => void;                   // moveNote finished
@@ -213,18 +221,29 @@ export function useNotes(cb: UseNotesCallbacks) {
   }, [activeNote, saveTags]);
 
   const createNote = useCallback(async (folderId: string | null = null) => {
-    const res = await apiFetch('/api/notes', {
-      method: 'POST',
-      body: JSON.stringify({ title: 'Untitled', content: '# Untitled\n\nStart writing...', folder_id: folderId, tags: [] }),
-    });
-    if (!res.ok) return;
+    // notes.title has a global case-insensitive unique index (migration 006):
+    // a second click always collided with the first "Untitled" note and 409'd
+    // forever. Scan for the smallest free "Untitled"/"Untitled N" slot.
+    const taken = new Set(notes.map(n => n.title.toLowerCase()));
+    let res: Response | undefined;
+    let title = '';
+    for (let attempt = 0; attempt < 5; attempt++) {
+      title = nextUntitledTitle(taken);
+      res = await apiFetch('/api/notes', {
+        method: 'POST',
+        body: JSON.stringify({ title, content: `# ${title}\n\nStart writing...`, folder_id: folderId, tags: [] }),
+      });
+      if (res.status !== 409) break;
+      taken.add(title.toLowerCase()); // another tab/client claimed it between our snapshot and the insert — retry
+    }
+    if (!res || !res.ok) return;
     const newNote: Note = await res.json();
     setNotes(prev => [...prev, newNote]);
     setActiveNoteId(newNote.id);
     setEditMode(true);
     setEditContent(newNote.content);
     setEditTitle(newNote.title);
-  }, []);
+  }, [notes]);
 
   const createFolder = useCallback(async (parentId: string | null = null) => {
     const name = prompt('Folder name:');

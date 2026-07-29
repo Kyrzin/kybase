@@ -19,8 +19,12 @@ export function escapeAttr(s: string): string {
  * repeats in document order and stay in sync.
  */
 export function slugifyHeading(text: string): string {
+  // &amp; unescaped last: doing it first would let a literal "&amp;lt;" in
+  // the source cascade into "&lt;" then "<" — a double-decode. Order doesn't
+  // change the output here (everything non-alphanumeric collapses to "-"
+  // below regardless), but it closes the static-analysis pattern for free.
   const slug = text
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]+/gu, '-')
     .replace(/^-+|-+$/g, '');

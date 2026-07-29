@@ -9,6 +9,7 @@ import type { Note, Folder } from '@/lib/types';
 
 type OAuthClient = { id: string; client_name: string | null; created_at: string; last_used_at: string; expires_at: string };
 type ShareItem = { token: string; note_id: string; note_title: string; created_at: string; expires_at: string | null };
+type TrashedNote = { id: string; title: string; folder_id: string | null; deleted_at: string };
 
 export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders, onShareRevoked }: {
   apiFetch: (path: string, init?: RequestInit) => Promise<Response>;
@@ -28,6 +29,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   const [settingsTab, setSettingsTab]         = useState<'embeddings' | 'access'>('embeddings');
   const [oauthClients, setOauthClients]       = useState<OAuthClient[]>([]);
   const [shares, setShares]                   = useState<ShareItem[]>([]);
+  const [trash, setTrash]                     = useState<TrashedNote[]>([]);
 
   useEffect(() => {
     apiFetch('/api/settings').then(r => r.json()).then(data => {
@@ -42,6 +44,10 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
     apiFetch('/api/shares')
       .then(r => (r.ok ? r.json() : []))
       .then(d => { if (Array.isArray(d)) setShares(d); })
+      .catch(() => {});
+    apiFetch('/api/notes/trash')
+      .then(r => (r.ok ? r.json() : []))
+      .then(d => { if (Array.isArray(d)) setTrash(d); })
       .catch(() => {});
   }, [apiFetch]);
 
@@ -58,6 +64,15 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
       setShares(prev => prev.filter(s => s.token !== token));
       onShareRevoked(token);
     }
+  };
+
+  const restoreNote = async (id: string) => {
+    const res = await apiFetch(`/api/notes/${id}/restore`, { method: 'POST' });
+    if (!res.ok) return;
+    setTrash(prev => prev.filter(n => n.id !== id));
+    // The restored note needs to reappear in the sidebar tree — simplest
+    // correct fix is the same full refetch importVault already does below.
+    apiFetch('/api/notes').then(r => r.json()).then(setNotes).catch(() => {});
   };
 
   // Permanent links first (they're the ones to worry about), then newest.
@@ -356,6 +371,37 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
                         style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#f38ba8', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
                       >
                         Revoke
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div style={{ borderTop: '1px solid #313244', marginTop: 16, paddingTop: 12 }}>
+              <div style={{ fontSize: 11, color: '#6c7086', marginBottom: 8 }}>
+                Trash — deleted notes, kept for 30 days before being purged for good.
+              </div>
+              {trash.length === 0 ? (
+                <div style={{ fontSize: 12, color: '#6c7086' }}>Trash is empty.</div>
+              ) : (
+                <div style={{ maxHeight: 190, overflowY: 'auto' }}>
+                  {trash.map(n => (
+                    <div key={n.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid #1e1e2e' }}>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div title={n.title} style={{ fontSize: 13, color: '#cdd6f4', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {n.title}
+                        </div>
+                        <div style={{ fontSize: 11, color: '#6c7086' }}>
+                          deleted {new Date(n.deleted_at).toLocaleDateString()}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => restoreNote(n.id)}
+                        title="Restore this note"
+                        style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#a6e3a1', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                      >
+                        Restore
                       </button>
                     </div>
                   ))}

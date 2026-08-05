@@ -45,9 +45,8 @@ docker compose pull && docker compose up -d
 
 This pulls the prebuilt multi-arch image
 ([`ghcr.io/kyrzin/kybase`](https://github.com/Kyrzin/kybase/pkgs/container/kybase),
-linux/amd64 + linux/arm64) from GitHub Packages. To build from source instead,
-run `docker compose up -d --build`. Pin a specific version with `KYBASE_TAG` in
-`.env` (e.g. `KYBASE_TAG=v1.0.0`); the default is `latest`.
+linux/amd64 + linux/arm64) from GitHub Packages, tagged `latest`. To build from
+source instead, run `docker compose up -d --build`.
 
 Open http://localhost:3000 and log in with your `KYBASE_SECRET`.
 
@@ -101,7 +100,7 @@ grows as the agent uses it, instead of accumulating orphan notes.
 | Embeddings | Ollama `embeddinggemma` (default, multilingual) / Google / OpenAI |
 | Search | RRF hybrid: pgvector HNSW cosine + bilingual FTS |
 | MCP | `@modelcontextprotocol/sdk` Streamable HTTP |
-| Auth | Single `KYBASE_SECRET` env var |
+| Auth | `KYBASE_SECRET` env var + revocable per-client OAuth tokens (MCP) |
 
 ---
 
@@ -177,6 +176,10 @@ Full recipe including cron and restore: [docs/backup.md](docs/backup.md).
 ## Upgrading
 
 ```bash
+# prebuilt image
+docker compose pull && docker compose up -d
+
+# or rebuild from source
 git pull && docker compose up -d --build
 ```
 

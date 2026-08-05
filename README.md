@@ -19,7 +19,9 @@ no re-onboarding, no lost decisions.
 Everything runs on your machine via Docker: PostgreSQL for notes,
 pgvector + Ollama for embeddings. **No SaaS, no accounts, 100% private.**
 
-<!-- screenshots: graph spotlight PNG + demo GIF land here (public/readme/) -->
+<p align="center">
+  <img src="public/readme/screenshot.png" width="100%" alt="Kybase UI: a markdown note with wikilinks and tags on the left, the folder tree beside it, and an interactive knowledge graph (17 notes, 76 edges) with wikilink and semantic edges on the right.">
+</p>
 
 ## Why Kybase?
 

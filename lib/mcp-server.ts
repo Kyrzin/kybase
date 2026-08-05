@@ -1,4 +1,4 @@
-// lib/mcp-server.ts — MCP server factory with 14 tools
+// lib/mcp-server.ts — MCP server factory with 16 tools
 // Uses @modelcontextprotocol/sdk McpServer (high-level API)
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
@@ -398,6 +398,34 @@ export function createMcpServer(): McpServer {
             best_score: bestScore,
             pending_embeddings: pendingRows[0]?.count ?? 0,
           }, null, 2),
+        }],
+      };
+    }
+  );
+
+  // ── indexing_status ──────────────────────────────────────────────────────
+  server.tool(
+    'indexing_status',
+    'Report semantic-index progress across the vault: how many live notes are embedded vs still ' +
+    'pending. Semantic and hybrid search — and the semantic graph edges — only see indexed notes; ' +
+    'a pending note is still found by type=text search but is invisible to meaning-based search ' +
+    'until it is embedded (automatic in the background after create/update or a provider switch). ' +
+    'Use this to tell "still indexing" from "done": complete=true means every note is searchable ' +
+    'semantically. A pending count that stays high while nothing is being edited points at an ' +
+    'embedding failure (e.g. Ollama unreachable) — check the server logs.',
+    {},
+    async () => {
+      const row = await queryOne<{ total: number; pending: number }>(
+        `select count(*)::int as total,
+                (count(*) filter (where embedding_pending))::int as pending
+         from notes where deleted_at is null`
+      );
+      const total = row?.total ?? 0;
+      const pending = row?.pending ?? 0;
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ total, indexed: total - pending, pending, complete: pending === 0 }, null, 2),
         }],
       };
     }

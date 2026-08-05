@@ -27,7 +27,7 @@ Giving an agent persistent memory usually means assembling it yourself:
 a notes app, an MCP bridge, an embedding pipeline, and sync between them.
 Kybase is that whole stack as one `docker compose up`:
 
-- **MCP-native** — 13 tools (`search_notes`, `get_note_with_links`, `get_graph`, `get_backlinks`, CRUD for notes/folders) over Streamable HTTP, with instructions that teach the agent to interlink notes properly
+- **MCP-native** — 16 tools (`search_notes`, `get_note_with_links`, `get_graph`, `get_backlinks`, `indexing_status`, CRUD for notes/folders) over Streamable HTTP, with instructions that teach the agent to interlink notes properly
 - **Local semantic search** — pgvector + Ollama embeddings, private by default; hybrid RRF fusion with bilingual full-text search and chunked, excerpt-based results
 - **Agent-friendly graph** — explicit wikilink edges plus *semantic edges* computed from embedding similarity, so the agent discovers related notes that were never linked
 - **A real notes app, not a black box** — web editor with backlinks, graph view with a similarity slider, workspace focus mode; renaming a note rewrites its wikilinks everywhere
@@ -84,8 +84,9 @@ The app exposes a Streamable HTTP MCP endpoint at `/api/mcp`.
 revocable OAuth token — see **Settings → Connected clients** in the web UI.
 
 Available tools: `list_notes`, `get_note`, `get_note_with_links`,
-`create_note`, `update_note`, `delete_note`, `search_notes`, `list_folders`,
-`create_folder`, `update_folder`, `delete_folder`, `get_backlinks`, `get_graph`.
+`create_note`, `update_note`, `delete_note`, `restore_note`, `search_notes`,
+`indexing_status`, `list_tags`, `list_folders`, `create_folder`,
+`update_folder`, `delete_folder`, `get_backlinks`, `get_graph`.
 
 The server ships with MCP instructions that teach the agent to search before
 writing and to add `[[wikilinks]]` to related notes — so the knowledge graph
@@ -121,6 +122,11 @@ better than English-centric models. `nomic-embed-text` is a smaller,
 English-leaning alternative. The semantic-similarity threshold adapts to the
 model automatically (see `getMinSimilarity` in `lib/embeddings.ts`), so no
 manual tuning is needed when you switch.
+
+**Already run Ollama?** On a host that already has an Ollama instance (e.g. a
+GPU one), skip the bundled CPU container: set `OLLAMA_URL` in `.env` to your
+instance (pull `OLLAMA_MODEL` there first) and start with the override file —
+`docker compose -f docker-compose.yml -f docker-compose.external-ollama.yml up -d`.
 
 > **CLI Alternative:** If you prefer using the terminal, you can trigger re-indexing by calling the admin endpoint:
 > ```bash

@@ -86,13 +86,13 @@ beforeEach(() => {
 });
 
 describe('tools/list', () => {
-  it('registers all 15 tools', async () => {
+  it('registers all 16 tools', async () => {
     const client = await connectClient();
     const { tools } = await client.listTools();
     expect(tools.map(t => t.name).sort()).toEqual([
       'create_folder', 'create_note', 'delete_folder', 'delete_note', 'get_backlinks',
-      'get_graph', 'get_note', 'get_note_with_links', 'list_folders', 'list_notes',
-      'list_tags', 'restore_note', 'search_notes', 'update_folder', 'update_note',
+      'get_graph', 'get_note', 'get_note_with_links', 'indexing_status', 'list_folders',
+      'list_notes', 'list_tags', 'restore_note', 'search_notes', 'update_folder', 'update_note',
     ]);
   });
 
@@ -132,6 +132,29 @@ describe('list_notes', () => {
     const [sql, params] = query.mock.calls[0];
     expect(sql).toContain('deleted_at is not null');
     expect(params).toEqual([20]);
+  });
+});
+
+describe('indexing_status', () => {
+  it('reports total/indexed/pending and completeness from one aggregate', async () => {
+    queryOne.mockResolvedValue({ total: 14, pending: 3 });
+    const out = await call('indexing_status', {}) as Record<string, unknown>;
+    const [sql] = queryOne.mock.calls[0];
+    expect(sql).toContain('embedding_pending');
+    expect(sql).toContain('deleted_at is null');
+    expect(out).toEqual({ total: 14, indexed: 11, pending: 3, complete: false });
+  });
+
+  it('is complete when nothing is pending', async () => {
+    queryOne.mockResolvedValue({ total: 5, pending: 0 });
+    const out = await call('indexing_status', {});
+    expect(out).toEqual({ total: 5, indexed: 5, pending: 0, complete: true });
+  });
+
+  it('treats an empty vault (null row) as complete with zero counts', async () => {
+    queryOne.mockResolvedValue(null);
+    const out = await call('indexing_status', {});
+    expect(out).toEqual({ total: 0, indexed: 0, pending: 0, complete: true });
   });
 });
 

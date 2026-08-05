@@ -30,9 +30,23 @@ services:
     restart: unless-stopped
     volumes:
       - kybase-ollama:/root/.ollama
-    # Serve, then make sure the embedding model is present (no-op if cached)
+    # Serve, wait for the API to actually answer, then ensure the embedding
+    # model is present (no-op if cached). Waiting on `ollama list` instead of a
+    # fixed `sleep` means the pull can't fire before the server is up on a slow
+    # cold start. `sed` strips the pull progress bar's ANSI cursor codes so
+    # `docker logs` / Dozzle stay readable without hiding any error text.
     entrypoint: ["/bin/sh", "-c"]
-    command: ["ollama serve & sleep 3 && ollama pull ${OLLAMA_MODEL:-embeddinggemma}; wait"]
+    command:
+      - |
+        ollama serve &
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull "${OLLAMA_MODEL:-embeddinggemma}" 2>&1 | sed -u 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r/\n/g'
+        wait
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
 
   kybase:
     # Prebuilt multi-arch image (amd64/arm64) from GitHub Packages.
@@ -50,7 +64,7 @@ services:
       DATABASE_URL: postgres://kybase:${POSTGRES_PASSWORD:-kybase}@db:5432/kybase
       KYBASE_SECRET: ${KYBASE_SECRET:?set KYBASE_SECRET in .env}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
-      OLLAMA_URL: http://ollama:11434
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-embeddinggemma}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       GOOGLE_MODEL: ${GOOGLE_MODEL:-text-embedding-004}

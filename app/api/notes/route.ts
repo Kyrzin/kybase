@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne, isUniqueViolation } from '@/lib/db';
 import { indexNoteAsync } from '@/lib/indexing';
+import { MAX_NOTE_CONTENT_CHARS } from '@/lib/types';
 import { z } from 'zod';
 
 const NOTE_SELECT = 'id, title, content, folder_id, tags, embedding_pending, created_at, updated_at';
@@ -41,7 +42,7 @@ const CreateNoteSchema = z.object({
   // trim: invisible padding would create a title that looks like a duplicate
   // but dodges the unique index and never matches its own export
   title:     z.string().trim().min(1).max(500),
-  content:   z.string().default(''),
+  content:   z.string().max(MAX_NOTE_CONTENT_CHARS).default(''),
   folder_id: z.string().uuid().nullable().optional(),
   tags:      z.array(z.string()).default([]),
 });

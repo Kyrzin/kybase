@@ -84,9 +84,14 @@ export async function trashFolderNotes(
   client: { query: (text: string, params?: unknown[]) => Promise<{ rows: { id: string }[] }> }
 ): Promise<number> {
   const { rows } = await client.query(
+    // `union`, not `union all`: it dedupes, so a parent_id cycle terminates
+    // instead of recursing forever. Cycles are supposed to be impossible —
+    // both folder-move paths reject a move into a descendant — but that check
+    // is not atomic, and a query that never returns holds its pool connection
+    // for good (no statement_timeout is configured anywhere).
     `with recursive subtree as (
        select id from folders where id = $1
-       union all
+       union
        select f.id from folders f join subtree s on f.parent_id = s.id
      )
      update notes set deleted_at = now()

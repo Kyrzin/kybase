@@ -3,6 +3,9 @@ import { queryOne, withTransaction } from '@/lib/db';
 import { trashFolderNotes } from '@/lib/trash';
 import { z } from 'zod';
 
+/** Thrown inside the delete transaction so it rolls back, caught for a 404. */
+class FolderNotFound extends Error {}
+
 const UpdateFolderSchema = z.object({
   name:      z.string().min(1).max(255).optional(),
   parent_id: z.string().uuid().nullable().optional(),
@@ -67,17 +70,28 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  let trashed: number;
   try {
     // One transaction: notes in the subtree must land in the trash together
     // with the folder disappearing, not one without the other. Child
     // folders still cascade via the FK once this commits.
-    await withTransaction(async (client) => {
-      await trashFolderNotes(id, client);
-      await client.query('delete from folders where id = $1', [id]);
+    trashed = await withTransaction(async (client) => {
+      const count = await trashFolderNotes(id, client);
+      // `returning`: answering 204 for a folder that was never there hides
+      // the mismatch from whoever is holding the stale id — the MCP tool for
+      // this same operation already refuses it.
+      const { rows } = await client.query('delete from folders where id = $1 returning id', [id]);
+      if (rows.length === 0) throw new FolderNotFound();
+      return count;
     });
   } catch (err) {
+    if (err instanceof FolderNotFound) {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
     const message = err instanceof Error ? err.message : 'Delete failed';
     return NextResponse.json({ error: message }, { status: 500 });
   }
-  return new NextResponse(null, { status: 204 });
+  // The count the UI needs to say what just happened — a folder delete now
+  // reaches every note in the subtree, which a confirm dialog cannot show.
+  return NextResponse.json({ trashed }, { status: 200 });
 }

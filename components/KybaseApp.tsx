@@ -107,6 +107,7 @@ export default function KybaseApp() {
     expandedFolders, toggleFolder,
     selectNote, saveNote, addTag, removeTag,
     createNote, createFolder, deleteFolder, renameFolder, deleteNote, moveNote, moveFolder,
+    syncError, setSyncError,
   } = useNotes({ onNoteOpened, onMoveDone, onRenameDone, onTagInputConsumed, restoreFocus });
 
   // Scroll sidebar to active note after folders have expanded
@@ -249,6 +250,23 @@ export default function KybaseApp() {
     <>
 
       <div className="kybase-app">
+        {/* A write the server refused. Sits above everything and stays until
+            dismissed: the edits it refers to are still only in this tab. */}
+        {syncError && (
+          <div
+            role="alert"
+            style={{ position: 'fixed', top: 8, left: '50%', transform: 'translateX(-50%)', zIndex: 1000, maxWidth: 'min(560px, calc(100vw - 32px))', display: 'flex', alignItems: 'flex-start', gap: 10, background: '#2a1b22', border: '1px solid #f38ba8', borderRadius: 8, color: '#f38ba8', padding: '10px 12px', fontSize: 13, boxShadow: '0 4px 16px rgba(0,0,0,.4)' }}
+          >
+            <span style={{ flex: 1 }}>{syncError}</span>
+            <button
+              onClick={() => setSyncError(null)}
+              aria-label="Dismiss"
+              style={{ background: 'none', border: 'none', color: '#f38ba8', cursor: 'pointer', fontSize: 16, lineHeight: 1, padding: 0, fontFamily: 'inherit' }}
+            >
+              ×
+            </button>
+          </div>
+        )}
         {/* Top Bar */}
         <div className="topbar">
           <button className="topbar-btn" onClick={() => setSidebarOpen(v => !v)}>

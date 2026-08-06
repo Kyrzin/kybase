@@ -4,6 +4,7 @@ import {
 } from '@/lib/db';
 import { indexNoteAsync } from '@/lib/indexing';
 import { softDeleteNote } from '@/lib/trash';
+import { MAX_NOTE_CONTENT_CHARS } from '@/lib/types';
 import { z } from 'zod';
 
 const NOTE_SELECT = 'id, title, content, folder_id, tags, embedding_pending, created_at, updated_at';
@@ -40,7 +41,7 @@ export async function GET(
 
 const UpdateNoteSchema = z.object({
   title:     z.string().trim().min(1).max(500).optional(),
-  content:   z.string().optional(),
+  content:   z.string().max(MAX_NOTE_CONTENT_CHARS).optional(),
   folder_id: z.string().uuid().nullable().optional(),
   tags:      z.array(z.string()).optional(),
 });

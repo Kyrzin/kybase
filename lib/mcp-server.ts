@@ -10,6 +10,7 @@ import { getMinSimilarity } from './embeddings';
 import { indexNoteAsync } from './indexing';
 import { extractAllWikilinks } from './wikilinks';
 import { buildGraph } from './graph-data';
+import { MAX_NOTE_CONTENT_CHARS } from './types';
 
 
 // get_note(title=...) is the shortcut past search_notes, but real titles are long
@@ -234,7 +235,7 @@ export function createMcpServer(): McpServer {
     'and reuse an existing tag if one matches — do not create RU/EN duplicates.',
     {
       title:     z.string().trim().min(1).max(500),
-      content:   z.string().default(''),
+      content:   z.string().max(MAX_NOTE_CONTENT_CHARS).default(''),
       folder_id: z.string().uuid().nullable().optional(),
       tags:      z.array(z.string()).default([]),
     },
@@ -270,7 +271,7 @@ export function createMcpServer(): McpServer {
     {
       id:        z.string().uuid(),
       title:     z.string().trim().min(1).max(500).optional(),
-      content:   z.string().optional(),
+      content:   z.string().max(MAX_NOTE_CONTENT_CHARS).optional(),
       folder_id: z.string().uuid().nullable().optional(),
       tags:      z.array(z.string()).optional(),
     },

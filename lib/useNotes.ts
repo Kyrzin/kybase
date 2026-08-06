@@ -48,9 +48,33 @@ export function useNotes(cb: UseNotesCallbacks) {
   const [editContent, setEditContent] = useState('');
   const [editTitle, setEditTitle]     = useState('');
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [syncError, setSyncError] = useState<string | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activeNote = notes.find(n => n.id === activeNoteId) ?? null;
+
+  /**
+   * Every write here used to treat "request sent" as "server agreed": the
+   * local state updated regardless of the reply. A note trashed in another
+   * tab or by the agent answers 404, and the editor went on showing edits as
+   * saved that never reached the database. Callers now only commit to local
+   * state when this returns true, and the failure reaches the screen.
+   */
+  const send = useCallback(async (
+    path: string, init: RequestInit, whatFailed: string
+  ): Promise<boolean> => {
+    try {
+      const res = await apiFetch(path, init);
+      if (res.ok) { setSyncError(null); return true; }
+      const body = await res.json().catch(() => ({}));
+      const detail = typeof body.error === 'string' ? body.error : `HTTP ${res.status}`;
+      setSyncError(`${whatFailed}: ${detail}`);
+      return false;
+    } catch {
+      setSyncError(`${whatFailed}: no connection to the server`);
+      return false;
+    }
+  }, []);
 
   // Expand a note's ancestor folders so it is visible in the tree. Called
   // from the actions that change the active note (not an effect), so the
@@ -107,10 +131,12 @@ export function useNotes(cb: UseNotesCallbacks) {
     if (!editMode || !activeNoteId) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(async () => {
-      await apiFetch(`/api/notes/${activeNoteId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ title: editTitle, content: editContent }),
-      });
+      const ok = await send(
+        `/api/notes/${activeNoteId}`,
+        { method: 'PATCH', body: JSON.stringify({ title: editTitle, content: editContent }) },
+        'Not saved'
+      );
+      if (!ok) return;
       setNotes(prev => prev.map(n =>
         n.id === activeNoteId
           ? { ...n, title: editTitle, content: editContent, updated_at: new Date().toISOString() }
@@ -127,17 +153,19 @@ export function useNotes(cb: UseNotesCallbacks) {
       saveTimerRef.current = null;
     }
     if (editMode && activeNoteId) {
-      await apiFetch(`/api/notes/${activeNoteId}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ title: editTitle, content: editContent }),
-      });
+      const ok = await send(
+        `/api/notes/${activeNoteId}`,
+        { method: 'PATCH', body: JSON.stringify({ title: editTitle, content: editContent }) },
+        'Not saved'
+      );
+      if (!ok) return;
       setNotes(prev => prev.map(n =>
         n.id === activeNoteId
           ? { ...n, title: editTitle, content: editContent, updated_at: new Date().toISOString() }
           : n
       ));
     }
-  }, [editMode, activeNoteId, editTitle, editContent]);
+  }, [editMode, activeNoteId, editTitle, editContent, send]);
 
   const { onNoteOpened } = cb;
   const selectNote = useCallback(async (id: string) => {
@@ -163,6 +191,19 @@ export function useNotes(cb: UseNotesCallbacks) {
       if (target) {
         selectNote(target.id);
       } else {
+        // `notes` holds live notes only, so a link to a trashed note looks
+        // exactly like a link to one that never existed — and following it
+        // would quietly mint an empty duplicate, which then blocks restoring
+        // the original on the title's partial unique index.
+        const trashed: { title: string }[] = await apiFetch('/api/notes/trash')
+          .then(r => (r.ok ? r.json() : []))
+          .catch(() => []);
+        const inTrash = Array.isArray(trashed)
+          && trashed.some(n => n.title.toLowerCase() === title.toLowerCase());
+        if (inTrash) {
+          setSyncError(`"${title}" is in the Trash — restore it from Settings instead of creating a new note.`);
+          return;
+        }
         const res = await apiFetch('/api/notes', {
           method: 'POST',
           body: JSON.stringify({ title, content: `# ${title}\n\n`, tags: [] }),
@@ -184,17 +225,21 @@ export function useNotes(cb: UseNotesCallbacks) {
   const saveNote = useCallback(async () => {
     if (!activeNote) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    await apiFetch(`/api/notes/${activeNote.id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ title: editTitle, content: editContent }),
-    });
+    const ok = await send(
+      `/api/notes/${activeNote.id}`,
+      { method: 'PATCH', body: JSON.stringify({ title: editTitle, content: editContent }) },
+      'Not saved'
+    );
+    // Staying in edit mode on failure keeps the text in front of the user
+    // instead of dropping them into a read-only view of the older version.
+    if (!ok) return;
     setNotes(prev => prev.map(n =>
       n.id === activeNote.id
         ? { ...n, title: editTitle, content: editContent, updated_at: new Date().toISOString() }
         : n
     ));
     setEditMode(false);
-  }, [activeNote, editTitle, editContent]);
+  }, [activeNote, editTitle, editContent, send]);
 
   // ── Tags ───────────────────────────────────────────────────────────────────
   // Optimistic local update + PATCH. Tags don't change embeddings, so the
@@ -259,8 +304,13 @@ export function useNotes(cb: UseNotesCallbacks) {
   }, []);
 
   const deleteFolder = useCallback(async (id: string) => {
-    if (!confirm('Delete folder and move its notes to Trash?')) return;
-    await apiFetch(`/api/folders/${id}`, { method: 'DELETE' });
+    if (!confirm('Delete folder and move its notes — including every subfolder — to Trash?')) return;
+    // The delete is one transaction: on failure nothing moved and the folder
+    // still stands, so clearing the tree anyway would show a whole subtree as
+    // gone while every note sat untouched in the database — and absent from
+    // Trash too, since nothing was deleted.
+    const ok = await send(`/api/folders/${id}`, { method: 'DELETE' }, 'Folder not deleted');
+    if (!ok) return;
     // The server cascades to descendant folders (FK) and soft-deletes every
     // note in the whole subtree, not just this one folder — mirror that here
     // so orphaned subfolders/notes don't linger in the tree until a reload.
@@ -287,7 +337,7 @@ export function useNotes(cb: UseNotesCallbacks) {
       }
       return next;
     });
-  }, [activeNoteId, folders]);
+  }, [activeNoteId, folders, send]);
 
   const { onRenameDone } = cb;
   const renameFolder = useCallback(async (id: string, name: string) => {
@@ -305,7 +355,8 @@ export function useNotes(cb: UseNotesCallbacks) {
 
   const deleteNote = useCallback(async (id: string) => {
     if (!confirm('Delete this note?')) return;
-    await apiFetch(`/api/notes/${id}`, { method: 'DELETE' });
+    const ok = await send(`/api/notes/${id}`, { method: 'DELETE' }, 'Not deleted');
+    if (!ok) return;
     setNotes(prev => {
       const next = prev.filter(n => n.id !== id);
       if (activeNoteId === id) {
@@ -316,7 +367,7 @@ export function useNotes(cb: UseNotesCallbacks) {
       }
       return next;
     });
-  }, [activeNoteId]);
+  }, [activeNoteId, send]);
 
   const { onMoveDone } = cb;
   const moveNote = useCallback(async (folderId: string | null) => {
@@ -353,6 +404,7 @@ export function useNotes(cb: UseNotesCallbacks) {
 
   return {
     notes, setNotes, folders, setFolders, loading, activeNote, activeNoteId, setActiveNoteId,
+    syncError, setSyncError,
     editMode, setEditMode, editContent, setEditContent, editTitle, setEditTitle,
     expandedFolders, toggleFolder, expandAncestors,
     flushSave, selectNote, saveNote, saveTags, addTag, removeTag,

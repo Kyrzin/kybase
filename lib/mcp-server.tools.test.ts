@@ -43,6 +43,7 @@ const getSemanticEdges = vi.fn();
 vi.mock('./semantic-edges', () => ({ getSemanticEdges: (...a: unknown[]) => getSemanticEdges(...a) }));
 
 import { createMcpServer } from './mcp-server';
+import { MAX_NOTE_CONTENT_CHARS } from './types';
 
 type ToolResult = { isError?: boolean; content: { type: string; text: string }[] };
 
@@ -106,6 +107,20 @@ describe('tools/list', () => {
     expect(withLinks.description).toContain('default 20000 chars');
     expect(withLinks.description).toContain('capped at 4000 chars');
     for (const t of tools) expect(t.description).not.toMatch(/\d{6,}/);
+  });
+
+  it('advertises a ceiling on note content in both write schemas', async () => {
+    // Nothing bounded content until the platform's request cap was raised to
+    // let real imports through; the agent is the write path most likely to
+    // paste something enormous, so the limit has to be in its schema.
+    const client = await connectClient();
+    const { tools } = await client.listTools();
+    for (const name of ['create_note', 'update_note']) {
+      const props = (tools.find(t => t.name === name)!.inputSchema as {
+        properties: Record<string, { maxLength?: number }>;
+      }).properties;
+      expect(props.content?.maxLength, `${name}.content`).toBe(MAX_NOTE_CONTENT_CHARS);
+    }
   });
 });
 

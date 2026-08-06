@@ -259,21 +259,35 @@ export function useNotes(cb: UseNotesCallbacks) {
   }, []);
 
   const deleteFolder = useCallback(async (id: string) => {
-    if (!confirm('Delete folder and all its contents?')) return;
+    if (!confirm('Delete folder and move its notes to Trash?')) return;
     await apiFetch(`/api/folders/${id}`, { method: 'DELETE' });
-    setFolders(prev => prev.filter(f => f.id !== id));
-    // Remove notes that were in this folder from local state
+    // The server cascades to descendant folders (FK) and soft-deletes every
+    // note in the whole subtree, not just this one folder — mirror that here
+    // so orphaned subfolders/notes don't linger in the tree until a reload.
+    const subtree = new Set([id]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const f of folders) {
+        if (f.parent_id && subtree.has(f.parent_id) && !subtree.has(f.id)) {
+          subtree.add(f.id);
+          grew = true;
+        }
+      }
+    }
+    setFolders(prev => prev.filter(f => !subtree.has(f.id)));
     setNotes(prev => {
-      const removed = prev.filter(n => n.folder_id === id);
-      const next = prev.filter(n => n.folder_id !== id);
+      const removed = prev.filter(n => n.folder_id !== null && subtree.has(n.folder_id));
+      const next = prev.filter(n => n.folder_id === null || !subtree.has(n.folder_id));
       if (removed.some(n => n.id === activeNoteId)) {
         const nextNote = next[0] ?? null;
         setActiveNoteId(nextNote?.id ?? null);
+        setEditMode(false);
         if (nextNote) { setEditContent(nextNote.content); setEditTitle(nextNote.title); }
       }
       return next;
     });
-  }, [activeNoteId]);
+  }, [activeNoteId, folders]);
 
   const { onRenameDone } = cb;
   const renameFolder = useCallback(async (id: string, name: string) => {
@@ -297,6 +311,7 @@ export function useNotes(cb: UseNotesCallbacks) {
       if (activeNoteId === id) {
         const nextNote = next[0] ?? null;
         setActiveNoteId(nextNote?.id ?? null);
+        setEditMode(false);
         if (nextNote) { setEditContent(nextNote.content); setEditTitle(nextNote.title); }
       }
       return next;

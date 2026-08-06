@@ -67,3 +67,32 @@ export async function purgeNote(id: string): Promise<boolean> {
   );
   return !!row;
 }
+
+/**
+ * Soft-deletes every live note inside a folder AND its full descendant
+ * subtree — called before the folder row itself is deleted, in the same
+ * transaction (hence the explicit client: this must not commit unless the
+ * folder delete that follows also succeeds). Folders cascade on delete
+ * (parent_id references folders(id) on delete cascade) and notes used to
+ * just get orphaned to root (folder_id set null) when their folder
+ * disappeared; deleting a folder now sends its notes to the trash instead,
+ * recoverable for TRASH_RETENTION_DAYS like any other delete. Already-
+ * trashed notes in the subtree are left alone (their own deleted_at stands).
+ */
+export async function trashFolderNotes(
+  folderId: string,
+  client: { query: (text: string, params?: unknown[]) => Promise<{ rows: { id: string }[] }> }
+): Promise<number> {
+  const { rows } = await client.query(
+    `with recursive subtree as (
+       select id from folders where id = $1
+       union all
+       select f.id from folders f join subtree s on f.parent_id = s.id
+     )
+     update notes set deleted_at = now()
+     where folder_id in (select id from subtree) and deleted_at is null
+     returning id`,
+    [folderId]
+  );
+  return rows.length;
+}

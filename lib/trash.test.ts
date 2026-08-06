@@ -7,7 +7,7 @@ vi.mock('./db', () => ({
   queryOne: (...args: unknown[]) => mockQueryOne(...args),
 }));
 
-import { softDeleteNote, restoreNote, listTrash, purgeExpiredTrash, purgeNote, TRASH_RETENTION_DAYS } from './trash';
+import { softDeleteNote, restoreNote, listTrash, purgeExpiredTrash, purgeNote, trashFolderNotes, TRASH_RETENTION_DAYS } from './trash';
 
 beforeEach(() => {
   mockQuery.mockReset().mockResolvedValue([]);
@@ -74,5 +74,29 @@ describe('purgeNote', () => {
   it('refuses to purge a note that is not in the trash (still live, or unknown id)', async () => {
     mockQueryOne.mockResolvedValueOnce(null);
     expect(await purgeNote('live-note')).toBe(false);
+  });
+});
+
+describe('trashFolderNotes', () => {
+  it('soft-deletes live notes across the folder and its descendant subtree via the given client', async () => {
+    const clientQuery = vi.fn().mockResolvedValue({ rows: [{ id: 'n1' }, { id: 'n2' }, { id: 'n3' }] });
+    const client = { query: clientQuery };
+    expect(await trashFolderNotes('f1', client)).toBe(3);
+    expect(clientQuery.mock.calls[0][0]).toContain('with recursive subtree');
+    expect(clientQuery.mock.calls[0][0]).toMatch(/update notes set deleted_at = now\(\)/);
+    expect(clientQuery.mock.calls[0][0]).toContain('deleted_at is null');
+    expect(clientQuery.mock.calls[0][1]).toEqual(['f1']);
+  });
+
+  it('returns 0 when the folder has no live notes anywhere in its subtree', async () => {
+    const client = { query: vi.fn().mockResolvedValue({ rows: [] }) };
+    expect(await trashFolderNotes('empty-folder', client)).toBe(0);
+  });
+
+  it('never touches the pool-level query/queryOne — everything goes through the passed client', async () => {
+    const client = { query: vi.fn().mockResolvedValue({ rows: [] }) };
+    await trashFolderNotes('f1', client);
+    expect(mockQuery).not.toHaveBeenCalled();
+    expect(mockQueryOne).not.toHaveBeenCalled();
   });
 });

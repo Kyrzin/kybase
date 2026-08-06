@@ -370,6 +370,13 @@ describe('delete_note / restore_note', () => {
     queryOne.mockResolvedValueOnce(null);
     expect(await callExpectingError('restore_note', { id })).toContain('not in trash');
   });
+
+  it('restore_note reports a friendly error when a live note has since taken the title, not a raw DB error', async () => {
+    queryOne.mockRejectedValueOnce(Object.assign(new Error('duplicate key value'), { code: '23505' }));
+    const err = await callExpectingError('restore_note', { id });
+    expect(err).toContain('already has this title');
+    expect(err).not.toContain('duplicate key');
+  });
 });
 
 describe('search_notes', () => {
@@ -438,15 +445,20 @@ describe('folders', () => {
     expect(err).toContain('descendant');
   });
 
-  it('delete_folder issues a delete and confirms', async () => {
+  it('delete_folder trashes every note in the subtree, then deletes the folder, in one transaction', async () => {
     const id = '11111111-1111-4111-8111-111111111111';
-    query.mockResolvedValue([{ id }]); // the row the delete removed
+    txClientQuery
+      .mockResolvedValueOnce({ rows: [{ id: 'n1' }, { id: 'n2' }] }) // trashFolderNotes
+      .mockResolvedValueOnce({ rows: [{ id }] }); // delete from folders ... returning id
     const out = await call('delete_folder', { id });
-    expect(query.mock.calls[0][0]).toContain('delete from folders');
+    expect(withTransaction).toHaveBeenCalledOnce();
+    expect(txClientQuery.mock.calls[0][0]).toContain('with recursive subtree');
+    expect(txClientQuery.mock.calls[1][0]).toContain('delete from folders');
     expect(out).toContain(id);
+    expect(out).toContain('2 notes moved to trash');
   });
 
-  it('delete_folder reports a folder that was not there', async () => {
+  it('delete_folder reports a folder that was not there, and the transaction rolls back (nothing left trashed)', async () => {
     // Deleting nothing must not read as success, or an agent holding a stale
     // id carries on believing the folder is gone.
     const err = await callExpectingError('delete_folder', {

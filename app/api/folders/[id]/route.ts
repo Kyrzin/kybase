@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { query, queryOne } from '@/lib/db';
+import { queryOne, withTransaction } from '@/lib/db';
+import { trashFolderNotes } from '@/lib/trash';
 import { z } from 'zod';
 
 const UpdateFolderSchema = z.object({
@@ -67,7 +68,13 @@ export async function DELETE(
 ) {
   const { id } = await params;
   try {
-    await query('delete from folders where id = $1', [id]);
+    // One transaction: notes in the subtree must land in the trash together
+    // with the folder disappearing, not one without the other. Child
+    // folders still cascade via the FK once this commits.
+    await withTransaction(async (client) => {
+      await trashFolderNotes(id, client);
+      await client.query('delete from folders where id = $1', [id]);
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Delete failed';
     return NextResponse.json({ error: message }, { status: 500 });

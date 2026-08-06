@@ -3,7 +3,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { query, queryOne, withTransaction, isUniqueViolation } from './db';
-import { softDeleteNote, restoreNote, TRASH_RETENTION_DAYS } from './trash';
+import { softDeleteNote, restoreNote, trashFolderNotes, TRASH_RETENTION_DAYS } from './trash';
 import { escapeLike } from './sql';
 import { textSearch, semanticSearch, hybridSearch, makeExcerpt, bestSemanticScore, type SearchResult } from './search';
 import { getMinSimilarity } from './embeddings';
@@ -341,11 +341,20 @@ export function createMcpServer(): McpServer {
   // ── restore_note ─────────────────────────────────────────────────────────
   server.tool(
     'restore_note',
-    'Undo delete_note: brings a soft-deleted note back. No-op error if the note isn\'t in the trash ' +
-    '(never deleted, already restored, or purged past the retention window).',
+    'Undo delete_note: brings a soft-deleted note back. Errors if the note isn\'t in the trash ' +
+    '(never deleted, already restored, or purged past the retention window), or if a live note has ' +
+    'since taken the same title (rename one of them first, then retry).',
     { id: z.string().uuid() },
     async ({ id }) => {
-      const restored = await restoreNote(id);
+      let restored: boolean;
+      try {
+        restored = await restoreNote(id);
+      } catch (err) {
+        if (isUniqueViolation(err)) {
+          throw new Error('A live note already has this title — rename or delete_note it, then retry restore_note');
+        }
+        throw err;
+      }
       if (!restored) throw new Error('Note not in trash (never deleted, already restored, or purged)');
       return { content: [{ type: 'text' as const, text: `Note ${id} restored.` }] };
     }
@@ -530,14 +539,28 @@ export function createMcpServer(): McpServer {
   // ── delete_folder ────────────────────────────────────────────────────────
   server.tool(
     'delete_folder',
-    'Delete a folder. Notes inside are NOT deleted — their folder_id is set to null (they move to the top level). Child folders are cascade-deleted. To preserve organization, move notes/subfolders out first.',
+    'Delete a folder and its full subtree of child folders (cascade). Every note inside — including ' +
+    'notes in nested subfolders — is soft-deleted into the trash along with it (see delete_note), ' +
+    'recoverable via restore_note within the retention window. To preserve organization instead, ' +
+    'move notes/subfolders out first.',
     { id: z.string().uuid() },
     async ({ id }) => {
-      // Confirm the row existed: an agent told "deleted" when nothing was
-      // deleted plans its next steps on a false premise.
-      const deleted = await query('delete from folders where id = $1 returning id', [id]);
-      if (deleted.length === 0) throw new Error('Folder not found');
-      return { content: [{ type: 'text' as const, text: `Folder ${id} deleted.` }] };
+      // One transaction: notes in the subtree must land in the trash
+      // together with the folder disappearing, not one without the other.
+      const trashed = await withTransaction(async (client) => {
+        const count = await trashFolderNotes(id, client);
+        // Confirm the row existed: an agent told "deleted" when nothing was
+        // deleted plans its next steps on a false premise.
+        const deleted = await client.query('delete from folders where id = $1 returning id', [id]);
+        if (deleted.rows.length === 0) throw new Error('Folder not found');
+        return count;
+      });
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Folder ${id} deleted. ${trashed} note${trashed === 1 ? '' : 's'} moved to trash.`,
+        }],
+      };
     }
   );
 

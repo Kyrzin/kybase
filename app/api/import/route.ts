@@ -19,6 +19,33 @@ const MAX_ZIP_BYTES = 100 * 1024 * 1024;
 // total is limited too. Counted as entries stream out — notes already written
 // when the cap trips stay imported (each note is written independently).
 const MAX_UNZIPPED_BYTES = 400 * 1024 * 1024;
+// A vault of legitimately thousands of tiny notes stays well under this; an
+// archive engineered as a huge pile of near-empty .md files (each cheap in
+// bytes, but each one a folder lookup plus a DB round trip) does not.
+const MAX_ENTRIES = 10_000;
+
+// Reads the request body, giving up once it exceeds `limit` bytes. Content-
+// Length is attacker-controlled (or absent under chunked encoding), so the
+// budget has to be counted on bytes as they actually arrive — buffering the
+// whole body first (the previous req.arrayBuffer() call did exactly that)
+// would let an oversized upload exhaust memory before MAX_ZIP_BYTES ever runs.
+async function readRequestBodyCapped(req: NextRequest, limit: number): Promise<Buffer | null> {
+  const reader = req.body?.getReader();
+  if (!reader) return Buffer.from(await req.arrayBuffer());
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > limit) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks);
+}
 
 // Reads one entry, giving up once it exceeds `limit` bytes. Sizes declared in
 // the zip directory are attacker-controlled, so the budget has to be counted
@@ -88,9 +115,9 @@ async function ensureFolderPath(
 export async function POST(req: NextRequest) {
   const mode = new URL(req.url).searchParams.get('mode') === 'overwrite' ? 'overwrite' : 'skip';
 
-  const body = Buffer.from(await req.arrayBuffer());
+  const body = await readRequestBodyCapped(req, MAX_ZIP_BYTES);
+  if (body === null) return NextResponse.json({ error: 'Archive too large' }, { status: 413 });
   if (body.length === 0) return NextResponse.json({ error: 'Empty request body' }, { status: 400 });
-  if (body.length > MAX_ZIP_BYTES) return NextResponse.json({ error: 'Archive too large' }, { status: 413 });
 
   let zip: JSZip;
   try {
@@ -100,6 +127,9 @@ export async function POST(req: NextRequest) {
   }
 
   const entries = Object.values(zip.files).filter(f => !f.dir && f.name.toLowerCase().endsWith('.md'));
+  if (entries.length > MAX_ENTRIES) {
+    return NextResponse.json({ error: `Archive has too many files (max ${MAX_ENTRIES})` }, { status: 413 });
+  }
   const folderCache = new Map<string, string>();
   let imported = 0, updated = 0, skipped = 0, unzippedBytes = 0;
   const errors: string[] = [];

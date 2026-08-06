@@ -50,6 +50,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   const [oauthClients, setOauthClients]       = useState<OAuthClient[]>([]);
   const [shares, setShares]                   = useState<ShareItem[]>([]);
   const [trash, setTrash]                     = useState<TrashedNote[]>([]);
+  const [trashError, setTrashError]           = useState<string | null>(null);
 
   useEffect(() => {
     apiFetch('/api/settings').then(r => r.json()).then(data => {
@@ -87,8 +88,16 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   };
 
   const restoreNote = async (id: string) => {
+    setTrashError(null);
     const res = await apiFetch(`/api/notes/${id}/restore`, { method: 'POST' });
-    if (!res.ok) return;
+    if (!res.ok) {
+      // The one restore failure mode a user can actually act on is a title
+      // collision (409) — silently doing nothing here left no way to tell
+      // "worked" from "can't, rename the live note first" apart.
+      const body = await res.json().catch(() => ({}));
+      setTrashError(body.error ?? `Restore failed (HTTP ${res.status})`);
+      return;
+    }
     setTrash(prev => prev.filter(n => n.id !== id));
     // The restored note needs to reappear in the sidebar tree — simplest
     // correct fix is the same full refetch importVault already does below.
@@ -97,10 +106,14 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
 
   const purgeNote = async (id: string, title: string) => {
     if (!window.confirm(`Permanently delete "${title}"? This cannot be undone.`)) return;
+    setTrashError(null);
     const res = await apiFetch(`/api/notes/trash/${id}`, { method: 'DELETE' });
     if (res.ok || res.status === 404) {
       setTrash(prev => prev.filter(n => n.id !== id));
+      return;
     }
+    const body = await res.json().catch(() => ({}));
+    setTrashError(body.error ?? `Delete failed (HTTP ${res.status})`);
   };
 
   // Permanent links first (they're the ones to worry about), then newest.
@@ -416,6 +429,9 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
               <div style={{ fontSize: 11, color: '#6c7086', marginBottom: 8 }}>
                 Trash — deleted notes, kept for 30 days before being purged for good.
               </div>
+              {trashError && (
+                <div style={{ fontSize: 12, color: '#f38ba8', marginBottom: 8 }}>{trashError}</div>
+              )}
               {trash.length === 0 ? (
                 <div style={{ fontSize: 12, color: '#6c7086' }}>Trash is empty.</div>
               ) : (

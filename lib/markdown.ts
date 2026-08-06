@@ -43,6 +43,18 @@ export function slugDeduper(): (slug: string) => string {
 export type Heading = { level: 1 | 2 | 3; text: string; slug: string };
 
 /**
+ * Index of a ``` that never gets closed, or -1 when every fence is paired.
+ * parseMarkdown substitutes fences in pairs, so a dangling marker renders as
+ * ordinary text; treating it as an opening fence would hide every heading
+ * below it from the chunker and the outline while the reader still sees them.
+ * Shared so those passes cannot drift apart.
+ */
+export function unpairedFenceIndex(lines: string[]): number {
+  const fences = lines.flatMap((l, i) => (/^```/.test(l.trim()) ? [i] : []));
+  return fences.length % 2 === 1 ? fences[fences.length - 1] : -1;
+}
+
+/**
  * Headings (H1–H3) of a note in document order, with the same slugs
  * parseMarkdown puts on the rendered <h1>–<h3> ids. Skips headings inside
  * fenced code blocks — mirroring both the renderer (fences are extracted to
@@ -52,8 +64,10 @@ export function extractHeadings(content: string): Heading[] {
   const out: Heading[] = [];
   const dedupe = slugDeduper();
   let inFence = false;
-  for (const line of content.split('\n')) {
-    if (/^```/.test(line.trim())) { inFence = !inFence; continue; }
+  const lines = content.split('\n');
+  const unpaired = unpairedFenceIndex(lines);
+  for (const [i, line] of lines.entries()) {
+    if (i !== unpaired && /^```/.test(line.trim())) { inFence = !inFence; continue; }
     if (inFence) continue;
     const m = line.match(/^(#{1,3}) (.+)$/);
     if (!m) continue;

@@ -440,9 +440,19 @@ describe('folders', () => {
 
   it('delete_folder issues a delete and confirms', async () => {
     const id = '11111111-1111-4111-8111-111111111111';
+    query.mockResolvedValue([{ id }]); // the row the delete removed
     const out = await call('delete_folder', { id });
     expect(query.mock.calls[0][0]).toContain('delete from folders');
     expect(out).toContain(id);
+  });
+
+  it('delete_folder reports a folder that was not there', async () => {
+    // Deleting nothing must not read as success, or an agent holding a stale
+    // id carries on believing the folder is gone.
+    const err = await callExpectingError('delete_folder', {
+      id: '11111111-1111-4111-8111-111111111111',
+    });
+    expect(err).toContain('not found');
   });
 });
 

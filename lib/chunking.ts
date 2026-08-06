@@ -1,4 +1,5 @@
 // lib/chunking.ts — split note markdown into embedding-sized chunks
+import { unpairedFenceIndex } from './markdown';
 
 export type NoteChunk = {
   index: number;
@@ -21,8 +22,14 @@ export function chunkNote(content: string, maxLen = DEFAULT_MAX_LEN): NoteChunk[
   let current: Section = { heading: null, text: '' };
   let inFence = false;
 
-  for (const line of content.split('\n')) {
-    if (line.trim().startsWith('```')) inFence = !inFence;
+  const lines = content.split('\n');
+  // A dangling ``` must not swallow every heading below it — see
+  // unpairedFenceIndex: the renderer leaves it as text, so headings under it
+  // are real headings to the reader and must be real sections here too.
+  const unpairedFence = unpairedFenceIndex(lines);
+
+  for (const [i, line] of lines.entries()) {
+    if (i !== unpairedFence && line.trim().startsWith('```')) inFence = !inFence;
     const m = !inFence && /^(#{1,6})\s+(.+)$/.exec(line);
     if (m) {
       if (current.text.trim()) sections.push(current);

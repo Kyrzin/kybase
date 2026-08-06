@@ -1,20 +1,39 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { queryOne, withTransaction, isUniqueViolation } from '@/lib/db';
+import {
+  queryOne, withTransaction, isUniqueViolation, isInvalidTextRepresentation
+} from '@/lib/db';
 import { indexNoteAsync } from '@/lib/indexing';
 import { softDeleteNote } from '@/lib/trash';
 import { z } from 'zod';
 
 const NOTE_SELECT = 'id, title, content, folder_id, tags, embedding_pending, created_at, updated_at';
 
+/**
+ * A lookup that failed is not a lookup that found nothing: reporting a dead
+ * connection as 404 sends the reader hunting for a note they still have.
+ */
+function lookupFailed(err: unknown): NextResponse {
+  if (isInvalidTextRepresentation(err)) {
+    return NextResponse.json({ error: 'Malformed note id' }, { status: 400 });
+  }
+  const message = err instanceof Error ? err.message : 'Query failed';
+  return NextResponse.json({ error: message }, { status: 500 });
+}
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const data = await queryOne(
-    `select ${NOTE_SELECT} from notes where id = $1 and deleted_at is null`,
-    [id]
-  ).catch(() => null);
+  let data;
+  try {
+    data = await queryOne(
+      `select ${NOTE_SELECT} from notes where id = $1 and deleted_at is null`,
+      [id]
+    );
+  } catch (err) {
+    return lookupFailed(err);
+  }
   if (!data) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   return NextResponse.json(data);
 }
@@ -39,10 +58,15 @@ export async function PATCH(
 
   // Fetch current to detect changes — trashed notes are edited via
   // restore_note first, not silently resurrected through an update.
-  const existing = await queryOne<{ title: string; content: string }>(
-    'select title, content from notes where id = $1 and deleted_at is null',
-    [id]
-  ).catch(() => null);
+  let existing;
+  try {
+    existing = await queryOne<{ title: string; content: string }>(
+      'select title, content from notes where id = $1 and deleted_at is null',
+      [id]
+    );
+  } catch (err) {
+    return lookupFailed(err);
+  }
   if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
   const titleChanged   = parsed.data.title   !== undefined && parsed.data.title   !== existing.title;
@@ -84,6 +108,10 @@ export async function PATCH(
     const message = err instanceof Error ? err.message : 'Update failed';
     return NextResponse.json({ error: message }, { status: 500 });
   }
+
+  // Trashed or deleted between the existence check and the update: 0 rows
+  // changed, so there is nothing to return and nothing to index.
+  if (!note) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
   // Re-index asynchronously (note embedding + chunks)
   if (titleChanged || contentChanged) {

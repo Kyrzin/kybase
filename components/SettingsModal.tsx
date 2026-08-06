@@ -7,6 +7,20 @@
 import { useState, useEffect } from 'react';
 import type { Note, Folder } from '@/lib/types';
 
+// Reindex reports per-note failures. A note whose embedding failed drops out
+// of semantic search with nothing on screen to say so, so the failure count
+// has to make it into the status line.
+type ReindexResponse = { reindexed?: number; total?: number; errors?: string[] };
+function reindexSummary(r: ReindexResponse): { text: string; failed: boolean } {
+  const done = r.reindexed ?? 0;
+  const failed = r.errors?.length ?? 0;
+  if (failed === 0) return { text: `Done. Reindexed ${done} notes.`, failed: false };
+  return {
+    text: `Reindexed ${done} of ${r.total ?? done + failed}. ${failed} failed — see server logs.`,
+    failed: true,
+  };
+}
+
 type OAuthClient = { id: string; client_name: string | null; created_at: string; last_used_at: string; expires_at: string };
 type ShareItem = { token: string; note_id: string; note_title: string; created_at: string; expires_at: string | null };
 type TrashedNote = { id: string; title: string; folder_id: string | null; deleted_at: string };
@@ -24,6 +38,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   const [settingsOllamaModel, setSettingsOllamaModel] = useState('embeddinggemma');
   const [settingsSaving, setSettingsSaving]   = useState(false);
   const [settingsStatus, setSettingsStatus]   = useState<string | null>(null);
+  const [settingsFailed, setSettingsFailed]   = useState(false);
   const [reindexRunning, setReindexRunning]   = useState(false);
   const [importRunning, setImportRunning]     = useState(false);
   const [settingsTab, setSettingsTab]         = useState<'embeddings' | 'access'>('embeddings');
@@ -103,12 +118,15 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
         setReindexRunning(true);
         const ri = await apiFetch('/api/admin/reindex', { method: 'POST' });
         const riData = await ri.json();
-        setSettingsStatus(`Done. Reindexed ${riData.reindexed} notes.`);
+        const summary = reindexSummary(riData);
+        setSettingsStatus(summary.text);
+        setSettingsFailed(summary.failed);
         setReindexRunning(false);
       } else {
         setSettingsStatus('Settings saved.');
       }
     } catch {
+      setSettingsFailed(true);
       setSettingsStatus('Failed to save.');
     } finally {
       setSettingsSaving(false);
@@ -226,7 +244,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
             </div>
 
             {settingsStatus && (
-              <div style={{ fontSize: 12, color: reindexRunning ? '#f9e2af' : '#a6e3a1', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ fontSize: 12, color: reindexRunning ? '#f9e2af' : settingsFailed ? '#f38ba8' : '#a6e3a1', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
                 {reindexRunning && <div style={{ width: 10, height: 10, border: '2px solid #313244', borderTopColor: '#f9e2af', borderRadius: '50%', animation: 'spin 0.6s linear infinite', flexShrink: 0 }} />}
                 {settingsStatus}
               </div>
@@ -236,12 +254,16 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
               <button
                 onClick={async () => {
                   setReindexRunning(true);
+                  setSettingsFailed(false);
                   setSettingsStatus('Reindexing…');
                   try {
                     const ri = await apiFetch('/api/admin/reindex', { method: 'POST' });
                     const riData = await ri.json();
-                    setSettingsStatus(`Done. Reindexed ${riData.reindexed} notes.`);
+                    const summary = reindexSummary(riData);
+                    setSettingsStatus(summary.text);
+                    setSettingsFailed(summary.failed);
                   } catch {
+                    setSettingsFailed(true);
                     setSettingsStatus('Reindex failed.');
                   } finally {
                     setReindexRunning(false);
@@ -257,12 +279,16 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
                 onClick={async () => {
                   if (!window.confirm('Recompute embeddings for every note? This can take a while on a large vault.')) return;
                   setReindexRunning(true);
+                  setSettingsFailed(false);
                   setSettingsStatus('Reindexing all notes…');
                   try {
                     const ri = await apiFetch('/api/admin/reindex?mode=all', { method: 'POST' });
                     const riData = await ri.json();
-                    setSettingsStatus(`Done. Reindexed ${riData.reindexed} notes.`);
+                    const summary = reindexSummary(riData);
+                    setSettingsStatus(summary.text);
+                    setSettingsFailed(summary.failed);
                   } catch {
+                    setSettingsFailed(true);
                     setSettingsStatus('Reindex failed.');
                   } finally {
                     setReindexRunning(false);

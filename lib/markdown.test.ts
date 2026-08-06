@@ -161,6 +161,14 @@ describe('heading ids and extractHeadings', () => {
     expect(html).toContain('# not a heading');
   });
 
+  it('keeps headings after an unclosed fence in both paths', () => {
+    // An unpaired ``` is not a code block to the renderer, so the outline
+    // must not lose everything below it either.
+    const content = '# Real\n\n```\nconsole.log(1)\n\n## Also real';
+    expect(extractHeadings(content).map(h => h.text)).toEqual(['Real', 'Also real']);
+    expect(parseMarkdown(content)).toContain('id="also-real"');
+  });
+
   it('extractHeadings matches parseMarkdown ids across duplicate mixed levels', () => {
     const content = '### Foo\n\n# Foo\n\n## Bar';
     const heads = extractHeadings(content);

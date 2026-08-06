@@ -7,6 +7,7 @@
 // identity — matching is case-insensitive, same as wikilink resolution.
 import { NextRequest, NextResponse } from 'next/server';
 import JSZip from 'jszip';
+import type { Readable } from 'node:stream';
 import { query, queryOne } from '@/lib/db';
 import { parseFrontmatter } from '@/lib/export';
 import { reindexPendingAsync } from '@/lib/reindex';
@@ -15,9 +16,39 @@ export const dynamic = 'force-dynamic';
 
 const MAX_ZIP_BYTES = 100 * 1024 * 1024;
 // A zip bomb can expand far beyond the archive-size cap, so the decompressed
-// total is limited too. Checked as entries stream out — notes already written
+// total is limited too. Counted as entries stream out — notes already written
 // when the cap trips stay imported (each note is written independently).
 const MAX_UNZIPPED_BYTES = 400 * 1024 * 1024;
+
+// Reads one entry, giving up once it exceeds `limit` bytes. Sizes declared in
+// the zip directory are attacker-controlled, so the budget has to be counted
+// on bytes as they actually inflate — buffering the whole entry first would
+// let a single highly-compressed file exhaust memory before any check runs.
+function readEntryCapped(
+  entry: JSZip.JSZipObject,
+  limit: number
+): Promise<string | null> {
+  return new Promise((resolve, reject) => {
+    const stream = entry.nodeStream('nodebuffer') as Readable;
+    const chunks: Buffer[] = [];
+    let size = 0;
+
+    stream.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > limit) {
+        // pause() first: it is backpressure, not destroy(), that stops jszip
+        // pumping the inflater — without it the bomb keeps expanding unread.
+        stream.pause();
+        stream.destroy();
+        resolve(null);
+        return;
+      }
+      chunks.push(chunk);
+    });
+    stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    stream.on('error', reject);
+  });
+}
 
 async function ensureFolderPath(
   segments: string[],
@@ -32,16 +63,22 @@ async function ensureFolderPath(
     const cached = cache.get(key);
     if (cached) { parentId = cached; continue; }
 
-    const existing: { id: string } | null = await queryOne<{ id: string }>(
+    const findFolder = () => queryOne<{ id: string }>(
       `select id from folders where lower(name) = lower($1)
        and parent_id is not distinct from $2`,
       [name, parentId]
     );
-    const id: string = existing?.id
-      ?? (await queryOne<{ id: string }>(
-        'insert into folders (name, parent_id) values ($1, $2) returning id',
-        [name, parentId]
-      ))!.id;
+
+    // Since migration 010 the look-then-insert race ends in a unique violation
+    // rather than a split subtree, which would fail the note instead of
+    // filing it. Yield to whoever inserted first and reuse their folder.
+    const existing = await findFolder();
+    const inserted = existing ? null : await queryOne<{ id: string }>(
+      `insert into folders (name, parent_id) values ($1, $2)
+       on conflict do nothing returning id`,
+      [name, parentId]
+    );
+    const id: string = existing?.id ?? inserted?.id ?? (await findFolder())!.id;
     cache.set(key, id);
     parentId = id;
   }
@@ -69,14 +106,17 @@ export async function POST(req: NextRequest) {
 
   for (const entry of entries) {
     try {
-      const md = await entry.async('string');
-      unzippedBytes += Buffer.byteLength(md, 'utf8');
-      if (unzippedBytes > MAX_UNZIPPED_BYTES) {
+      const md = await readEntryCapped(entry, MAX_UNZIPPED_BYTES - unzippedBytes);
+      if (md === null) {
+        // Notes written before the cap tripped are still pending embeddings —
+        // kick off the background pass the normal exit path would have run.
+        if (imported + updated > 0) reindexPendingAsync();
         return NextResponse.json(
           { error: 'Decompressed size limit exceeded', imported, updated, skipped, errors },
           { status: 413 }
         );
       }
+      unzippedBytes += Buffer.byteLength(md, 'utf8');
       const { title: fmTitle, tags, body: content } = parseFrontmatter(md);
 
       // "a/b/Note.md" → folders ["a","b"], fallback title "Note".

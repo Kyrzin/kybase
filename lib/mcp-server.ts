@@ -289,7 +289,11 @@ export function createMcpServer(): McpServer {
       if (tags      !== undefined) set('tags', tags);
       if (sets.length === 0) throw new Error('Provide at least one field to update');
 
-      const changed = title !== undefined || content !== undefined;
+      // Compare values, not presence: agents routinely resend the whole note
+      // to edit one tag, and re-embedding unchanged text costs a paid call.
+      const changed =
+        (title   !== undefined && title   !== existing.title) ||
+        (content !== undefined && content !== existing.content);
       if (changed) sets.push('embedding_pending = true');
 
       params.push(id);
@@ -529,7 +533,10 @@ export function createMcpServer(): McpServer {
     'Delete a folder. Notes inside are NOT deleted — their folder_id is set to null (they move to the top level). Child folders are cascade-deleted. To preserve organization, move notes/subfolders out first.',
     { id: z.string().uuid() },
     async ({ id }) => {
-      await query('delete from folders where id = $1', [id]);
+      // Confirm the row existed: an agent told "deleted" when nothing was
+      // deleted plans its next steps on a false premise.
+      const deleted = await query('delete from folders where id = $1 returning id', [id]);
+      if (deleted.length === 0) throw new Error('Folder not found');
       return { content: [{ type: 'text' as const, text: `Folder ${id} deleted.` }] };
     }
   );
@@ -624,10 +631,17 @@ export function createMcpServer(): McpServer {
       // Resolve each link by title (case-insensitive), skip self
       const resolved: Record<string, unknown>[] = [];
       const missing: string[] = [];
+      // [[Guide]] and [[guide]] are one note — titles are unique
+      // case-insensitively, so resolve each spelling only once or the agent
+      // reads the same note twice and pays for it twice.
+      const seen = new Set<string>();
 
       await Promise.all(
         linkTargets.map(async (target) => {
-          if (target.toLowerCase() === note.title.toLowerCase()) return;
+          const key = target.toLowerCase();
+          if (key === note.title.toLowerCase()) return;
+          if (seen.has(key)) return;
+          seen.add(key);
           const linked = await queryOne<{ content: string; folder_id: string | null }>(
             'select id, title, content, folder_id, tags, updated_at from notes where title ilike $1 and deleted_at is null',
             [escapeLike(target)]

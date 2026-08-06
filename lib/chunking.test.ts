@@ -79,6 +79,22 @@ describe('chunkNote', () => {
     expect(chunks[0].heading).toBe('Реальный заголовок');
   });
 
+  it('still sees headings after an unclosed fence', () => {
+    // The renderer pairs fences, so a dangling ``` shows as text and the
+    // headings below it stay headings — chunking must agree.
+    const content = [
+      '# Секция А',
+      'текст ' + 'а'.repeat(100),
+      '```',
+      'console.log(1)',
+      '',
+      '# Секция Б',
+      'ещё текст ' + 'б'.repeat(100),
+    ].join('\n');
+    const chunks = chunkNote(content, 150);
+    expect(chunks.map(c => c.heading)).toContain('Секция Б');
+  });
+
   it('assigns sequential indexes starting at 0', () => {
     const content = '## A\n' + 'a'.repeat(250) + '\n## B\n' + 'b'.repeat(250);
     const chunks = chunkNote(content, 300);

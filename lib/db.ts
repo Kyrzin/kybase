@@ -60,6 +60,15 @@ export function isUniqueViolation(err: unknown): boolean {
 }
 
 /**
+ * True for a malformed literal — most often an id that is not a uuid.
+ * Callers report it as a bad request; letting it surface as 500 would blame
+ * the server for a client typo.
+ */
+export function isInvalidTextRepresentation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: string }).code === '22P02';
+}
+
+/**
  * Serialize an embedding for a vector-typed parameter.
  * pgvector accepts the '[0.1,0.2,...]' text form; cast with ::vector in SQL.
  */

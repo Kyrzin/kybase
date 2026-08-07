@@ -176,14 +176,9 @@ export function createMcpServer(): McpServer {
         '4. Do not force links: if nothing is related, create the note without any.\n\n' +
         'Tagging: new tags are English, lowercase, kebab-case. Call list_tags first and reuse an ' +
         'existing tag when one fits, rather than coining an RU/EN or case-variant duplicate.\n\n' +
-        'House rules: a vault may carry its own conventions — folder meanings, naming, where new ' +
-        'notes belong. If list_tags shows a "conventions" tag, read those notes once at the start ' +
-        'of a session (list_notes with tag "conventions") and follow them; they outrank the general ' +
-        'guidance above. No such tag means this vault has none.\n\n' +
-        'Adding to an existing note: use append_to_note, not update_note. Resending whole content ' +
-        'to add a paragraph costs the note twice in tokens and overwrites whatever another session ' +
-        'wrote meanwhile. When you do rewrite whole content, pass the updated_at you read as ' +
-        'expected_updated_at so a concurrent edit is refused rather than silently lost.',
+        'To add to a note use append_to_note, not update_note: resending whole content to add a ' +
+        'paragraph costs the note twice and overwrites what another session wrote meanwhile. When ' +
+        'you do rewrite whole content, pass the updated_at you read as expected_updated_at.',
     }
   );
 
@@ -191,10 +186,9 @@ export function createMcpServer(): McpServer {
   server.tool(
     'list_notes',
     'List notes, newest first. Optional filters: folder_id, tag, updated_after/updated_before, ' +
-    'limit (max 200). updated_after answers "what changed since I was last here" without needing ' +
-    'a search term. Pass trashed:true to see soft-deleted notes instead (deleted via delete_note, ' +
-    'recoverable with restore_note until they age out of the trash) — other filters are ignored ' +
-    'in that mode.',
+    'limit (max 200). updated_after answers "what changed since I was last here" without a search ' +
+    'term. Pass trashed:true to see soft-deleted notes instead (recoverable with restore_note ' +
+    'until they age out of the trash) — other filters are ignored in that mode.',
     {
       folder_id: z.string().uuid().optional().describe('Filter by folder UUID'),
       tag:       z.string().optional().describe('Filter by tag'),
@@ -240,10 +234,9 @@ export function createMcpServer(): McpServer {
     'resolves. An ambiguous title returns the candidate list (id + title) to retry with. Large ' +
     `notes are windowed: content is capped at ${DEFAULT_CONTENT_LIMIT} chars by default (see limit/offset) — check ` +
     'content_truncated and content_total_length in the response, and pass next_offset back as ' +
-    '`offset` to fetch the rest. Every response carries `headings` (the note\'s H1–H3 outline with ' +
-    'character offsets), so on a truncated note you can see what is in the part you did not get ' +
-    'and jump to it — either by passing that offset, or by naming it in `section`, which returns ' +
-    'that heading and everything under it and nothing else.',
+    '`offset` to fetch the rest. Every response carries `headings` — the H1–H3 outline with ' +
+    'character offsets, so a truncated note still shows what is in the part you did not get. ' +
+    'Jump there with that offset, or name it in `section` to get that heading and its body alone.',
     {
       id:      z.string().uuid().optional(),
       title:   z.string().optional(),
@@ -327,7 +320,7 @@ export function createMcpServer(): McpServer {
     'search_notes (copy titles exactly from tool results). Before adding tags, call list_tags and ' +
     'reuse an existing tag if one matches — do not create RU/EN duplicates. ' +
     'Pass expected_updated_at (the updated_at you read) to be refused instead of overwriting a ' +
-    'change someone else made in the meantime — worth it whenever you send whole content back.',
+    'change made in between.',
     {
       id:        z.string().uuid(),
       title:     z.string().trim().min(1).max(500).optional(),
@@ -420,11 +413,9 @@ export function createMcpServer(): McpServer {
   // ── append_to_note ───────────────────────────────────────────────────────
   server.tool(
     'append_to_note',
-    'Add text to the end of a note, or to the end of one section, without resending the rest. ' +
-    'Prefer this over update_note for journals, logs and running lists: rewriting whole content to ' +
-    'add a line costs the note twice over in tokens and silently overwrites anything another ' +
-    'session wrote in between. A blank line is inserted between the old text and yours. ' +
-    'Re-embeds in the background like any content change.',
+    'Add text to the end of a note, or to the end of one section, without resending the rest — ' +
+    'prefer it over update_note for journals, logs and running lists. A blank line separates your ' +
+    'text from what was there. Re-embeds in the background like any content change.',
     {
       id:      z.string().uuid().optional(),
       title:   z.string().optional().describe('Alternative to id; resolved like get_note'),

@@ -345,17 +345,20 @@ export function createMcpServer(): McpServer {
 
       // Two sessions editing the same note otherwise silently overwrite one
       // another — the loser's text is gone with nothing to say it happened.
-      if (expected_updated_at !== undefined) {
-        const seen = new Date(expected_updated_at).getTime();
-        const current = new Date(existing.updated_at).getTime();
-        if (Number.isNaN(seen)) throw new Error('expected_updated_at is not a valid timestamp');
-        if (seen !== current) {
-          throw new Error(
-            `Note changed since you read it (now ${new Date(current).toISOString()}). ` +
-            're-read it with get_note and reapply your edit'
-          );
-        }
+      // This read only shapes the error message; the guarantee is the
+      // condition carried into the UPDATE below, because anything checked
+      // here can change before the write lands.
+      if (expected_updated_at !== undefined && Number.isNaN(new Date(expected_updated_at).getTime())) {
+        throw new Error('expected_updated_at is not a valid timestamp');
       }
+      const staleRead = expected_updated_at !== undefined
+        && new Date(expected_updated_at).getTime() !== new Date(existing.updated_at).getTime();
+      const refuseStale = (): never => {
+        throw new Error(
+          'Note changed since you read it — re-read it with get_note and reapply your edit'
+        );
+      };
+      if (staleRead) refuseStale();
 
       const sets: string[] = [];
       const params: unknown[] = [];
@@ -374,13 +377,23 @@ export function createMcpServer(): McpServer {
       if (changed) sets.push('embedding_pending = true');
 
       params.push(id);
+      const idParam = params.length;
+      // date_trunc to milliseconds: the column keeps microseconds, but the
+      // caller only ever saw three decimals, so comparing raw would refuse
+      // every honest write whose stored value carries a finer fraction.
+      let guard = '';
+      if (expected_updated_at !== undefined) {
+        params.push(expected_updated_at);
+        guard = `and date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $${params.length}::timestamptz)`;
+      }
       let note;
       try {
         // One transaction: a rename must never land without its backlink
         // rewrite — a failure between the two leaves [[OldTitle]] links broken.
         note = await withTransaction(async (client) => {
           const { rows } = await client.query(
-            `update notes set ${sets.join(', ')} where id = $${params.length} and deleted_at is null
+            `update notes set ${sets.join(', ')}
+             where id = $${idParam} and deleted_at is null ${guard}
              returning id, title, content, folder_id, tags, updated_at`,
             params
           );
@@ -393,6 +406,9 @@ export function createMcpServer(): McpServer {
         if (isUniqueViolation(err)) throw new Error(`A note titled "${title}" already exists — update it or pick another title`);
         throw err;
       }
+      // The note was there a moment ago, so nothing matching now means the
+      // guard caught a write that landed in between.
+      if (!note && expected_updated_at !== undefined) refuseStale();
       if (!note) throw new Error('Note not found');
       if (changed) {
         indexNoteAsync(id, title ?? existing.title, content ?? existing.content);
@@ -418,42 +434,55 @@ export function createMcpServer(): McpServer {
     },
     async ({ id, title, content, section }) => {
       if (!id && !title) throw new Error('Provide either id or title');
-      const cols = 'id, title, content';
-      const existing = id
-        ? await queryOne<{ id: string; title: string; content: string }>(
-            `select ${cols} from notes where id = $1 and deleted_at is null`, [id])
-        : await findNoteByTitle<{ id: string; title: string; content: string }>(title!, cols);
-      if (!existing) throw new Error('Note not found');
+      const found = id
+        ? await queryOne<{ id: string }>(
+            'select id from notes where id = $1 and deleted_at is null', [id])
+        : await findNoteByTitle<{ id: string }>(title!, 'id');
+      if (!found) throw new Error('Note not found');
 
       const addition = content.trimEnd();
-      let next: string;
-      if (section === undefined) {
-        next = `${existing.content.trimEnd()}\n\n${addition}\n`;
-      } else {
-        const headings = extractHeadings(existing.content);
-        const range = sectionRange(headings, existing.content.length, section);
-        if (!range) {
-          const available = headings.map(h => h.text).join(' | ') || '(this note has no headings)';
-          throw new Error(`No section "${section}" in this note. Available: ${available}`);
-        }
-        // Land before the next heading, not after it, or the text reads as
-        // part of the following section for everyone who opens the note.
-        const head = existing.content.slice(0, range.end).trimEnd();
-        const tail = existing.content.slice(range.end);
-        next = `${head}\n\n${addition}\n${tail ? `\n${tail}` : ''}`;
-      }
-      if (next.length > MAX_NOTE_CONTENT_CHARS) {
-        throw new Error(`Appending would exceed the ${MAX_NOTE_CONTENT_CHARS}-character limit for a note`);
-      }
+      // Read and write inside one transaction with the row locked. Appending
+      // is read-modify-write, so two sessions logging at once would otherwise
+      // both build on the same text and the first one's line would vanish —
+      // exactly the loss this tool exists to prevent.
+      const result = await withTransaction(async (client) => {
+        const { rows } = await client.query<{ title: string; content: string }>(
+          'select title, content from notes where id = $1 and deleted_at is null for update',
+          [found.id]
+        );
+        const existing = rows[0];
+        if (!existing) throw new Error('Note not found');
 
-      const note = await queryOne<{ id: string; title: string; updated_at: string }>(
-        `update notes set content = $1, embedding_pending = true
-         where id = $2 and deleted_at is null
-         returning id, title, updated_at`,
-        [next, existing.id]
-      );
-      if (!note) throw new Error('Note not found');
-      indexNoteAsync(existing.id, existing.title, next);
+        let next: string;
+        if (section === undefined) {
+          next = `${existing.content.trimEnd()}\n\n${addition}\n`;
+        } else {
+          const headings = extractHeadings(existing.content);
+          const range = sectionRange(headings, existing.content.length, section);
+          if (!range) {
+            const available = headings.map(h => h.text).join(' | ') || '(this note has no headings)';
+            throw new Error(`No section "${section}" in this note. Available: ${available}`);
+          }
+          // Land before the next heading, not after it, or the text reads as
+          // part of the following section for everyone who opens the note.
+          const head = existing.content.slice(0, range.end).trimEnd();
+          const tail = existing.content.slice(range.end);
+          next = `${head}\n\n${addition}\n${tail ? `\n${tail}` : ''}`;
+        }
+        if (next.length > MAX_NOTE_CONTENT_CHARS) {
+          throw new Error(`Appending would exceed the ${MAX_NOTE_CONTENT_CHARS}-character limit for a note`);
+        }
+
+        const updated = await client.query<{ id: string; title: string; updated_at: string }>(
+          `update notes set content = $1, embedding_pending = true where id = $2
+           returning id, title, updated_at`,
+          [next, found.id]
+        );
+        return { note: updated.rows[0], title: existing.title, next };
+      });
+
+      const { note, next } = result;
+      indexNoteAsync(found.id, result.title, next);
       return {
         content: [{
           type: 'text' as const,

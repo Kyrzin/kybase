@@ -305,24 +305,31 @@ export default function Editor(p: {
                       </div>
                     </div>
                   ) : (
-                    <div
-                      className="markdown-preview"
-                      dangerouslySetInnerHTML={{ __html: renderWithWikilinks(parseMarkdown(activeNote.content), notes) }}
-                      onMouseMove={e => {
-                        const target = e.target as HTMLElement;
-                        if (target.classList.contains('wikilink')) {
-                          const noteTitle = target.dataset.title ?? '';
-                          const found = notes.find(n => n.title.toLowerCase() === noteTitle.toLowerCase());
-                          if (found) {
-                            const excerpt = found.content.replace(/^#.+\n?/m, '').replace(/\[\[|\]\]/g, '').trim().slice(0, 160);
-                            setWikilinkPreview({ x: e.clientX + 14, y: e.clientY - 8, title: found.title, excerpt });
-                            return;
+                    <>
+                      <div
+                        className="markdown-preview"
+                        dangerouslySetInnerHTML={{ __html: renderWithWikilinks(parseMarkdown(activeNote.content), notes) }}
+                        onMouseMove={e => {
+                          const target = e.target as HTMLElement;
+                          if (target.classList.contains('wikilink')) {
+                            const noteTitle = target.dataset.title ?? '';
+                            const found = notes.find(n => n.title.toLowerCase() === noteTitle.toLowerCase());
+                            if (found) {
+                              const excerpt = found.content.replace(/^#.+\n?/m, '').replace(/\[\[|\]\]/g, '').trim().slice(0, 160);
+                              setWikilinkPreview({ x: e.clientX + 14, y: e.clientY - 8, title: found.title, excerpt });
+                              return;
+                            }
                           }
-                        }
-                        if (wikilinkPreview) setWikilinkPreview(null);
-                      }}
-                      onMouseLeave={() => setWikilinkPreview(null)}
-                    />
+                          if (wikilinkPreview) setWikilinkPreview(null);
+                        }}
+                        onMouseLeave={() => setWikilinkPreview(null)}
+                      />
+                      {/* Low-emphasis by design: metadata, not content — lives after
+                          the note body so it doesn't compete for attention above it. */}
+                      <div style={{ maxWidth: 760, marginTop: 24, paddingTop: 12, borderTop: '1px solid #313244', fontSize: 11, color: '#585b70' }}>
+                        Created {new Date(activeNote.created_at).toLocaleDateString()} · Updated {new Date(activeNote.updated_at).toLocaleDateString()}
+                      </div>
+                    </>
                   )}
                 </div>
               </>

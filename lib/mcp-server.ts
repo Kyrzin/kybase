@@ -10,6 +10,7 @@ import { getMinSimilarity } from './embeddings';
 import { indexNoteAsync } from './indexing';
 import { extractAllWikilinks } from './wikilinks';
 import { buildGraph } from './graph-data';
+import { extractHeadings, type Heading } from './markdown';
 import { MAX_NOTE_CONTENT_CHARS } from './types';
 
 
@@ -113,6 +114,26 @@ function withFolderPath<T extends { folder_id: string | null }>(
   return { ...row, folder_path: row.folder_id ? paths.get(row.folder_id) ?? null : null };
 }
 
+/**
+ * Span of a section: its heading line through everything beneath it, ending
+ * at the next heading of the same or higher rank. Matches on heading text or
+ * slug, case-insensitively, so a caller can pass back either what it read in
+ * `headings` or the anchor half of a [[Title#Section]] link.
+ */
+export function sectionRange(
+  headings: Heading[],
+  total: number,
+  section: string
+): { start: number; end: number } | null {
+  const wanted = section.trim().toLowerCase();
+  const i = headings.findIndex(
+    h => h.text.toLowerCase() === wanted || h.slug.toLowerCase() === wanted
+  );
+  if (i === -1) return null;
+  const next = headings.slice(i + 1).find(h => h.level <= headings[i].level);
+  return { start: headings[i].offset, end: next ? next.offset : total };
+}
+
 export function windowContent<T extends { content: string }>(
   note: T,
   offset: number,
@@ -151,23 +172,35 @@ export function createMcpServer(): McpServer {
         'or misremembered titles produce broken links.\n' +
         '4. Do not force links: if nothing is related, create the note without any.\n\n' +
         'Tagging: new tags are English, lowercase, kebab-case. Call list_tags first and reuse an ' +
-        'existing tag when one fits, rather than coining an RU/EN or case-variant duplicate.',
+        'existing tag when one fits, rather than coining an RU/EN or case-variant duplicate.\n\n' +
+        'House rules: a vault may carry its own conventions — folder meanings, naming, where new ' +
+        'notes belong. If list_tags shows a "conventions" tag, read those notes once at the start ' +
+        'of a session (list_notes with tag "conventions") and follow them; they outrank the general ' +
+        'guidance above. No such tag means this vault has none.\n\n' +
+        'Adding to an existing note: use append_to_note, not update_note. Resending whole content ' +
+        'to add a paragraph costs the note twice in tokens and overwrites whatever another session ' +
+        'wrote meanwhile. When you do rewrite whole content, pass the updated_at you read as ' +
+        'expected_updated_at so a concurrent edit is refused rather than silently lost.',
     }
   );
 
   // ── list_notes ───────────────────────────────────────────────────────────
   server.tool(
     'list_notes',
-    'List notes. Optional filters: folder_id, tag, limit (max 200). Pass trashed:true to see ' +
-    'soft-deleted notes instead (deleted via delete_note, recoverable with restore_note until ' +
-    'they age out of the trash) — folder_id/tag are ignored in that mode.',
+    'List notes, newest first. Optional filters: folder_id, tag, updated_after/updated_before, ' +
+    'limit (max 200). updated_after answers "what changed since I was last here" without needing ' +
+    'a search term. Pass trashed:true to see soft-deleted notes instead (deleted via delete_note, ' +
+    'recoverable with restore_note until they age out of the trash) — other filters are ignored ' +
+    'in that mode.',
     {
       folder_id: z.string().uuid().optional().describe('Filter by folder UUID'),
       tag:       z.string().optional().describe('Filter by tag'),
+      updated_after:  z.string().optional().describe('ISO timestamp — only notes updated at or after this'),
+      updated_before: z.string().optional().describe('ISO timestamp — only notes updated at or before this'),
       limit:     z.number().int().min(1).max(200).default(50),
       trashed:   z.boolean().default(false).describe('List soft-deleted notes instead of live ones'),
     },
-    async ({ folder_id, tag, limit, trashed }) => {
+    async ({ folder_id, tag, updated_after, updated_before, limit, trashed }) => {
       if (trashed) {
         const data = await query<{ id: string; title: string; folder_id: string | null; deleted_at: string }>(
           'select id, title, folder_id, deleted_at from notes where deleted_at is not null order by deleted_at desc limit $1',
@@ -180,6 +213,8 @@ export function createMcpServer(): McpServer {
       const params: unknown[] = [];
       if (folder_id) { params.push(folder_id); conds.push(`folder_id = $${params.length}`); }
       if (tag)       { params.push([tag]);     conds.push(`tags @> $${params.length}`); }
+      if (updated_after)  { params.push(updated_after);  conds.push(`updated_at >= $${params.length}`); }
+      if (updated_before) { params.push(updated_before); conds.push(`updated_at <= $${params.length}`); }
       params.push(limit);
       const [data, paths] = await Promise.all([
         query<{ id: string; title: string; folder_id: string | null; tags: string[]; updated_at: string }>(
@@ -202,15 +237,20 @@ export function createMcpServer(): McpServer {
     'resolves. An ambiguous title returns the candidate list (id + title) to retry with. Large ' +
     `notes are windowed: content is capped at ${DEFAULT_CONTENT_LIMIT} chars by default (see limit/offset) — check ` +
     'content_truncated and content_total_length in the response, and pass next_offset back as ' +
-    '`offset` to fetch the rest.',
+    '`offset` to fetch the rest. Every response carries `headings` (the note\'s H1–H3 outline with ' +
+    'character offsets), so on a truncated note you can see what is in the part you did not get ' +
+    'and jump to it — either by passing that offset, or by naming it in `section`, which returns ' +
+    'that heading and everything under it and nothing else.',
     {
-      id:     z.string().uuid().optional(),
-      title:  z.string().optional(),
-      offset: z.number().int().min(0).default(0).describe('Character offset into content to start from'),
-      limit:  z.number().int().min(1000).max(200_000).default(DEFAULT_CONTENT_LIMIT)
+      id:      z.string().uuid().optional(),
+      title:   z.string().optional(),
+      section: z.string().optional()
+        .describe('Return only this section (heading text or slug, case-insensitive) and its body'),
+      offset:  z.number().int().min(0).default(0).describe('Character offset into content to start from'),
+      limit:   z.number().int().min(1000).max(200_000).default(DEFAULT_CONTENT_LIMIT)
         .describe('Max characters of content to return'),
     },
-    async ({ id, title, offset, limit }) => {
+    async ({ id, title, section, offset, limit }) => {
       if (!id && !title) throw new Error('Provide either id or title');
       const cols = 'id, title, content, folder_id, tags, created_at, updated_at';
       // findNoteByTitle escapes %/_ at every stage, so wildcards in a real
@@ -222,7 +262,22 @@ export function createMcpServer(): McpServer {
         folderPathMap(),
       ]);
       if (!data) throw new Error('Note not found');
-      return { content: [{ type: 'text' as const, text: JSON.stringify(withFolderPath(windowContent(data, offset, limit), paths), null, 2) }] };
+
+      // The outline travels with every response: on a windowed note it is the
+      // only way to know what sits in the part that did not come back.
+      const headings = extractHeadings(data.content);
+      let body = data;
+      if (section !== undefined) {
+        const range = sectionRange(headings, data.content.length, section);
+        if (!range) {
+          const available = headings.map(h => h.text).join(' | ') || '(this note has no headings)';
+          throw new Error(`No section "${section}" in this note. Available: ${available}`);
+        }
+        // offset/limit now page within the section, not the whole note.
+        body = { ...data, content: data.content.slice(range.start, range.end) };
+      }
+      const windowed = withFolderPath(windowContent(body, offset, limit), paths);
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ ...windowed, headings }, null, 2) }] };
     }
   );
 
@@ -267,19 +322,37 @@ export function createMcpServer(): McpServer {
     'Update note fields. Re-embeds if title or content changed. Updates wikilinks if title changed. ' +
     'When substantially rewriting content, consider adding [[wikilinks]] to related notes found via ' +
     'search_notes (copy titles exactly from tool results). Before adding tags, call list_tags and ' +
-    'reuse an existing tag if one matches — do not create RU/EN duplicates.',
+    'reuse an existing tag if one matches — do not create RU/EN duplicates. ' +
+    'Pass expected_updated_at (the updated_at you read) to be refused instead of overwriting a ' +
+    'change someone else made in the meantime — worth it whenever you send whole content back.',
     {
       id:        z.string().uuid(),
       title:     z.string().trim().min(1).max(500).optional(),
       content:   z.string().max(MAX_NOTE_CONTENT_CHARS).optional(),
       folder_id: z.string().uuid().nullable().optional(),
       tags:      z.array(z.string()).optional(),
+      expected_updated_at: z.string().optional()
+        .describe('ISO updated_at from when you read the note; refuses the write if it changed since'),
     },
-    async ({ id, title, content, folder_id, tags }) => {
-      const existing = await queryOne<{ title: string; content: string }>(
-        'select title, content from notes where id = $1 and deleted_at is null', [id]
+    async ({ id, title, content, folder_id, tags, expected_updated_at }) => {
+      const existing = await queryOne<{ title: string; content: string; updated_at: string }>(
+        'select title, content, updated_at from notes where id = $1 and deleted_at is null', [id]
       );
       if (!existing) throw new Error('Note not found');
+
+      // Two sessions editing the same note otherwise silently overwrite one
+      // another — the loser's text is gone with nothing to say it happened.
+      if (expected_updated_at !== undefined) {
+        const seen = new Date(expected_updated_at).getTime();
+        const current = new Date(existing.updated_at).getTime();
+        if (Number.isNaN(seen)) throw new Error('expected_updated_at is not a valid timestamp');
+        if (seen !== current) {
+          throw new Error(
+            `Note changed since you read it (now ${new Date(current).toISOString()}). ` +
+            're-read it with get_note and reapply your edit'
+          );
+        }
+      }
 
       const sets: string[] = [];
       const params: unknown[] = [];
@@ -322,6 +395,68 @@ export function createMcpServer(): McpServer {
         indexNoteAsync(id, title ?? existing.title, content ?? existing.content);
       }
       return { content: [{ type: 'text' as const, text: JSON.stringify(note, null, 2) }] };
+    }
+  );
+
+  // ── append_to_note ───────────────────────────────────────────────────────
+  server.tool(
+    'append_to_note',
+    'Add text to the end of a note, or to the end of one section, without resending the rest. ' +
+    'Prefer this over update_note for journals, logs and running lists: rewriting whole content to ' +
+    'add a line costs the note twice over in tokens and silently overwrites anything another ' +
+    'session wrote in between. A blank line is inserted between the old text and yours. ' +
+    'Re-embeds in the background like any content change.',
+    {
+      id:      z.string().uuid().optional(),
+      title:   z.string().optional().describe('Alternative to id; resolved like get_note'),
+      content: z.string().min(1).max(MAX_NOTE_CONTENT_CHARS),
+      section: z.string().optional()
+        .describe('Append at the end of this section (heading text or slug) instead of the note'),
+    },
+    async ({ id, title, content, section }) => {
+      if (!id && !title) throw new Error('Provide either id or title');
+      const cols = 'id, title, content';
+      const existing = id
+        ? await queryOne<{ id: string; title: string; content: string }>(
+            `select ${cols} from notes where id = $1 and deleted_at is null`, [id])
+        : await findNoteByTitle<{ id: string; title: string; content: string }>(title!, cols);
+      if (!existing) throw new Error('Note not found');
+
+      const addition = content.trimEnd();
+      let next: string;
+      if (section === undefined) {
+        next = `${existing.content.trimEnd()}\n\n${addition}\n`;
+      } else {
+        const headings = extractHeadings(existing.content);
+        const range = sectionRange(headings, existing.content.length, section);
+        if (!range) {
+          const available = headings.map(h => h.text).join(' | ') || '(this note has no headings)';
+          throw new Error(`No section "${section}" in this note. Available: ${available}`);
+        }
+        // Land before the next heading, not after it, or the text reads as
+        // part of the following section for everyone who opens the note.
+        const head = existing.content.slice(0, range.end).trimEnd();
+        const tail = existing.content.slice(range.end);
+        next = `${head}\n\n${addition}\n${tail ? `\n${tail}` : ''}`;
+      }
+      if (next.length > MAX_NOTE_CONTENT_CHARS) {
+        throw new Error(`Appending would exceed the ${MAX_NOTE_CONTENT_CHARS}-character limit for a note`);
+      }
+
+      const note = await queryOne<{ id: string; title: string; updated_at: string }>(
+        `update notes set content = $1, embedding_pending = true
+         where id = $2 and deleted_at is null
+         returning id, title, updated_at`,
+        [next, existing.id]
+      );
+      if (!note) throw new Error('Note not found');
+      indexNoteAsync(existing.id, existing.title, next);
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ ...note, appended_chars: addition.length, content_total_length: next.length }, null, 2),
+        }],
+      };
     }
   );
 

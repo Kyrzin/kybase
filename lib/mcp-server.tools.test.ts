@@ -87,13 +87,14 @@ beforeEach(() => {
 });
 
 describe('tools/list', () => {
-  it('registers all 16 tools', async () => {
+  it('registers all 17 tools', async () => {
     const client = await connectClient();
     const { tools } = await client.listTools();
     expect(tools.map(t => t.name).sort()).toEqual([
-      'create_folder', 'create_note', 'delete_folder', 'delete_note', 'get_backlinks',
-      'get_graph', 'get_note', 'get_note_with_links', 'indexing_status', 'list_folders',
-      'list_notes', 'list_tags', 'restore_note', 'search_notes', 'update_folder', 'update_note',
+      'append_to_note', 'create_folder', 'create_note', 'delete_folder', 'delete_note',
+      'get_backlinks', 'get_graph', 'get_note', 'get_note_with_links', 'indexing_status',
+      'list_folders', 'list_notes', 'list_tags', 'restore_note', 'search_notes',
+      'update_folder', 'update_note',
     ]);
   });
 
@@ -190,6 +191,56 @@ describe('list_tags', () => {
     for (const name of ['create_note', 'update_note']) {
       expect(tools.find(t => t.name === name)!.description).toContain('list_tags');
     }
+  });
+});
+
+describe('get_note outline and sections', () => {
+  const NOTE = [
+    '# Title',
+    'intro',
+    '',
+    '## Alpha',
+    'alpha body',
+    '',
+    '## Beta',
+    'beta body',
+  ].join('\n');
+
+  it('returns the outline so a truncated read still shows what was left behind', async () => {
+    queryOne.mockResolvedValue({ id: '1', title: 'T', content: NOTE });
+    const out = await call('get_note', { id: '11111111-1111-4111-8111-111111111111' }) as
+      { headings: { text: string; offset: number }[] };
+    expect(out.headings.map(h => h.text)).toEqual(['Title', 'Alpha', 'Beta']);
+    // Offsets must address the real content, not a re-rendered copy.
+    expect(NOTE.slice(out.headings[2].offset)).toMatch(/^## Beta/);
+  });
+
+  it('section returns that heading and its body, stopping at the next one', async () => {
+    queryOne.mockResolvedValue({ id: '1', title: 'T', content: NOTE });
+    const out = await call('get_note', {
+      id: '11111111-1111-4111-8111-111111111111', section: 'Alpha',
+    }) as { content: string };
+    expect(out.content).toContain('## Alpha');
+    expect(out.content).toContain('alpha body');
+    expect(out.content).not.toContain('Beta');
+    expect(out.content).not.toContain('intro');
+  });
+
+  it('a section can be named by its slug as well as its text', async () => {
+    queryOne.mockResolvedValue({ id: '1', title: 'T', content: NOTE });
+    const out = await call('get_note', {
+      id: '11111111-1111-4111-8111-111111111111', section: 'beta',
+    }) as { content: string };
+    expect(out.content).toContain('beta body');
+  });
+
+  it('an unknown section lists the ones that exist instead of failing blankly', async () => {
+    queryOne.mockResolvedValue({ id: '1', title: 'T', content: NOTE });
+    const err = await callExpectingError('get_note', {
+      id: '11111111-1111-4111-8111-111111111111', section: 'Nope',
+    });
+    expect(err).toContain('Alpha');
+    expect(err).toContain('Beta');
   });
 });
 
@@ -302,6 +353,54 @@ describe('get_note title fallback', () => {
   });
 });
 
+describe('append_to_note', () => {
+  const NOTE = ['# Log', '', '## Today', 'first entry', '', '## Later', 'nothing yet'].join('\n');
+
+  it('adds to the end of the note without resending what was already there', async () => {
+    queryOne
+      .mockResolvedValueOnce({ id: 'n1', title: 'Log', content: NOTE })   // lookup
+      .mockResolvedValueOnce({ id: 'n1', title: 'Log', updated_at: 'now' }); // update
+    await call('append_to_note', {
+      id: '11111111-1111-4111-8111-111111111111', content: 'second entry',
+    });
+    const [sql, params] = queryOne.mock.calls[1];
+    expect(sql).toContain('update notes set content');
+    expect(sql).toContain('embedding_pending = true');
+    expect(params[0]).toContain('first entry');   // old text survives
+    expect(params[0]).toContain('second entry');  // new text landed
+    expect(params[0].indexOf('second entry')).toBeGreaterThan(params[0].indexOf('nothing yet'));
+  });
+
+  it('appending to a section lands before the next heading, not after it', async () => {
+    queryOne
+      .mockResolvedValueOnce({ id: 'n1', title: 'Log', content: NOTE })
+      .mockResolvedValueOnce({ id: 'n1', title: 'Log', updated_at: 'now' });
+    await call('append_to_note', {
+      id: '11111111-1111-4111-8111-111111111111', content: 'same-day note', section: 'Today',
+    });
+    const body = queryOne.mock.calls[1][1][0] as string;
+    // Reads as part of "Today" to anyone opening the note.
+    expect(body.indexOf('same-day note')).toBeGreaterThan(body.indexOf('first entry'));
+    expect(body.indexOf('same-day note')).toBeLessThan(body.indexOf('## Later'));
+  });
+
+  it('re-embeds the note in the background', async () => {
+    queryOne
+      .mockResolvedValueOnce({ id: 'n1', title: 'Log', content: NOTE })
+      .mockResolvedValueOnce({ id: 'n1', title: 'Log', updated_at: 'now' });
+    await call('append_to_note', { id: '11111111-1111-4111-8111-111111111111', content: 'x' });
+    expect(indexNoteAsync).toHaveBeenCalledOnce();
+  });
+
+  it('refuses an unknown section rather than appending in the wrong place', async () => {
+    queryOne.mockResolvedValueOnce({ id: 'n1', title: 'Log', content: NOTE });
+    const err = await callExpectingError('append_to_note', {
+      id: '11111111-1111-4111-8111-111111111111', content: 'x', section: 'Missing',
+    });
+    expect(err).toContain('Today');
+  });
+});
+
 describe('create_note', () => {
   it('inserts and kicks off background indexing', async () => {
     queryOne.mockResolvedValue({ id: 'new-id', title: 'T', content: 'C' });
@@ -315,6 +414,45 @@ describe('create_note', () => {
     const err = await callExpectingError('create_note', { title: 'Dupe' });
     expect(err).toContain('already exists');
     expect(indexNoteAsync).not.toHaveBeenCalled();
+  });
+});
+
+describe('update_note concurrency guard', () => {
+  const ID = '11111111-1111-4111-8111-111111111111';
+
+  it('refuses the write when the note moved on since it was read', async () => {
+    queryOne.mockResolvedValue({ title: 'T', content: 'c', updated_at: '2026-01-02T00:00:00.000Z' });
+    const err = await callExpectingError('update_note', {
+      id: ID, content: 'mine', expected_updated_at: '2026-01-01T00:00:00.000Z',
+    });
+    expect(err).toContain('changed since you read it');
+    expect(txClientQuery).not.toHaveBeenCalled(); // nothing was written
+  });
+
+  it('goes through when the note is untouched', async () => {
+    queryOne.mockResolvedValue({ title: 'T', content: 'c', updated_at: '2026-01-01T00:00:00.000Z' });
+    txClientQuery.mockResolvedValue({ rows: [{ id: ID, title: 'T', content: 'mine' }] });
+    await call('update_note', {
+      id: ID, content: 'mine', expected_updated_at: '2026-01-01T00:00:00.000Z',
+    });
+    expect(txClientQuery).toHaveBeenCalled();
+  });
+
+  it('without the guard it writes as before', async () => {
+    queryOne.mockResolvedValue({ title: 'T', content: 'c', updated_at: '2026-01-02T00:00:00.000Z' });
+    txClientQuery.mockResolvedValue({ rows: [{ id: ID, title: 'T', content: 'mine' }] });
+    await call('update_note', { id: ID, content: 'mine' });
+    expect(txClientQuery).toHaveBeenCalled();
+  });
+});
+
+describe('list_notes recency filter', () => {
+  it('updated_after answers "what changed since I was last here"', async () => {
+    await call('list_notes', { updated_after: '2026-01-01T00:00:00.000Z' });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain('updated_at >=');
+    expect(sql).toContain('order by updated_at desc');
+    expect(params).toContain('2026-01-01T00:00:00.000Z');
   });
 });
 

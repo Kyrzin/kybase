@@ -40,7 +40,13 @@ export function slugDeduper(): (slug: string) => string {
   };
 }
 
-export type Heading = { level: 1 | 2 | 3; text: string; slug: string };
+export type Heading = {
+  level: 1 | 2 | 3;
+  text: string;
+  slug: string;
+  /** Character offset of the heading line — lets a reader seek to a section. */
+  offset: number;
+};
 
 /**
  * Index of a ``` that never gets closed, or -1 when every fence is paired.
@@ -66,12 +72,20 @@ export function extractHeadings(content: string): Heading[] {
   let inFence = false;
   const lines = content.split('\n');
   const unpaired = unpairedFenceIndex(lines);
+  let offset = 0;
   for (const [i, line] of lines.entries()) {
+    const lineStart = offset;
+    offset += line.length + 1; // + the '\n' that split() consumed
     if (i !== unpaired && /^```/.test(line.trim())) { inFence = !inFence; continue; }
     if (inFence) continue;
     const m = line.match(/^(#{1,3}) (.+)$/);
     if (!m) continue;
-    out.push({ level: m[1].length as 1 | 2 | 3, text: m[2].trim(), slug: dedupe(slugifyHeading(m[2])) });
+    out.push({
+      level: m[1].length as 1 | 2 | 3,
+      text: m[2].trim(),
+      slug: dedupe(slugifyHeading(m[2])),
+      offset: lineStart,
+    });
   }
   return out;
 }

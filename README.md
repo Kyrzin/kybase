@@ -7,7 +7,7 @@
   <a href="https://github.com/Kyrzin/kybase/releases"><img src="https://img.shields.io/github/v/release/Kyrzin/kybase" alt="Release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"></a>
   <img src="https://img.shields.io/badge/MCP-Streamable%20HTTP-8B5CF6" alt="MCP: Streamable HTTP">
-  <img src="https://img.shields.io/badge/100%25-local-success" alt="100% local">
+  <img src="https://img.shields.io/badge/private-by%20default-success" alt="private by default">
 </p>
 
 Your AI agent forgets everything between sessions. Kybase fixes that: a
@@ -17,7 +17,9 @@ you work, links them with `[[wikilinks]]`, and finds them again next session —
 no re-onboarding, no lost decisions.
 
 Everything runs on your machine via Docker: PostgreSQL for notes,
-pgvector + Ollama for embeddings. **No SaaS, no accounts, 100% private.**
+pgvector + Ollama for embeddings. **No SaaS, no accounts, private by default**
+(see [Switching Embedding Providers](#switching-embedding-providers) for the
+trade-off if you opt into a cloud embedding provider).
 
 <p align="center">
   <img src="public/readme/screenshot.png" width="100%" alt="Kybase UI: a markdown note with wikilinks and tags on the left, the folder tree beside it, and an interactive knowledge graph (17 notes, 76 edges) with wikilink and semantic edges on the right.">
@@ -29,7 +31,7 @@ Giving an agent persistent memory usually means assembling it yourself:
 a notes app, an MCP bridge, an embedding pipeline, and sync between them.
 Kybase is that whole stack as one `docker compose up`:
 
-- **MCP-native** — 16 tools (`search_notes`, `get_note_with_links`, `get_graph`, `get_backlinks`, `indexing_status`, CRUD for notes/folders) over Streamable HTTP, with instructions that teach the agent to interlink notes properly
+- **MCP-native** — 17 tools (`search_notes`, `get_note_with_links`, `get_graph`, `get_backlinks`, `append_to_note`, `indexing_status`, CRUD for notes/folders) over Streamable HTTP, with instructions that teach the agent to interlink notes properly
 - **Local semantic search** — pgvector + Ollama embeddings, private by default; hybrid RRF fusion with bilingual full-text search and chunked, excerpt-based results
 - **Agent-friendly graph** — explicit wikilink edges plus *semantic edges* computed from embedding similarity, so the agent discovers related notes that were never linked
 - **A real notes app, not a black box** — web editor with backlinks, graph view with a similarity slider, workspace focus mode; renaming a note rewrites its wikilinks everywhere
@@ -86,8 +88,8 @@ The app exposes a Streamable HTTP MCP endpoint at `/api/mcp`.
 revocable OAuth token — see **Settings → Connected clients** in the web UI.
 
 Available tools: `list_notes`, `get_note`, `get_note_with_links`,
-`create_note`, `update_note`, `delete_note`, `restore_note`, `search_notes`,
-`indexing_status`, `list_tags`, `list_folders`, `create_folder`,
+`create_note`, `update_note`, `append_to_note`, `delete_note`, `restore_note`,
+`search_notes`, `indexing_status`, `list_tags`, `list_folders`, `create_folder`,
 `update_folder`, `delete_folder`, `get_backlinks`, `get_graph`.
 
 The server ships with MCP instructions that teach the agent to search before
@@ -112,10 +114,14 @@ grows as the agent uses it, instead of accumulating orphan notes.
 You can switch the embedding provider (between local Ollama, Google, or OpenAI) and trigger re-indexing directly in the browser:
 
 1. Open the settings modal in the web UI.
-2. Select your provider, add the API key if needed, and click **Save & Apply** (switching the provider automatically triggers background re-indexing).
-3. Alternatively, click **Reindex** to force-reindex all your notes.
+2. Select your provider, add the API key if needed, and click **Save & Apply** (switching the provider automatically re-indexes every note).
+3. **Reindex** only catches notes that were never embedded. After anything else that changes how embeddings are computed (e.g. an update to the embedding logic itself), use **Reindex all** to force-recompute every note.
 
 All supported providers use 768-dimensional embeddings, so switching does not require any database schema changes.
+
+> **Privacy trade-off:** Ollama keeps everything on your machine — no note
+> content leaves it. Google and OpenAI are convenience options: picking either
+> sends your notes' full text to that provider's API to compute the embedding.
 
 **Local model choice.** The default local model is `embeddinggemma` (Google,
 multilingual) — for multilingual vaults (e.g. Russian/German) set the Ollama
@@ -130,7 +136,7 @@ GPU one), skip the bundled CPU container: set `OLLAMA_URL` in `.env` to your
 instance (pull `OLLAMA_MODEL` there first) and start with the override file —
 `docker compose -f docker-compose.yml -f docker-compose.external-ollama.yml up -d`.
 
-> **CLI Alternative:** If you prefer using the terminal, you can trigger re-indexing by calling the admin endpoint:
+> **CLI Alternative:** If you prefer using the terminal, you can trigger re-indexing by calling the admin endpoint — only pending notes by default, add `?mode=all` to the URL to force every note instead:
 > ```bash
 > docker compose exec kybase node -e "
 >   fetch('http://localhost:3000/api/admin/reindex', {

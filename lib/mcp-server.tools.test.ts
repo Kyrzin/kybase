@@ -234,6 +234,21 @@ describe('get_note outline and sections', () => {
     expect(out.content).toContain('beta body');
   });
 
+  it('finds a section across scripts and across Unicode normal forms', async () => {
+    // Headings are not all ASCII, and "é" has two encodings: macOS writes NFD,
+    // most editors NFC. Byte-comparing them calls an existing section missing.
+    const note = '# Intro\nx\n\n## 项目结构\ncjk body\n\n## Café\naccent body\n';
+    queryOne.mockResolvedValue({ id: '1', title: 'T', content: note });
+    const id = '11111111-1111-4111-8111-111111111111';
+
+    const cjk = await call('get_note', { id, section: '项目结构' }) as { content: string };
+    expect(cjk.content).toContain('cjk body');
+
+    const nfd = 'Café'; // e + combining acute, same word as the NFC heading
+    const accent = await call('get_note', { id, section: nfd }) as { content: string };
+    expect(accent.content).toContain('accent body');
+  });
+
   it('an unknown section lists the ones that exist instead of failing blankly', async () => {
     queryOne.mockResolvedValue({ id: '1', title: 'T', content: NOTE });
     const err = await callExpectingError('get_note', {

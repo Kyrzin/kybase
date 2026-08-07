@@ -125,10 +125,13 @@ export function sectionRange(
   total: number,
   section: string
 ): { start: number; end: number } | null {
-  const wanted = section.trim().toLowerCase();
-  const i = headings.findIndex(
-    h => h.text.toLowerCase() === wanted || h.slug.toLowerCase() === wanted
-  );
+  // NFC on both sides: "é" has two encodings, and a caller typing a heading
+  // from another source can easily send the form the note does not use —
+  // macOS filenames are NFD, most editors write NFC. Byte-comparing those
+  // reports a section that plainly exists as missing.
+  const norm = (s: string) => s.normalize('NFC').trim().toLowerCase();
+  const wanted = norm(section);
+  const i = headings.findIndex(h => norm(h.text) === wanted || norm(h.slug) === wanted);
   if (i === -1) return null;
   const next = headings.slice(i + 1).find(h => h.level <= headings[i].level);
   return { start: headings[i].offset, end: next ? next.offset : total };

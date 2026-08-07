@@ -78,7 +78,10 @@ export function extractHeadings(content: string): Heading[] {
     offset += line.length + 1; // + the '\n' that split() consumed
     if (i !== unpaired && /^```/.test(line.trim())) { inFence = !inFence; continue; }
     if (inFence) continue;
-    const m = line.match(/^(#{1,3}) (.+)$/);
+    // \r? before the anchor: notes imported from a vault written on Windows
+    // arrive CRLF, and `.` never matches \r, so `$` could not be reached and
+    // every heading in such a note was invisible here and to the chunker.
+    const m = line.match(/^(#{1,3}) (.+)\r?$/);
     if (!m) continue;
     out.push({
       level: m[1].length as 1 | 2 | 3,

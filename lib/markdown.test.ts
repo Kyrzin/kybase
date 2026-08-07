@@ -161,6 +161,16 @@ describe('heading ids and extractHeadings', () => {
     expect(html).toContain('# not a heading');
   });
 
+  it('finds headings in a note that arrived with CRLF line endings', () => {
+    // Vaults exported on Windows import this way; `.` never matches \r, so
+    // without the optional \r the anchor was unreachable and the outline of
+    // every such note came back empty.
+    const content = '# Заголовок\r\nтекст\r\n\r\n## Второй\r\nещё';
+    const heads = extractHeadings(content);
+    expect(heads.map(h => h.text)).toEqual(['Заголовок', 'Второй']);
+    expect(content.slice(heads[1].offset)).toMatch(/^## Второй/);
+  });
+
   it('keeps headings after an unclosed fence in both paths', () => {
     // An unpaired ``` is not a code block to the renderer, so the outline
     // must not lose everything below it either.

@@ -30,7 +30,9 @@ export function chunkNote(content: string, maxLen = DEFAULT_MAX_LEN): NoteChunk[
 
   for (const [i, line] of lines.entries()) {
     if (i !== unpairedFence && line.trim().startsWith('```')) inFence = !inFence;
-    const m = !inFence && /^(#{1,6})\s+(.+)$/.exec(line);
+    // \r? — see extractHeadings: a CRLF note would otherwise match no heading
+    // at all and collapse into a single section, blunting its embeddings.
+    const m = !inFence && /^(#{1,6})\s+(.+)\r?$/.exec(line);
     if (m) {
       if (current.text.trim()) sections.push(current);
       current = { heading: m[2].trim(), text: line + '\n' };

@@ -371,14 +371,20 @@ describe('get_note title fallback', () => {
 describe('append_to_note', () => {
   const NOTE = ['# Log', '', '## Today', 'first entry', '', '## Later', 'nothing yet'].join('\n');
 
+  const ID = '11111111-1111-4111-8111-111111111111';
+
+  /** Resolve the id, then the locked read and the write inside the transaction. */
+  const mockNote = (content = NOTE) => {
+    queryOne.mockResolvedValue({ id: 'n1' });
+    txClientQuery
+      .mockResolvedValueOnce({ rows: [{ title: 'Log', content }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'n1', title: 'Log', updated_at: 'now' }] });
+  };
+
   it('adds to the end of the note without resending what was already there', async () => {
-    queryOne
-      .mockResolvedValueOnce({ id: 'n1', title: 'Log', content: NOTE })   // lookup
-      .mockResolvedValueOnce({ id: 'n1', title: 'Log', updated_at: 'now' }); // update
-    await call('append_to_note', {
-      id: '11111111-1111-4111-8111-111111111111', content: 'second entry',
-    });
-    const [sql, params] = queryOne.mock.calls[1];
+    mockNote();
+    await call('append_to_note', { id: ID, content: 'second entry' });
+    const [sql, params] = txClientQuery.mock.calls[1];
     expect(sql).toContain('update notes set content');
     expect(sql).toContain('embedding_pending = true');
     expect(params[0]).toContain('first entry');   // old text survives
@@ -386,31 +392,34 @@ describe('append_to_note', () => {
     expect(params[0].indexOf('second entry')).toBeGreaterThan(params[0].indexOf('nothing yet'));
   });
 
+  it('reads the note under a row lock so a concurrent append cannot be lost', async () => {
+    // Append is read-modify-write: without the lock two sessions build on the
+    // same text and the first one's line disappears without a trace.
+    mockNote();
+    await call('append_to_note', { id: ID, content: 'x' });
+    expect(withTransaction).toHaveBeenCalled();
+    expect(txClientQuery.mock.calls[0][0]).toMatch(/select[\s\S]*for update/i);
+  });
+
   it('appending to a section lands before the next heading, not after it', async () => {
-    queryOne
-      .mockResolvedValueOnce({ id: 'n1', title: 'Log', content: NOTE })
-      .mockResolvedValueOnce({ id: 'n1', title: 'Log', updated_at: 'now' });
-    await call('append_to_note', {
-      id: '11111111-1111-4111-8111-111111111111', content: 'same-day note', section: 'Today',
-    });
-    const body = queryOne.mock.calls[1][1][0] as string;
+    mockNote();
+    await call('append_to_note', { id: ID, content: 'same-day note', section: 'Today' });
+    const body = txClientQuery.mock.calls[1][1][0] as string;
     // Reads as part of "Today" to anyone opening the note.
     expect(body.indexOf('same-day note')).toBeGreaterThan(body.indexOf('first entry'));
     expect(body.indexOf('same-day note')).toBeLessThan(body.indexOf('## Later'));
   });
 
   it('re-embeds the note in the background', async () => {
-    queryOne
-      .mockResolvedValueOnce({ id: 'n1', title: 'Log', content: NOTE })
-      .mockResolvedValueOnce({ id: 'n1', title: 'Log', updated_at: 'now' });
-    await call('append_to_note', { id: '11111111-1111-4111-8111-111111111111', content: 'x' });
+    mockNote();
+    await call('append_to_note', { id: ID, content: 'x' });
     expect(indexNoteAsync).toHaveBeenCalledOnce();
   });
 
   it('refuses an unknown section rather than appending in the wrong place', async () => {
-    queryOne.mockResolvedValueOnce({ id: 'n1', title: 'Log', content: NOTE });
+    mockNote();
     const err = await callExpectingError('append_to_note', {
-      id: '11111111-1111-4111-8111-111111111111', content: 'x', section: 'Missing',
+      id: ID, content: 'x', section: 'Missing',
     });
     expect(err).toContain('Today');
   });
@@ -451,6 +460,31 @@ describe('update_note concurrency guard', () => {
       id: ID, content: 'mine', expected_updated_at: '2026-01-01T00:00:00.000Z',
     });
     expect(txClientQuery).toHaveBeenCalled();
+  });
+
+  it('carries the guard into the UPDATE, not just the read before it', async () => {
+    // Checking in a separate SELECT leaves a window: another session can
+    // commit between the check and the write, and the write it was meant to
+    // refuse lands anyway. Only a condition on the UPDATE itself is atomic.
+    queryOne.mockResolvedValue({ title: 'T', content: 'c', updated_at: '2026-01-01T00:00:00.000Z' });
+    txClientQuery.mockResolvedValue({ rows: [{ id: ID, title: 'T', content: 'mine' }] });
+    await call('update_note', {
+      id: ID, content: 'mine', expected_updated_at: '2026-01-01T00:00:00.000Z',
+    });
+    const [sql, params] = txClientQuery.mock.calls[0];
+    expect(sql).toContain('update notes set');
+    // Truncated both sides: the column keeps microseconds, the caller saw ms.
+    expect(sql).toMatch(/date_trunc\('milliseconds', updated_at\) = date_trunc/);
+    expect(params).toContain('2026-01-01T00:00:00.000Z');
+  });
+
+  it('reports a lost race when the guard matches nothing at write time', async () => {
+    queryOne.mockResolvedValue({ title: 'T', content: 'c', updated_at: '2026-01-01T00:00:00.000Z' });
+    txClientQuery.mockResolvedValue({ rows: [] }); // someone committed in between
+    const err = await callExpectingError('update_note', {
+      id: ID, content: 'mine', expected_updated_at: '2026-01-01T00:00:00.000Z',
+    });
+    expect(err).toContain('changed since you read it');
   });
 
   it('without the guard it writes as before', async () => {

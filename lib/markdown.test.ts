@@ -153,8 +153,8 @@ describe('heading ids and extractHeadings', () => {
   it('ignores # lines inside fenced code blocks in both paths', () => {
     const content = '# Real\n\n```bash\n# not a heading\n```\n\n## Also real';
     expect(extractHeadings(content)).toEqual([
-      { level: 1, text: 'Real', slug: 'real' },
-      { level: 2, text: 'Also real', slug: 'also-real' },
+      { level: 1, text: 'Real', slug: 'real', offset: content.indexOf('# Real') },
+      { level: 2, text: 'Also real', slug: 'also-real', offset: content.indexOf('## Also real') },
     ]);
     const html = parseMarkdown(content);
     expect(html).not.toContain('id="not-a-heading"');

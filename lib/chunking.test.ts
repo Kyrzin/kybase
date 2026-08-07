@@ -79,6 +79,19 @@ describe('chunkNote', () => {
     expect(chunks[0].heading).toBe('Реальный заголовок');
   });
 
+  it('splits at headings in a CRLF note, not into one blob', () => {
+    // An imported Windows vault used to collapse into a single section,
+    // which blunts every chunk's heading context.
+    const content = [
+      '# Секция А',
+      'текст ' + 'а'.repeat(100),
+      '# Секция Б',
+      'ещё текст ' + 'б'.repeat(100),
+    ].join('\r\n');
+    const chunks = chunkNote(content, 150);
+    expect(chunks.map(c => c.heading)).toEqual(['Секция А', 'Секция Б']);
+  });
+
   it('still sees headings after an unclosed fence', () => {
     // The renderer pairs fences, so a dangling ``` shows as text and the
     // headings below it stay headings — chunking must agree.

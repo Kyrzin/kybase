@@ -4,7 +4,7 @@ import {
 } from '@/lib/db';
 import { indexNoteAsync } from '@/lib/indexing';
 import { softDeleteNote } from '@/lib/trash';
-import { MAX_NOTE_CONTENT_CHARS } from '@/lib/types';
+import { MAX_NOTE_CONTENT_CHARS, stripNulBytes } from '@/lib/types';
 import { z } from 'zod';
 
 const NOTE_SELECT = 'id, title, content, folder_id, tags, embedding_pending, created_at, updated_at';
@@ -56,22 +56,7 @@ export async function PATCH(
   if (!parsed.success) {
     return NextResponse.json({ error: parsed.error.format() }, { status: 400 });
   }
-
-  // Fetch current to detect changes — trashed notes are edited via
-  // restore_note first, not silently resurrected through an update.
-  let existing;
-  try {
-    existing = await queryOne<{ title: string; content: string }>(
-      'select title, content from notes where id = $1 and deleted_at is null',
-      [id]
-    );
-  } catch (err) {
-    return lookupFailed(err);
-  }
-  if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 });
-
-  const titleChanged   = parsed.data.title   !== undefined && parsed.data.title   !== existing.title;
-  const contentChanged = parsed.data.content !== undefined && parsed.data.content !== existing.content;
+  if (parsed.data.content !== undefined) parsed.data.content = stripNulBytes(parsed.data.content);
 
   const sets: string[] = [];
   const sqlParams: unknown[] = [];
@@ -84,23 +69,42 @@ export async function PATCH(
     return NextResponse.json({ error: 'No fields to update' }, { status: 400 });
   }
 
-  if (titleChanged || contentChanged) sets.push('embedding_pending = true');
-
-  sqlParams.push(id);
-  let note;
+  type PatchResult = { note: Record<string, unknown> | null; titleChanged: boolean; contentChanged: boolean; newTitle: string; newContent: string };
+  let result: PatchResult | null;
   try {
-    // One transaction: a rename must never land without its backlink
-    // rewrite — a failure between the two leaves [[OldTitle]] links broken.
-    note = await withTransaction(async (client) => {
-      const { rows } = await client.query(
-        `update notes set ${sets.join(', ')} where id = $${sqlParams.length} and deleted_at is null
-         returning ${NOTE_SELECT}`,
-        sqlParams
+    // Lock the row before reading `existing`: a concurrent rename that reads
+    // the same pre-update title, then commits its own update_wikilinks
+    // rewrite first, would otherwise make THIS request's update_wikilinks
+    // call (keyed on that now-stale title) match nothing — leaving backlinks
+    // pointing at whichever title actually landed.
+    result = await withTransaction(async (client) => {
+      const { rows: existingRows } = await client.query<{ title: string; content: string }>(
+        'select title, content from notes where id = $1 and deleted_at is null for update',
+        [id]
       );
-      if (titleChanged && rows[0]) {
+      const existing = existingRows[0];
+      if (!existing) return null;
+
+      const titleChanged   = parsed.data.title   !== undefined && parsed.data.title   !== existing.title;
+      const contentChanged = parsed.data.content !== undefined && parsed.data.content !== existing.content;
+      const finalSets = titleChanged || contentChanged ? [...sets, 'embedding_pending = true'] : sets;
+
+      const { rows } = await client.query(
+        `update notes set ${finalSets.join(', ')} where id = $${sqlParams.length + 1} and deleted_at is null
+         returning ${NOTE_SELECT}`,
+        [...sqlParams, id]
+      );
+      const note = rows[0] ?? null;
+      if (titleChanged && note) {
         await client.query('select update_wikilinks($1, $2)', [existing.title, parsed.data.title!]);
       }
-      return rows[0] ?? null;
+      return {
+        note,
+        titleChanged,
+        contentChanged,
+        newTitle:   parsed.data.title   ?? existing.title,
+        newContent: parsed.data.content ?? existing.content,
+      };
     });
   } catch (err) {
     if (isUniqueViolation(err)) {
@@ -112,16 +116,14 @@ export async function PATCH(
 
   // Trashed or deleted between the existence check and the update: 0 rows
   // changed, so there is nothing to return and nothing to index.
-  if (!note) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  if (!result || !result.note) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
   // Re-index asynchronously (note embedding + chunks)
-  if (titleChanged || contentChanged) {
-    const newTitle   = parsed.data.title   ?? existing.title;
-    const newContent = parsed.data.content ?? existing.content;
-    indexNoteAsync(id, newTitle, newContent);
+  if (result.titleChanged || result.contentChanged) {
+    indexNoteAsync(id, result.newTitle, result.newContent);
   }
 
-  return NextResponse.json(note);
+  return NextResponse.json(result.note);
 }
 
 export async function DELETE(

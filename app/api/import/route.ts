@@ -11,6 +11,7 @@ import type { Readable } from 'node:stream';
 import { query, queryOne } from '@/lib/db';
 import { parseFrontmatter } from '@/lib/export';
 import { reindexPendingAsync } from '@/lib/reindex';
+import { stripNulBytes } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
 
@@ -147,7 +148,8 @@ export async function POST(req: NextRequest) {
         );
       }
       unzippedBytes += Buffer.byteLength(md, 'utf8');
-      const { title: fmTitle, tags, body: content } = parseFrontmatter(md);
+      const { title: fmTitle, tags, body: rawContent } = parseFrontmatter(md);
+      const content = stripNulBytes(rawContent);
 
       // "a/b/Note.md" → folders ["a","b"], fallback title "Note".
       // Zip paths are attacker-shaped: '..' segments must not become folders.

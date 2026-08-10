@@ -16,6 +16,7 @@ vi.mock('./db', () => ({
   queryOne: (...a: unknown[]) => queryOne(...a),
   withTransaction: (fn: (c: { query: typeof txClientQuery }) => unknown) => withTransaction(fn),
   isUniqueViolation: (e: unknown) => typeof e === 'object' && e !== null && (e as { code?: string }).code === '23505',
+  FOLDER_REPARENT_LOCK_KEY: 0x666f6c64,
 }));
 
 const textSearch = vi.fn();
@@ -471,7 +472,7 @@ describe('update_note concurrency guard', () => {
     await call('update_note', {
       id: ID, content: 'mine', expected_updated_at: '2026-01-01T00:00:00.000Z',
     });
-    const [sql, params] = txClientQuery.mock.calls[0];
+    const [sql, params] = txClientQuery.mock.calls[1];
     expect(sql).toContain('update notes set');
     // Truncated both sides: the column keeps microseconds, the caller saw ms.
     expect(sql).toMatch(/date_trunc\('milliseconds', updated_at\) = date_trunc/);
@@ -506,9 +507,23 @@ describe('list_notes recency filter', () => {
 });
 
 describe('update_note', () => {
-  it('rewrites backlinks in the same transaction when the title changes', async () => {
-    queryOne.mockResolvedValue({ title: 'Old', content: 'body' }); // existing
+  it('reads the pre-update title under a row lock, not the earlier unlocked read', async () => {
+    // Otherwise a concurrent rename that commits its own update_wikilinks
+    // first leaves THIS call rewriting links keyed on an already-stale
+    // title, so update_wikilinks matches nothing and backlinks go stale.
+    queryOne.mockResolvedValue({ title: 'Old', content: 'body' }); // existing (pre-check)
     txClientQuery
+      .mockResolvedValueOnce({ rows: [{ title: 'Old', content: 'body' }] }) // locked read
+      .mockResolvedValueOnce({ rows: [{ id: 'i', title: 'New', content: 'body' }] }) // update
+      .mockResolvedValueOnce({ rows: [] }); // update_wikilinks
+    await call('update_note', { id: '11111111-1111-4111-8111-111111111111', title: 'New' });
+    expect(txClientQuery.mock.calls[0][0]).toMatch(/select[\s\S]*for update/i);
+  });
+
+  it('rewrites backlinks in the same transaction when the title changes', async () => {
+    queryOne.mockResolvedValue({ title: 'Old', content: 'body' }); // existing (pre-check)
+    txClientQuery
+      .mockResolvedValueOnce({ rows: [{ title: 'Old', content: 'body' }] }) // locked read
       .mockResolvedValueOnce({ rows: [{ id: 'i', title: 'New', content: 'body' }] }) // update
       .mockResolvedValueOnce({ rows: [] }); // update_wikilinks
     await call('update_note', { id: '11111111-1111-4111-8111-111111111111', title: 'New' });
@@ -519,8 +534,10 @@ describe('update_note', () => {
   });
 
   it('does not touch wikilinks when only content changes', async () => {
-    queryOne.mockResolvedValue({ title: 'Same', content: 'old' });
-    txClientQuery.mockResolvedValueOnce({ rows: [{ id: 'i', title: 'Same', content: 'new' }] });
+    queryOne.mockResolvedValue({ title: 'Same', content: 'old' }); // existing (pre-check)
+    txClientQuery
+      .mockResolvedValueOnce({ rows: [{ title: 'Same', content: 'old' }] }) // locked read
+      .mockResolvedValueOnce({ rows: [{ id: 'i', title: 'Same', content: 'new' }] }); // update
     await call('update_note', { id: '11111111-1111-4111-8111-111111111111', content: 'new' });
     expect(txClientQuery.mock.calls.some(c => String(c[0]).includes('update_wikilinks'))).toBe(false);
   });
@@ -639,7 +656,9 @@ describe('folders', () => {
   });
 
   it('update_folder refuses a move into a descendant (cycle check)', async () => {
-    queryOne.mockResolvedValue({ id: 'desc' }); // cycle query finds the target among ancestors
+    txClientQuery
+      .mockResolvedValueOnce({ rows: [] })          // advisory lock
+      .mockResolvedValueOnce({ rows: [{ id: 'desc' }] }); // cycle query finds the target among ancestors
     const err = await callExpectingError('update_folder', {
       id: '11111111-1111-4111-8111-111111111111',
       parent_id: '22222222-2222-4222-8222-222222222222',

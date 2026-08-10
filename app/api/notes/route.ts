@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query, queryOne, isUniqueViolation } from '@/lib/db';
 import { indexNoteAsync } from '@/lib/indexing';
-import { MAX_NOTE_CONTENT_CHARS } from '@/lib/types';
+import { MAX_NOTE_CONTENT_CHARS, stripNulBytes } from '@/lib/types';
 import { z } from 'zod';
 
 const NOTE_SELECT = 'id, title, content, folder_id, tags, embedding_pending, created_at, updated_at';
@@ -54,7 +54,8 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: parsed.error.format() }, { status: 400 });
   }
 
-  const { title, content, folder_id, tags } = parsed.data;
+  const { title, folder_id, tags } = parsed.data;
+  const content = stripNulBytes(parsed.data.content);
   let note;
   try {
     note = await queryOne<{ id: string; title: string; content: string }>(

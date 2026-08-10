@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { query, queryOne } from '@/lib/db';
+import { query, queryOne, isUniqueViolation } from '@/lib/db';
 import { z } from 'zod';
 
 export async function GET() {
@@ -30,6 +30,9 @@ export async function POST(req: NextRequest) {
     );
     return NextResponse.json(data, { status: 201 });
   } catch (err) {
+    if (isUniqueViolation(err)) {
+      return NextResponse.json({ error: 'A folder with this name already exists in this directory' }, { status: 409 });
+    }
     const message = err instanceof Error ? err.message : 'Insert failed';
     return NextResponse.json({ error: message }, { status: 500 });
   }

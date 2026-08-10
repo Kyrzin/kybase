@@ -54,6 +54,18 @@ export async function withTransaction<T>(
   }
 }
 
+/**
+ * Advisory-lock key serializing folder reparenting (REST and MCP alike).
+ * The cycle check (walk ancestors of the proposed parent) and the write that
+ * acts on it are two separate statements — without a shared lock, two
+ * concurrent moves (e.g. A into B and B into A at the same time) can each
+ * read a cycle-free tree and both commit, producing a real A -> B -> A cycle
+ * that no single request's check caught. Take with
+ * `select pg_advisory_xact_lock($1)` inside the same transaction as the
+ * check + write; it releases automatically on commit or rollback.
+ */
+export const FOLDER_REPARENT_LOCK_KEY = 0x666f6c64; // 'fold'
+
 /** True when the error is a Postgres unique-constraint violation. */
 export function isUniqueViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: string }).code === '23505';

@@ -10,6 +10,20 @@
  */
 export const MAX_NOTE_CONTENT_CHARS = 10_000_000;
 
+/**
+ * Postgres rejects a NUL byte anywhere in a text column ("invalid byte
+ * sequence for encoding UTF8: 0x00") — content from imports or raw MCP
+ * input isn't guaranteed clean, so strip it on every write path (REST and
+ * MCP) before it reaches a query, instead of surfacing that as a 500.
+ * Built via fromCharCode (not a literal in source) to sidestep editor/tooling
+ * that mishandles a raw NUL byte sitting in a text file.
+ */
+const NUL_BYTE = String.fromCharCode(0);
+
+export function stripNulBytes(content: string): string {
+  return content.split(NUL_BYTE).join('');
+}
+
 export type Folder = {
   id: string;
   name: string;

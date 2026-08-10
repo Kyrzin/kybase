@@ -1,8 +1,8 @@
-// lib/mcp-server.ts — MCP server factory with 16 tools
+// lib/mcp-server.ts — MCP server factory with 17 tools
 // Uses @modelcontextprotocol/sdk McpServer (high-level API)
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
-import { query, queryOne, withTransaction, isUniqueViolation } from './db';
+import { query, queryOne, withTransaction, isUniqueViolation, FOLDER_REPARENT_LOCK_KEY } from './db';
 import { softDeleteNote, restoreNote, trashFolderNotes, TRASH_RETENTION_DAYS } from './trash';
 import { escapeLike } from './sql';
 import { textSearch, semanticSearch, hybridSearch, makeExcerpt, bestSemanticScore, type SearchResult } from './search';
@@ -11,7 +11,7 @@ import { indexNoteAsync } from './indexing';
 import { extractAllWikilinks } from './wikilinks';
 import { buildGraph } from './graph-data';
 import { extractHeadings, type Heading } from './markdown';
-import { MAX_NOTE_CONTENT_CHARS } from './types';
+import { MAX_NOTE_CONTENT_CHARS, stripNulBytes } from './types';
 
 
 // get_note(title=...) is the shortcut past search_notes, but real titles are long
@@ -90,20 +90,22 @@ const LINKED_NOTE_CONTENT_LIMIT = 4_000;
 // per-row join) is cheap and handles nesting correctly.
 type FolderRow = { id: string; name: string; parent_id: string | null };
 
+/** Folder id -> full path (cycle-safe — mirrors lib/export.ts's folderPaths). */
 async function folderPathMap(): Promise<Map<string, string>> {
   const folders = await query<FolderRow>('select id, name, parent_id from folders');
   const byId = new Map(folders.map((f) => [f.id, f]));
   const paths = new Map<string, string>();
-  const resolve = (id: string): string => {
+  const resolve = (id: string, seen: Set<string>): string => {
     const cached = paths.get(id);
     if (cached !== undefined) return cached;
     const f = byId.get(id);
-    if (!f) return '';
-    const path = f.parent_id ? `${resolve(f.parent_id)}/${f.name}` : f.name;
+    if (!f || seen.has(id)) return '';
+    seen.add(id);
+    const path = f.parent_id ? `${resolve(f.parent_id, seen)}/${f.name}` : f.name;
     paths.set(id, path);
     return path;
   };
-  folders.forEach((f) => resolve(f.id));
+  folders.forEach((f) => resolve(f.id, new Set()));
   return paths;
 }
 
@@ -290,7 +292,8 @@ export function createMcpServer(): McpServer {
       folder_id: z.string().uuid().nullable().optional(),
       tags:      z.array(z.string()).default([]),
     },
-    async ({ title, content, folder_id, tags }) => {
+    async ({ title, content: rawContent, folder_id, tags }) => {
+      const content = stripNulBytes(rawContent);
       let note;
       try {
         note = await queryOne<{ id: string }>(
@@ -330,7 +333,8 @@ export function createMcpServer(): McpServer {
       expected_updated_at: z.string().optional()
         .describe('ISO updated_at from when you read the note; refuses the write if it changed since'),
     },
-    async ({ id, title, content, folder_id, tags, expected_updated_at }) => {
+    async ({ id, title, content: rawContent, folder_id, tags, expected_updated_at }) => {
+      const content = rawContent !== undefined ? stripNulBytes(rawContent) : undefined;
       const existing = await queryOne<{ title: string; content: string; updated_at: string }>(
         'select title, content, updated_at from notes where id = $1 and deleted_at is null', [id]
       );
@@ -362,13 +366,6 @@ export function createMcpServer(): McpServer {
       if (tags      !== undefined) set('tags', tags);
       if (sets.length === 0) throw new Error('Provide at least one field to update');
 
-      // Compare values, not presence: agents routinely resend the whole note
-      // to edit one tag, and re-embedding unchanged text costs a paid call.
-      const changed =
-        (title   !== undefined && title   !== existing.title) ||
-        (content !== undefined && content !== existing.content);
-      if (changed) sets.push('embedding_pending = true');
-
       params.push(id);
       const idParam = params.length;
       // date_trunc to milliseconds: the column keeps microseconds, but the
@@ -379,21 +376,42 @@ export function createMcpServer(): McpServer {
         params.push(expected_updated_at);
         guard = `and date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $${params.length}::timestamptz)`;
       }
-      let note;
+      type UpdateResult = {
+        note: Record<string, unknown> | null; changed: boolean; newTitle: string; newContent: string;
+      };
+      let result: UpdateResult | null;
       try {
-        // One transaction: a rename must never land without its backlink
-        // rewrite — a failure between the two leaves [[OldTitle]] links broken.
-        note = await withTransaction(async (client) => {
+        // One transaction, row locked: a concurrent rename that read the same
+        // pre-update title and committed its own update_wikilinks rewrite
+        // first would otherwise make THIS call's update_wikilinks (keyed on
+        // that now-stale title) match nothing — leaving backlinks broken.
+        result = await withTransaction(async (client) => {
+          const { rows: lockedRows } = await client.query<{ title: string; content: string }>(
+            'select title, content from notes where id = $1 and deleted_at is null for update',
+            [id]
+          );
+          const locked = lockedRows[0];
+          if (!locked) return null;
+
+          // Compare values, not presence: agents routinely resend the whole
+          // note to edit one tag, and re-embedding unchanged text costs a
+          // paid call.
+          const changed =
+            (title   !== undefined && title   !== locked.title) ||
+            (content !== undefined && content !== locked.content);
+          const finalSets = changed ? [...sets, 'embedding_pending = true'] : sets;
+
           const { rows } = await client.query(
-            `update notes set ${sets.join(', ')}
+            `update notes set ${finalSets.join(', ')}
              where id = $${idParam} and deleted_at is null ${guard}
              returning id, title, content, folder_id, tags, updated_at`,
             params
           );
-          if (title && title !== existing.title && rows[0]) {
-            await client.query('select update_wikilinks($1, $2)', [existing.title, title]);
+          const note = rows[0] ?? null;
+          if (title && title !== locked.title && note) {
+            await client.query('select update_wikilinks($1, $2)', [locked.title, title]);
           }
-          return rows[0] ?? null;
+          return { note, changed, newTitle: title ?? locked.title, newContent: content ?? locked.content };
         });
       } catch (err) {
         if (isUniqueViolation(err)) throw new Error(`A note titled "${title}" already exists — update it or pick another title`);
@@ -401,12 +419,12 @@ export function createMcpServer(): McpServer {
       }
       // The note was there a moment ago, so nothing matching now means the
       // guard caught a write that landed in between.
-      if (!note && expected_updated_at !== undefined) refuseStale();
-      if (!note) throw new Error('Note not found');
-      if (changed) {
-        indexNoteAsync(id, title ?? existing.title, content ?? existing.content);
+      if (!result?.note && expected_updated_at !== undefined) refuseStale();
+      if (!result?.note) throw new Error('Note not found');
+      if (result.changed) {
+        indexNoteAsync(id, result.newTitle, result.newContent);
       }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(note, null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result.note, null, 2) }] };
     }
   );
 
@@ -431,7 +449,7 @@ export function createMcpServer(): McpServer {
         : await findNoteByTitle<{ id: string }>(title!, 'id');
       if (!found) throw new Error('Note not found');
 
-      const addition = content.trimEnd();
+      const addition = stripNulBytes(content).trimEnd();
       // Read and write inside one transaction with the row locked. Appending
       // is read-modify-write, so two sessions logging at once would otherwise
       // both build on the same text and the first one's line would vanish —
@@ -640,10 +658,16 @@ export function createMcpServer(): McpServer {
       parent_id: z.string().uuid().nullable().optional(),
     },
     async ({ name, parent_id }) => {
-      const data = await queryOne(
-        'insert into folders (name, parent_id) values ($1, $2) returning *',
-        [name, parent_id ?? null]
-      );
+      let data;
+      try {
+        data = await queryOne(
+          'insert into folders (name, parent_id) values ($1, $2) returning *',
+          [name, parent_id ?? null]
+        );
+      } catch (err) {
+        if (isUniqueViolation(err)) throw new Error(`A folder named "${name}" already exists in this location`);
+        throw err;
+      }
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
     }
   );
@@ -658,16 +682,25 @@ export function createMcpServer(): McpServer {
       parent_id: z.string().uuid().nullable().optional(),
     },
     async ({ id, name, parent_id }) => {
+      if (parent_id !== undefined && parent_id === id) {
+        throw new Error('Folder cannot be its own parent');
+      }
       const sets: string[] = [];
       const params: unknown[] = [];
       const set = (col: string, val: unknown) => { params.push(val); sets.push(`${col} = $${params.length}`); };
       if (name      !== undefined) set('name', name);
-      if (parent_id !== undefined) {
-        if (parent_id === id) {
-          throw new Error('Folder cannot be its own parent');
-        }
-        if (parent_id !== null) {
-          const checkCycle = await queryOne<{ id: string }>(
+      if (parent_id !== undefined) set('parent_id', parent_id);
+      if (sets.length === 0) throw new Error('Provide name and/or parent_id');
+      params.push(id);
+
+      const data = await withTransaction(async (client) => {
+        if (parent_id !== undefined && parent_id !== null) {
+          // Same advisory lock as the REST folder route: only reparenting
+          // can create a cycle, and the check + write must be serialized
+          // against ANY concurrent reparent — REST or MCP — or two moves
+          // that each read a cycle-free tree can together create a real one.
+          await client.query('select pg_advisory_xact_lock($1)', [FOLDER_REPARENT_LOCK_KEY]);
+          const { rows: cycleRows } = await client.query<{ id: string }>(
             `WITH RECURSIVE ancestors AS (
                SELECT id, parent_id FROM folders WHERE id = $1
                UNION
@@ -677,19 +710,14 @@ export function createMcpServer(): McpServer {
              SELECT id FROM ancestors WHERE id = $2`,
             [parent_id, id]
           );
-          if (checkCycle) {
-            throw new Error('Cannot move a folder into its own descendant');
-          }
+          if (cycleRows.length > 0) throw new Error('Cannot move a folder into its own descendant');
         }
-        set('parent_id', parent_id);
-      }
-      if (sets.length === 0) throw new Error('Provide name and/or parent_id');
-
-      params.push(id);
-      const data = await queryOne(
-        `update folders set ${sets.join(', ')} where id = $${params.length} returning *`,
-        params
-      );
+        const { rows } = await client.query(
+          `update folders set ${sets.join(', ')} where id = $${params.length} returning *`,
+          params
+        );
+        return rows[0] ?? null;
+      });
       if (!data) throw new Error('Folder not found');
       return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
     }

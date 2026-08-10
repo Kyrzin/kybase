@@ -25,6 +25,8 @@ trade-off if you opt into a cloud embedding provider).
   <img src="public/readme/screenshot.png" width="100%" alt="Kybase UI: a markdown note with wikilinks and tags on the left, the folder tree beside it, and an interactive knowledge graph (17 notes, 76 edges) with wikilink and semantic edges on the right.">
 </p>
 
+**[Why Kybase?](#why-kybase) · [Quick Start](#quick-start-docker) · [Environment variables](#environment-variables) · [Connect an MCP Client](#connect-an-mcp-client) · [Stack](#stack) · [Switching Embedding Providers](#switching-embedding-providers) · [Export & Import](#export--import) · [Sharing](#sharing-notes) · [Backups](#backups) · [Upgrading](#upgrading) · [Local development](#local-development) · [License](#license)**
+
 ## Why Kybase?
 
 Giving an agent persistent memory usually means assembling it yourself:
@@ -59,13 +61,32 @@ That's it. On startup the app applies `db/migrations/*.sql` automatically
 embedding model (embeddinggemma, ~620 MB, one time).
 Change the host port with `KYBASE_PORT` in `.env`.
 
-> **Note on embeddings:** notes and text search work immediately. Semantic
-> search and semantic graph edges activate once Ollama finishes pulling the
-> model and notes get indexed (automatic, in the background).
+> [!NOTE]
+> Notes and text search work immediately. Semantic search and semantic graph
+> edges activate once Ollama finishes pulling the model and notes get indexed
+> (automatic, in the background).
 
-## Connect Claude (MCP)
+### Environment variables
 
-The app exposes a Streamable HTTP MCP endpoint at `/api/mcp`.
+Everything below goes in `.env` (copied from `.env.example`). Only `KYBASE_SECRET` is required — the rest have working defaults.
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `KYBASE_SECRET` | *(required)* | UI login password and MCP/API bearer token. Generate with `openssl rand -hex 32`. |
+| `KYBASE_PORT` | `3000` | Host port the app is exposed on. |
+| `POSTGRES_PASSWORD` | `kybase` | Postgres is only reachable inside the compose network, but set your own anyway. |
+| `KYBASE_TAG` | `latest` | Prebuilt image tag from `ghcr.io/kyrzin/kybase` — pin a release (e.g. `v1.2`) instead of tracking `main`. |
+| `EMBEDDING_PROVIDER` | `ollama` | `ollama`, `google`, or `openai` — see [Switching Embedding Providers](#switching-embedding-providers). |
+| `OLLAMA_URL` | `http://ollama:11434` | Point at an external Ollama instance instead of the bundled container. |
+| `OLLAMA_MODEL` | `embeddinggemma` | Or `nomic-embed-text`. |
+| `GOOGLE_API_KEY` / `GOOGLE_MODEL` | *(empty)* / `text-embedding-004` | Only used when `EMBEDDING_PROVIDER=google`. |
+| `OPENAI_API_KEY` | *(empty)* | Only used when `EMBEDDING_PROVIDER=openai`. |
+
+`DATABASE_URL` isn't something you set for the Docker path — compose derives it from `POSTGRES_PASSWORD` automatically. It's only relevant for [local development](#local-development) running the app directly on the host.
+
+## Connect an MCP Client
+
+The app exposes a Streamable HTTP MCP endpoint at `/api/mcp`. Any MCP client that speaks Streamable HTTP can connect — not just Claude.
 
 **Claude Code** — add to `.mcp.json` (or `claude mcp add`):
 
@@ -83,14 +104,65 @@ The app exposes a Streamable HTTP MCP endpoint at `/api/mcp`.
 }
 ```
 
+**Claude Desktop** — same JSON shape, in `claude_desktop_config.json`
+(macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`,
+Windows: `%APPDATA%\Claude\claude_desktop_config.json`).
+
 **claude.ai** — Settings → Connectors → Add custom connector, same URL
 (requires the instance to be reachable over HTTPS). Each client gets its own
 revocable OAuth token — see **Settings → Connected clients** in the web UI.
 
-Available tools: `list_notes`, `get_note`, `get_note_with_links`,
-`create_note`, `update_note`, `append_to_note`, `delete_note`, `restore_note`,
-`search_notes`, `indexing_status`, `list_tags`, `list_folders`, `create_folder`,
-`update_folder`, `delete_folder`, `get_backlinks`, `get_graph`.
+**Cursor** — add to `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
+
+```json
+{
+  "mcpServers": {
+    "kybase": {
+      "url": "https://your-domain/api/mcp",
+      "headers": {
+        "Authorization": "Bearer <KYBASE_SECRET>"
+      }
+    }
+  }
+}
+```
+
+**Windsurf** — add to `~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "kybase": {
+      "serverUrl": "https://your-domain/api/mcp",
+      "headers": {
+        "Authorization": "Bearer <KYBASE_SECRET>"
+      }
+    }
+  }
+}
+```
+
+### MCP tools (17)
+
+| Tool | Category | What it does for the agent |
+|------|----------|------------------------------|
+| `search_notes` | Search | Hybrid RRF search (pgvector + bilingual FTS) with calibrated `relevance`/`confidence` per hit |
+| `get_note` | Read | Fetch a note by id or fuzzy title; windowed for large notes, with a heading outline |
+| `get_note_with_links` | Read | A note plus every note it `[[wikilinks]]` to, one level deep, in a single round-trip |
+| `list_notes` | Read | Newest-first listing, filterable by folder/tag/updated date |
+| `list_tags` | Read | All tags in use with counts, so the agent reuses existing tags instead of coining duplicates |
+| `list_folders` | Read | Flat folder list for reconstructing the tree |
+| `get_backlinks` | Graph | Notes that link to a given note via `[[wikilinks]]` |
+| `get_graph` | Graph | The knowledge graph — wikilink edges plus semantic edges — scoped by folder or by hop count from a root note |
+| `create_note` | Write | Create a note; embedding is generated automatically in the background |
+| `update_note` | Write | Update fields; supports `expected_updated_at` to refuse a stale overwrite instead of silently clobbering a concurrent edit |
+| `append_to_note` | Write | Append to a note or one section without resending the rest — safe under concurrent writers (row-locked) |
+| `delete_note` | Write | Soft-delete; recoverable with `restore_note` before it ages out of the trash |
+| `restore_note` | Write | Undo `delete_note` |
+| `create_folder` | Organize | Create a folder, optionally nested |
+| `update_folder` | Organize | Rename or move a folder; refuses a move that would create a cycle |
+| `delete_folder` | Organize | Delete a folder and its subtree; every note inside is soft-deleted along with it |
+| `indexing_status` | Diagnostics | How many notes are embedded vs. still pending, to tell "still indexing" from "done" |
 
 The server ships with MCP instructions that teach the agent to search before
 writing and to add `[[wikilinks]]` to related notes — so the knowledge graph
@@ -119,9 +191,10 @@ You can switch the embedding provider (between local Ollama, Google, or OpenAI) 
 
 All supported providers use 768-dimensional embeddings, so switching does not require any database schema changes.
 
-> **Privacy trade-off:** Ollama keeps everything on your machine — no note
-> content leaves it. Google and OpenAI are convenience options: picking either
-> sends your notes' full text to that provider's API to compute the embedding.
+> [!IMPORTANT]
+> Ollama keeps everything on your machine — no note content leaves it. Google
+> and OpenAI are convenience options: picking either sends your notes' full
+> text to that provider's API to compute the embedding.
 
 **Local model choice.** The default local model is `embeddinggemma` (Google,
 multilingual) — for multilingual vaults (e.g. Russian/German) set the Ollama
@@ -131,12 +204,14 @@ English-leaning alternative. The semantic-similarity threshold adapts to the
 model automatically (see `getMinSimilarity` in `lib/embeddings.ts`), so no
 manual tuning is needed when you switch.
 
-**Already run Ollama?** On a host that already has an Ollama instance (e.g. a
-GPU one), skip the bundled CPU container: set `OLLAMA_URL` in `.env` to your
-instance (pull `OLLAMA_MODEL` there first) and start with the override file —
-`docker compose -f docker-compose.yml -f docker-compose.external-ollama.yml up -d`.
+> [!TIP]
+> **Already run Ollama?** On a host that already has an Ollama instance (e.g. a
+> GPU one), skip the bundled CPU container: set `OLLAMA_URL` in `.env` to your
+> instance (pull `OLLAMA_MODEL` there first) and start with the override file —
+> `docker compose -f docker-compose.yml -f docker-compose.external-ollama.yml up -d`.
 
-> **CLI Alternative:** If you prefer using the terminal, you can trigger re-indexing by calling the admin endpoint — only pending notes by default, add `?mode=all` to the URL to force every note instead:
+> [!TIP]
+> **CLI alternative.** If you prefer using the terminal, you can trigger re-indexing by calling the admin endpoint — only pending notes by default, add `?mode=all` to the URL to force every note instead:
 > ```bash
 > docker compose exec kybase node -e "
 >   fetch('http://localhost:3000/api/admin/reindex', {

@@ -34,4 +34,8 @@ describe('extractAllWikilinks', () => {
   it('handles plain wikilinks', () => {
     expect(extractAllWikilinks('See [[Postgres Internals]]')).toEqual(['Postgres Internals']);
   });
+  it('drops a same-note anchor with no title, e.g. [[#Section]]', () => {
+    const text = 'Jump to [[#Section]] below, then see [[Other Note]]';
+    expect(extractAllWikilinks(text)).toEqual(['Other Note']);
+  });
 });

@@ -22,7 +22,12 @@ export default function KybaseApp() {
   const [aiQuery, setAiQuery]         = useState('');
   const [aiResults, setAiResults]     = useState<SearchHit[] | null>(null);
   const [aiLoading, setAiLoading]     = useState(false);
-  const [sidebarOpen, setSidebarOpen]   = useState(typeof window !== 'undefined' ? window.innerWidth >= 768 : true);
+  // Deterministic initial value (true) so SSR and the client's hydration
+  // pass render the same markup — reading window.innerWidth here would make
+  // a mobile client's hydration render disagree with the server's guess and
+  // trigger a hydration-mismatch warning. Narrowed to the real width right
+  // after mount instead.
+  const [sidebarOpen, setSidebarOpen]   = useState(true);
   const [rightPanel, setRightPanel]     = useState<'backlinks' | 'graph' | 'ai' | 'outline' | null>(null);
   const [graphFullscreen, setGraphFullscreen] = useState(false);
   const [semanticEdges, setSemanticEdges] = useState<{ from: string; to: string; score: number }[]>([]);
@@ -35,6 +40,16 @@ export default function KybaseApp() {
     const update = () => setWinSize({ w: window.innerWidth, h: window.innerHeight });
     window.addEventListener('resize', update);
     return () => window.removeEventListener('resize', update);
+  }, []);
+
+  // Post-mount narrowing for sidebarOpen — see the state declaration above.
+  // A one-time read of window.innerWidth on mount, not a derived value, so
+  // the usual "don't setState in an effect" alternative (computing it during
+  // render) isn't available: render can't know the real width without
+  // disagreeing with the server's markup.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (window.innerWidth < 768) setSidebarOpen(false);
   }, []);
 
   // Global resize listeners — prevent onMouseLeave from cancelling drag when cursor exits panel

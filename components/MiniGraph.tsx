@@ -78,11 +78,19 @@ export default function MiniGraph({
   const [graphQuery,   setGraphQuery]   = useState('');
   const [hideOrphans,  setHideOrphans]  = useState(false);
   const [semEnabled,   setSemEnabled]   = useState(true);
-  const [semThreshold, setSemThreshold] = useState(() => {
-    if (typeof window === 'undefined') return 0.8;
+  // Deterministic initial value so SSR and the client's hydration pass
+  // render the same markup — reading localStorage here would make a
+  // previously-changed threshold disagree with the server's default and
+  // trigger a hydration-mismatch warning. Read the stored value right after
+  // mount instead.
+  const [semThreshold, setSemThreshold] = useState(0.8);
+  // A one-time read of localStorage on mount, not a derived value, so render
+  // can't compute it directly without disagreeing with the server's markup.
+  useEffect(() => {
     const v = parseFloat(localStorage.getItem(SEM_THRESHOLD_KEY) ?? '');
-    return Number.isFinite(v) && v >= 0.6 && v <= 0.95 ? v : 0.8;
-  });
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (Number.isFinite(v) && v >= 0.6 && v <= 0.95) setSemThreshold(v);
+  }, []);
 
   const ctrlRef = useRef({ paused: false, showFolders: true, allLabels: false, graphQuery: '', hideOrphans: false });
   useEffect(() => {

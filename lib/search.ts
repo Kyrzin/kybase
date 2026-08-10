@@ -61,6 +61,14 @@ const SUBSTRING_RELEVANCE = { title: 0.65, content: 0.5 };
 
 const RRF_K = 60;
 
+// hybridSearch feeds each arm's results into RRF fusion. If each arm is
+// capped at the final output size, a note ranked just outside `limit` in
+// BOTH arms never reaches rrfMerge at all — even though their combined rank
+// would place it in the fused top results. Overfetch a wider candidate pool
+// per arm, then slice down to `limit` only after fusion.
+const RRF_CANDIDATE_FACTOR = 3;
+const RRF_CANDIDATE_CAP = 50;
+
 const EXCERPT_LENGTH = 300;
 
 // How far makeExcerpt will nudge a cut to land on whitespace. Bounded so a
@@ -337,9 +345,10 @@ export async function bestSemanticScore(query: string): Promise<number | null> {
 }
 
 export async function hybridSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
+  const candidateLimit = Math.min(RRF_CANDIDATE_CAP, limit * RRF_CANDIDATE_FACTOR);
   const [text, semantic] = await Promise.all([
-    textSearch(query, limit, filters),
-    semanticSearch(query, limit, filters),
+    textSearch(query, candidateLimit, filters),
+    semanticSearch(query, candidateLimit, filters),
   ]);
   return rrfMerge([
     { field: 'text_score', results: text },

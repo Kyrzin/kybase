@@ -17,7 +17,11 @@ export function extractWikilinkTarget(raw: string): string {
 export function extractAllWikilinks(text: string): string[] {
   const targets = new Set<string>();
   for (const match of text.matchAll(WIKILINK_RE)) {
-    targets.add(extractWikilinkTarget(match[1]));
+    // A same-note anchor like [[#Section]] has no title before the '#' —
+    // extractWikilinkTarget yields '', which is not a real note to resolve
+    // or offer to create.
+    const target = extractWikilinkTarget(match[1]);
+    if (target) targets.add(target);
   }
   return [...targets];
 }

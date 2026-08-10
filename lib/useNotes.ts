@@ -191,6 +191,11 @@ export function useNotes(cb: UseNotesCallbacks) {
       if (target) {
         selectNote(target.id);
       } else {
+        // Flush the current note's pending debounced edit before switching
+        // away — otherwise its still-scheduled autosave timer gets cleared
+        // (by the debounce effect re-running for the new note) without ever
+        // sending it, silently dropping the last unsaved keystrokes.
+        await flushSave();
         // `notes` holds live notes only, so a link to a trashed note looks
         // exactly like a link to one that never existed — and following it
         // would quietly mint an empty duplicate, which then blocks restoring
@@ -220,7 +225,7 @@ export function useNotes(cb: UseNotesCallbacks) {
     };
     document.addEventListener('click', handler);
     return () => document.removeEventListener('click', handler);
-  }, [notes, selectNote]);
+  }, [notes, selectNote, flushSave]);
 
   const saveNote = useCallback(async () => {
     if (!activeNote) return;
@@ -266,6 +271,11 @@ export function useNotes(cb: UseNotesCallbacks) {
   }, [activeNote, saveTags]);
 
   const createNote = useCallback(async (folderId: string | null = null) => {
+    // Flush the current note's pending debounced edit before switching away
+    // — otherwise its still-scheduled autosave timer gets cleared (by the
+    // debounce effect re-running for the new note) without ever sending it,
+    // silently dropping the last unsaved keystrokes.
+    await flushSave();
     // notes.title has a global case-insensitive unique index (migration 006):
     // a second click always collided with the first "Untitled" note and 409'd
     // forever. Scan for the smallest free "Untitled"/"Untitled N" slot.
@@ -288,7 +298,7 @@ export function useNotes(cb: UseNotesCallbacks) {
     setEditMode(true);
     setEditContent(newNote.content);
     setEditTitle(newNote.title);
-  }, [notes]);
+  }, [notes, flushSave]);
 
   const createFolder = useCallback(async (parentId: string | null = null) => {
     const name = prompt('Folder name:');

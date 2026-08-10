@@ -16,7 +16,7 @@ vi.mock('./embeddings', () => ({
   getRelevanceAnchors: (...a: unknown[]) => getRelevanceAnchors(...a),
 }));
 
-import { rrfMerge, makeExcerpt, stripLeadingHeading, textSearch, semanticSearch, bestSemanticScore, normalizeRelevance, confidenceFor } from './search';
+import { rrfMerge, makeExcerpt, stripLeadingHeading, textSearch, semanticSearch, hybridSearch, bestSemanticScore, normalizeRelevance, confidenceFor } from './search';
 
 beforeEach(() => {
   dbQuery.mockReset().mockResolvedValue([]);
@@ -236,6 +236,23 @@ describe('semanticSearch — filters', () => {
     const [r] = await semanticSearch('nomic русский', 5);
     expect(r.excerpt).toBe('[Диагностика] nomic оказалась непригодна на русском');
     expect(r.excerpt).not.toContain('##'); // markdown heading line stripped from the body
+  });
+});
+
+describe('hybridSearch — candidate pool', () => {
+  it('overfetches each arm beyond the final limit before RRF fusion', async () => {
+    dbQuery
+      .mockResolvedValueOnce([{ id: 'a', title: 'A', tags: [], rank: 0.5, headline: 'hi' }]) // FTS arm
+      .mockResolvedValueOnce([                                                                // semantic arm
+        { id: 'b', title: 'B', chunk_content: 'x', heading: null, tags: [], similarity: 0.8 },
+      ]);
+
+    await hybridSearch('q', 5);
+
+    const [, ftsParams] = dbQuery.mock.calls[0];
+    const [, semanticParams] = dbQuery.mock.calls[1];
+    expect(ftsParams[1]).toBeGreaterThan(5);
+    expect(semanticParams[1]).toBeGreaterThan(5);
   });
 });
 

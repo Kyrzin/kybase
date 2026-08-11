@@ -10,11 +10,11 @@ const UpdateSettingsSchema = z.object({
   ollamaModel:  z.string().min(1).optional(),
 });
 
-// Auth is middleware.ts (session cookie or master-secret bearer) — this
+// Auth is proxy.ts.ts (session cookie or master-secret bearer) — this
 // route used to re-check the bearer itself too, which only re-verified the
 // same secret through a second code path and went stale the moment the UI
 // stopped sending it (see the session-cookie change): the browser started
-// getting 401s here even though middleware had already let it through.
+// getting 401s here even though proxy.ts had already let it through.
 export async function GET() {
   const cfg = await getEmbeddingConfig();
   return NextResponse.json({

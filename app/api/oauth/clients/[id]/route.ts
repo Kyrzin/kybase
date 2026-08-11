@@ -1,5 +1,5 @@
 // DELETE /api/oauth/clients/:id — revoke one OAuth token. Master-secret-
-// protected by middleware (see ../route.ts on why tokens can't do this).
+// protected by proxy.ts (see ../route.ts on why tokens can't do this).
 import { NextRequest, NextResponse } from 'next/server';
 import { revokeToken } from '@/lib/tokens';
 

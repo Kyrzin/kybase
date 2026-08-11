@@ -1,6 +1,6 @@
 # Kybase — self-contained stack: app + Postgres(pgvector) + Ollama embeddings.
 #
-#   cp .env.example .env    # set KYBASE_SECRET
+#   cp .env.example .env    # set KYBASE_SECRET and POSTGRES_PASSWORD
 #   docker compose up -d --build
 #
 # The app applies db/migrations/*.sql automatically on startup (tracked in
@@ -11,9 +11,10 @@ services:
   db:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    mem_limit: 512m
     environment:
       POSTGRES_USER: kybase
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kybase}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: kybase
     volumes:
       - kybase-db:/var/lib/postgresql/data
@@ -28,6 +29,7 @@ services:
     # chain liability. Bump deliberately.
     image: ollama/ollama:0.24.0
     restart: unless-stopped
+    mem_limit: 1024m
     volumes:
       - kybase-ollama:/root/.ollama
     # Serve, wait for the API to actually answer, then ensure the embedding
@@ -56,12 +58,13 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
+    mem_limit: 512m
     ports:
       - "${KYBASE_PORT:-3000}:3000"
     environment:
       NODE_ENV: production
       PORT: "3000"
-      DATABASE_URL: postgres://kybase:${POSTGRES_PASSWORD:-kybase}@db:5432/kybase
+      DATABASE_URL: postgres://kybase:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/kybase
       KYBASE_SECRET: ${KYBASE_SECRET:?set KYBASE_SECRET in .env}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}

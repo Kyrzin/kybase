@@ -1,7 +1,8 @@
 // lib/auth.ts — shared bearer-token auth helpers
-// No Node 'crypto' import: middleware.ts still uses the pre-v16 convention,
-// which may run on the Edge runtime where Node builtins aren't available.
-// This stays pure JS so it works identically in Edge and Node.
+// No Node 'crypto' import: kept pure JS so this works identically regardless
+// of runtime. Originally required because middleware could run on the Edge
+// runtime; as of Next 16, proxy.ts (the renamed convention) is fixed to the
+// Node.js runtime, but there's no reason to add the dependency back.
 
 /** Constant-time string comparison — avoids timing attacks on KYBASE_SECRET. */
 export function safeEqual(a: string, b: string): boolean {

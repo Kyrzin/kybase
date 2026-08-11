@@ -19,9 +19,15 @@ Consequences you should understand before deploying:
 - There are no accounts or roles — the master secret is root. Rotate it
   (`.env`, restart) if you suspect it leaked; that invalidates nothing
   token-wise, so also revoke tokens you don't recognize.
-- The browser UI keeps the master secret in `localStorage`; a successful
-  XSS would expose it. The markdown renderer is hardened and test-covered
-  against XSS payloads, but self-audit accordingly.
+- The browser UI never stores the master secret client-side. Logging in
+  exchanges it for a signed, httpOnly session cookie (30 days, fixed —
+  no sliding refresh) that page JavaScript can never read, so an XSS
+  payload can't exfiltrate it. Settings → Access → Log out clears that
+  cookie for the current browser. There is no way to revoke a single
+  *other* session early short of rotating the master secret, which signs
+  out every browser at once, not just the one you're worried about.
+  The markdown renderer is hardened and test-covered against XSS payloads
+  regardless, but self-audit accordingly.
 
 ## What is implemented
 

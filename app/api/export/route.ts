@@ -1,5 +1,5 @@
 // GET /api/export — the whole vault as a zip of markdown files with
-// frontmatter, folders as directories. Bearer-protected by middleware.
+// frontmatter, folders as directories. Bearer-protected by proxy.ts.
 import { NextResponse } from 'next/server';
 import JSZip from 'jszip';
 import { query } from '@/lib/db';

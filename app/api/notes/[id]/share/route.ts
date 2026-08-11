@@ -1,5 +1,5 @@
 // POST /api/notes/:id/share — create a public share link for a note.
-// Master-secret-protected by middleware.
+// Master-secret-protected by proxy.ts.
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { createShare } from '@/lib/shares';

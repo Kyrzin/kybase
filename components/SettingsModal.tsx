@@ -5,6 +5,7 @@
 // passes apiFetch, refresh setters for import, and a share-revoke callback so
 // it can dismiss the editor's share popover if it shows a just-revoked token.
 import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
 import type { Note, Folder } from '@/lib/types';
 
 // Reindex reports per-note failures. A note whose embedding failed drops out
@@ -37,6 +38,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   setFolders: React.Dispatch<React.SetStateAction<Folder[]>>;
   onShareRevoked: (token: string) => void;
 }) {
+  const router = useRouter();
   const [settingsProvider, setSettingsProvider] = useState<'ollama' | 'google' | 'openai'>('ollama');
   const [settingsGoogleKey, setSettingsGoogleKey] = useState('');
   const [settingsOpenaiKey, setSettingsOpenaiKey] = useState('');
@@ -355,6 +357,26 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
             {settingsTab === 'access' && (
             <>
             <div>
+              <div style={{ fontSize: 11, color: '#6c7086', marginBottom: 8 }}>
+                Session — signs this browser out. Does not touch OAuth clients
+                below or require rotating your secret.
+              </div>
+              <button
+                onClick={async () => {
+                  await fetch('/api/auth/logout', { method: 'POST' });
+                  // No client-readable auth flag to clear (see LoginForm) —
+                  // refresh re-runs the server component, which reads the
+                  // now-cleared cookie and swaps back to the login screen.
+                  onClose();
+                  router.refresh();
+                }}
+                style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#f38ba8', padding: '6px 12px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit' }}
+              >
+                Log out
+              </button>
+            </div>
+
+            <div style={{ borderTop: '1px solid #313244', marginTop: 16, paddingTop: 12 }}>
               <div style={{ fontSize: 11, color: '#6c7086', marginBottom: 8 }}>
                 Active share links — everything that is currently public.
                 A link is access: revoke the ones you no longer need.

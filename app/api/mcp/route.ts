@@ -1,5 +1,5 @@
 // app/api/mcp/route.ts — MCP Streamable HTTP endpoint (Web-standard transport)
-// Auth handled internally (not by middleware) for SSE compatibility
+// Auth handled internally (not by proxy.ts) for SSE compatibility
 // Anti-buffering headers prevent Traefik/Nginx from breaking SSE streams
 import { NextRequest, NextResponse } from 'next/server';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';

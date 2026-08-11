@@ -1,4 +1,6 @@
-// middleware.ts — Bearer token auth for all /api/* except /api/auth and /api/mcp
+// proxy.ts — Bearer token auth for all /api/* except /api/auth and /api/mcp
+// (renamed from middleware.ts per Next.js 16; file convention only, behavior
+// is unchanged — see node_modules/next/dist/docs/.../proxy.md)
 // /api/auth — handles its own validation (login endpoint)
 // /api/mcp  — handles its own auth internally (SSE needs no buffering interference)
 import { NextRequest, NextResponse } from 'next/server';
@@ -6,7 +8,7 @@ import { bearerToken, safeEqual } from '@/lib/auth';
 import { verifySessionToken, SESSION_COOKIE_NAME } from '@/lib/session';
 import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
 
-export async function middleware(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   const secret = process.env.KYBASE_SECRET;
 
   if (!secret) {

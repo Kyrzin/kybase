@@ -1,7 +1,7 @@
 // GET /api/oauth/clients — active OAuth tokens ("connected clients") for the
-// settings UI. Master-secret-protected by middleware; deliberately NOT
+// settings UI. Master-secret-protected by proxy.ts; deliberately NOT
 // accessible with an OAuth token — a client must not enumerate or revoke
-// its peers (middleware only accepts the master secret).
+// its peers (proxy.ts only accepts the master secret).
 import { NextResponse } from 'next/server';
 import { listTokens } from '@/lib/tokens';
 

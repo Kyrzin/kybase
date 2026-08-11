@@ -22,6 +22,9 @@ const PAGE_HEADERS = {
   'X-Robots-Tag': 'noindex, nofollow',
   'X-Frame-Options': 'DENY',
   'Referrer-Policy': 'no-referrer',
+  // Revoking a share must actually stop the content from being served — a
+  // CDN, proxy, or browser disk cache holding a stale copy would defeat that.
+  'Cache-Control': 'no-store',
 };
 
 function esc(s: string): string {

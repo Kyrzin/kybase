@@ -1,5 +1,5 @@
 // DELETE /api/notes/:id/share/:token — revoke a share link.
-// Master-secret-protected by middleware.
+// Master-secret-protected by proxy.ts.
 import { NextRequest, NextResponse } from 'next/server';
 import { revokeShare } from '@/lib/shares';
 

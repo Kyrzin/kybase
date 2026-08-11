@@ -1,6 +1,6 @@
 // GET /api/shares — every active share link with its note title, so the
 // owner can see at a glance what is currently public. Master-secret-
-// protected by middleware.
+// protected by proxy.ts.
 import { NextResponse } from 'next/server';
 import { listShares } from '@/lib/shares';
 

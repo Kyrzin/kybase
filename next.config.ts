@@ -27,8 +27,8 @@ const CSP = [
 const nextConfig: NextConfig = {
   output: "standalone",
   experimental: {
-    // Since middleware.ts is active for every /api/* route it protects, Next
-    // clones and buffers each request body (for middleware's own read) up to
+    // Since proxy.ts is active for every /api/* route it protects, Next
+    // clones and buffers each request body (for proxy.ts's own read) up to
     // a 10MB default — silently, with no error, just a console warning — and
     // hands the route handler that truncated buffer. /api/import declares a
     // 100MB MAX_ZIP_BYTES that was never actually reachable: anything over

@@ -9,11 +9,11 @@
 // own JS can never read (httpOnly) — the worst a leak-that-never-happens
 // costs is one 30-day cookie, not the root credential.
 //
-// No database: middleware verifies this on every protected request and may
-// run on the Edge runtime (see lib/tokens.ts), where the Postgres driver
-// used for revocable OAuth tokens isn't available. Web Crypto (crypto.subtle)
-// is a standard global in both Edge and Node, so this file avoids Node's
-// 'crypto' module the same way lib/auth.ts does.
+// No database: proxy.ts verifies this on every protected request and is
+// meant to stay independent of the main app (see lib/tokens.ts) — the
+// Postgres driver used for revocable OAuth tokens has no place here anyway.
+// Web Crypto (crypto.subtle) is a standard global regardless of runtime, so
+// this file avoids Node's 'crypto' module the same way lib/auth.ts does.
 const SESSION_COOKIE_NAME = 'kybase_session';
 const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60; // 30 days, fixed (no sliding refresh)
 

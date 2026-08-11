@@ -1,6 +1,6 @@
 // POST /api/import — restore/merge a vault from a zip of markdown files.
 // Directories become folders, frontmatter supplies title/tags (filename is
-// the fallback title). Bearer-protected by middleware.
+// the fallback title). Bearer-protected by proxy.ts.
 //
 // Conflict policy via ?mode= : 'skip' (default) leaves existing notes
 // untouched, 'overwrite' replaces their content/tags. Titles are the

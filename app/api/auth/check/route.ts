@@ -1,6 +1,6 @@
 // POST /api/auth/check — validate the user's secret password
 // Returns {ok: true} on match, 401 on mismatch
-// Not protected by middleware — this IS the auth endpoint
+// Not protected by proxy.ts — this IS the auth endpoint
 import { NextRequest, NextResponse } from 'next/server';
 import { safeEqual } from '@/lib/auth';
 import { createSessionToken, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from '@/lib/session';

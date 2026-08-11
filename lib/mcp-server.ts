@@ -187,19 +187,29 @@ export function createMcpServer(): McpServer {
   // ── list_notes ───────────────────────────────────────────────────────────
   server.tool(
     'list_notes',
-    'List notes, newest first. Optional filters: folder_id, tag, updated_after/updated_before, ' +
-    'limit (max 200). updated_after answers "what changed since I was last here" without a search ' +
-    'term. Pass trashed:true to see soft-deleted notes instead (recoverable with restore_note ' +
-    'until they age out of the trash) — other filters are ignored in that mode.',
+    'List notes, sorted by recency (newest first). Optional filters: folder_id, tag, ' +
+    'created_after/created_before, updated_after/updated_before, limit (max 200). ' +
+    'created_after answers "what is new" — a note\'s creation date never changes after it is ' +
+    'made. updated_after answers "what changed since I was last here" — it moves on every real ' +
+    'edit. They are NOT interchangeable: a note edited today but created months ago matches ' +
+    'updated_after, not created_after. sort picks which of the two dates drives the ordering ' +
+    '(default "updated", unchanged from before this field existed). Each note carries ' +
+    'content_length (characters in the full note) so you can tell a long note from a short one ' +
+    'before spending a get_note call on it. Pass trashed:true to see soft-deleted notes instead ' +
+    '(recoverable with restore_note until they age out of the trash) — other filters are ignored ' +
+    'in that mode.',
     {
       folder_id: z.string().uuid().optional().describe('Filter by folder UUID'),
       tag:       z.string().optional().describe('Filter by tag'),
+      created_after:  z.string().optional().describe('ISO timestamp — only notes created at or after this'),
+      created_before: z.string().optional().describe('ISO timestamp — only notes created at or before this'),
       updated_after:  z.string().optional().describe('ISO timestamp — only notes updated at or after this'),
       updated_before: z.string().optional().describe('ISO timestamp — only notes updated at or before this'),
+      sort:      z.enum(['created', 'updated']).default('updated').describe('Which date drives the ordering'),
       limit:     z.number().int().min(1).max(200).default(50),
       trashed:   z.boolean().default(false).describe('List soft-deleted notes instead of live ones'),
     },
-    async ({ folder_id, tag, updated_after, updated_before, limit, trashed }) => {
+    async ({ folder_id, tag, created_after, created_before, updated_after, updated_before, sort, limit, trashed }) => {
       if (trashed) {
         const data = await query<{ id: string; title: string; folder_id: string | null; deleted_at: string }>(
           'select id, title, folder_id, deleted_at from notes where deleted_at is not null order by deleted_at desc limit $1',
@@ -212,14 +222,19 @@ export function createMcpServer(): McpServer {
       const params: unknown[] = [];
       if (folder_id) { params.push(folder_id); conds.push(`folder_id = $${params.length}`); }
       if (tag)       { params.push([tag]);     conds.push(`tags @> $${params.length}`); }
+      if (created_after)  { params.push(created_after);  conds.push(`created_at >= $${params.length}`); }
+      if (created_before) { params.push(created_before); conds.push(`created_at <= $${params.length}`); }
       if (updated_after)  { params.push(updated_after);  conds.push(`updated_at >= $${params.length}`); }
       if (updated_before) { params.push(updated_before); conds.push(`updated_at <= $${params.length}`); }
       params.push(limit);
+      // sort is a fixed 2-value enum from zod, not user-supplied text — safe
+      // to interpolate as a column name.
+      const orderCol = sort === 'created' ? 'created_at' : 'updated_at';
       const [data, paths] = await Promise.all([
-        query<{ id: string; title: string; folder_id: string | null; tags: string[]; updated_at: string }>(
-          `select id, title, folder_id, tags, updated_at from notes
+        query<{ id: string; title: string; folder_id: string | null; tags: string[]; created_at: string; updated_at: string; content_length: number }>(
+          `select id, title, folder_id, tags, created_at, updated_at, length(content) as content_length from notes
            where ${conds.join(' and ')}
-           order by updated_at desc limit $${params.length}`,
+           order by ${orderCol} desc limit $${params.length}`,
           params
         ),
         folderPathMap(),
@@ -550,8 +565,11 @@ export function createMcpServer(): McpServer {
     'an all-weak page means reformulate. Relevance is comparable within one query\'s results, not ' +
     'across queries or models. The raw fields remain for debugging: `score` is RRF rank fusion ' +
     '(hybrid sort order, NOT relevance), text_score is FTS ts_rank, semantic_score is raw cosine. ' +
-    'Optional filters (folder_id, tag, updated_after/before) narrow to notes matching ' +
-    'ALL given ones. An empty semantic/hybrid result includes threshold/best_score/pending_embeddings ' +
+    'Optional filters (folder_id, tag, created_after/before, updated_after/before) narrow to notes ' +
+    'matching ALL given ones. created_after answers "what is new" (creation date, fixed at import/' +
+    'creation time); updated_after answers "what changed since I was last here" (moves on every ' +
+    'real edit) — pick the one that matches the question, they are not interchangeable. ' +
+    'An empty semantic/hybrid result includes threshold/best_score/pending_embeddings ' +
     'so you can tell "nothing this relevant exists" from "just under the threshold" from "embeddings ' +
     'not generated yet" — a bare [] can\'t distinguish those.',
     {
@@ -560,11 +578,17 @@ export function createMcpServer(): McpServer {
       limit:          z.number().int().min(1).max(50).default(5),
       folder_id:      z.string().uuid().optional().describe('Restrict to notes in this folder'),
       tag:            z.string().optional().describe('Restrict to notes with this tag'),
+      created_after:  z.string().optional().describe('ISO timestamp — only notes created at or after this'),
+      created_before: z.string().optional().describe('ISO timestamp — only notes created at or before this'),
       updated_after:  z.string().optional().describe('ISO timestamp — only notes updated at or after this'),
       updated_before: z.string().optional().describe('ISO timestamp — only notes updated at or before this'),
     },
-    async ({ query: q, type, limit, folder_id, tag, updated_after, updated_before }) => {
-      const filters = { folderId: folder_id, tag, updatedAfter: updated_after, updatedBefore: updated_before };
+    async ({ query: q, type, limit, folder_id, tag, created_after, created_before, updated_after, updated_before }) => {
+      const filters = {
+        folderId: folder_id, tag,
+        createdAfter: created_after, createdBefore: created_before,
+        updatedAfter: updated_after, updatedBefore: updated_before,
+      };
       let results: SearchResult[];
       if      (type === 'semantic') results = await semanticSearch(q, limit, filters);
       else if (type === 'hybrid')   results = await hybridSearch(q, limit, filters);

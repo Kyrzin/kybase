@@ -33,6 +33,10 @@ export type SearchResult = {
   // out on the other pass's rank contribution entirely (RRF's known
   // single-arm penalty), which this makes visible instead of implicit.
   matched_by?: ('text_score' | 'semantic_score')[];
+  // Filled in by enrichWithCreatedAt (a single id = any($1) lookup, not part
+  // of search_notes_fts/match_chunks — see there for why). Absent only if
+  // the note was deleted in the gap between the search RPC and the lookup.
+  created_at?: string;
 };
 
 /**
@@ -79,6 +83,8 @@ const EXCERPT_SNAP_WINDOW = 24;
 export type SearchFilters = {
   folderId?: string;
   tag?: string;
+  createdAfter?: string;
+  createdBefore?: string;
   updatedAfter?: string;
   updatedBefore?: string;
 };
@@ -94,7 +100,8 @@ const OVERFETCH_FACTOR = 8;
 const OVERFETCH_CAP = 300;
 
 function hasFilters(f?: SearchFilters): f is SearchFilters {
-  return !!f && (f.folderId !== undefined || f.tag !== undefined || f.updatedAfter !== undefined || f.updatedBefore !== undefined);
+  return !!f && (f.folderId !== undefined || f.tag !== undefined || f.createdAfter !== undefined
+    || f.createdBefore !== undefined || f.updatedAfter !== undefined || f.updatedBefore !== undefined);
 }
 
 async function filteredNoteIds(filters: SearchFilters): Promise<Set<string>> {
@@ -102,6 +109,8 @@ async function filteredNoteIds(filters: SearchFilters): Promise<Set<string>> {
   const params: unknown[] = [];
   if (filters.folderId)      { params.push(filters.folderId);      conds.push(`folder_id = $${params.length}`); }
   if (filters.tag)           { params.push([filters.tag]);         conds.push(`tags @> $${params.length}`); }
+  if (filters.createdAfter)  { params.push(filters.createdAfter);  conds.push(`created_at >= $${params.length}`); }
+  if (filters.createdBefore) { params.push(filters.createdBefore); conds.push(`created_at <= $${params.length}`); }
   if (filters.updatedAfter)  { params.push(filters.updatedAfter);  conds.push(`updated_at >= $${params.length}`); }
   if (filters.updatedBefore) { params.push(filters.updatedBefore); conds.push(`updated_at <= $${params.length}`); }
   const rows = await dbQuery<{ id: string }>(
@@ -119,6 +128,28 @@ async function applyFilters(
   if (!hasFilters(filters)) return results.slice(0, limit);
   const allowed = await filteredNoteIds(filters);
   return results.filter((r) => allowed.has(r.id)).slice(0, limit);
+}
+
+/**
+ * Attaches created_at to each result with one extra id = any($1) lookup —
+ * deliberately NOT inside applyFilters (which only ever runs when filters
+ * are given) and NOT a rewrite of search_notes_fts/match_chunks (which would
+ * mean a migration to alter two working, tested SQL functions for one
+ * column). Called once at the end of textSearch and semanticSearch, on
+ * their own final (already limited) result list — not on hybridSearch's
+ * per-arm overfetch candidates. hybridSearch does not call this itself: its
+ * two arms are already enriched by the time rrfMerge runs, and rrfMerge
+ * preserves extra fields via its `...result` spread, so a third lookup on
+ * the merged/sliced set would just re-fetch data already present.
+ */
+async function enrichWithCreatedAt(results: SearchResult[]): Promise<SearchResult[]> {
+  if (results.length === 0) return results;
+  const rows = await dbQuery<{ id: string; created_at: string }>(
+    'select id, created_at from notes where id = any($1)',
+    [results.map((r) => r.id)]
+  );
+  const createdById = new Map(rows.map((r) => [r.id, r.created_at]));
+  return results.map((r) => ({ ...r, created_at: createdById.get(r.id) }));
 }
 
 function overfetchLimit(limit: number, filters: SearchFilters | undefined): number {
@@ -230,7 +261,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     'select * from search_notes_fts($1, $2)',
     [query, fetchLimit]
   );
-  if (rows.length === 0) return substringSearch(query, limit, filters);
+  if (rows.length === 0) return enrichWithCreatedAt(await substringSearch(query, limit, filters));
 
   // n.rank is Postgres's actual ts_rank for this query — a genuine
   // relevance signal, unlike the positional score substringSearch falls
@@ -247,7 +278,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
       confidence: confidenceFor(relevance),
     };
   });
-  return applyFilters(results, limit, filters);
+  return enrichWithCreatedAt(await applyFilters(results, limit, filters));
 }
 
 /** Title matches rank above content matches (queried separately, merged in order). */
@@ -326,7 +357,7 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
       confidence: confidenceFor(relevance),
     };
   });
-  return applyFilters(results, limit, filters);
+  return enrichWithCreatedAt(await applyFilters(results, limit, filters));
 }
 
 /**

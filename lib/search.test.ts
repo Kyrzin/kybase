@@ -171,11 +171,15 @@ describe('stripLeadingHeading', () => {
 });
 
 describe('textSearch — filters', () => {
-  it('without filters, requests exactly `limit` rows and does not query notes for an id set', async () => {
-    dbQuery.mockResolvedValueOnce([{ id: 'a', title: 'A', tags: [], rank: 0.5, headline: 'hi' }]);
+  it('without filters, requests exactly `limit` rows and does not query notes for a filter id set', async () => {
+    dbQuery
+      .mockResolvedValueOnce([{ id: 'a', title: 'A', tags: [], rank: 0.5, headline: 'hi' }])
+      .mockResolvedValueOnce([{ id: 'a', created_at: '2026-01-01T00:00:00.000Z' }]); // enrichWithCreatedAt
     const results = await textSearch('q', 5);
     expect(dbQuery.mock.calls[0]).toEqual(['select * from search_notes_fts($1, $2)', ['q', 5]]);
-    expect(dbQuery).toHaveBeenCalledTimes(1); // no extra id-set lookup
+    expect(dbQuery).toHaveBeenCalledTimes(2); // FTS + unconditional created_at lookup, no filter id-set query
+    const [enrichSql] = dbQuery.mock.calls[1];
+    expect(enrichSql).not.toMatch(/folder_id|tags @>|updated_at|created_at >=/); // not filteredNoteIds
     expect(results).toHaveLength(1);
   });
 
@@ -204,6 +208,43 @@ describe('textSearch — filters', () => {
     expect(sql).toContain('tags @> $1');
     expect(sql).toContain('updated_at >= $2');
     expect(params).toEqual([['x'], '2026-01-01']);
+  });
+
+  it('filters by createdAfter/createdBefore, symmetric with updatedAfter/updatedBefore', async () => {
+    dbQuery.mockResolvedValueOnce([{ id: 'a', title: 'A', tags: [], rank: 0.9, headline: 'hi' }])
+           .mockResolvedValueOnce([{ id: 'a' }]);
+    await textSearch('q', 5, { createdAfter: '2026-01-01', createdBefore: '2026-12-31' });
+    const [sql, params] = dbQuery.mock.calls[1];
+    expect(sql).toContain('created_at >= $1');
+    expect(sql).toContain('created_at <= $2');
+    expect(params).toEqual(['2026-01-01', '2026-12-31']);
+  });
+
+  it('attaches created_at to every result via one id = any($1) lookup', async () => {
+    dbQuery
+      .mockResolvedValueOnce([
+        { id: 'a', title: 'A', tags: [], rank: 0.9, headline: 'hi' },
+        { id: 'b', title: 'B', tags: [], rank: 0.5, headline: 'hi' },
+      ])
+      .mockResolvedValueOnce([
+        { id: 'a', created_at: '2026-01-01T00:00:00.000Z' },
+        { id: 'b', created_at: '2026-02-01T00:00:00.000Z' },
+      ]);
+    const results = await textSearch('q', 5);
+    const [sql, params] = dbQuery.mock.calls[1];
+    expect(sql).toBe('select id, created_at from notes where id = any($1)');
+    expect(params).toEqual([['a', 'b']]);
+    expect(results.map((r) => r.created_at)).toEqual(['2026-01-01T00:00:00.000Z', '2026-02-01T00:00:00.000Z']);
+  });
+
+  it('leaves created_at undefined (not throwing) for a result missing from the lookup', async () => {
+    // Can happen if the note was deleted in the gap between the FTS query
+    // and this lookup — a real but narrow race, not an error.
+    dbQuery
+      .mockResolvedValueOnce([{ id: 'a', title: 'A', tags: [], rank: 0.9, headline: 'hi' }])
+      .mockResolvedValueOnce([]); // 'a' no longer found
+    const [result] = await textSearch('q', 5);
+    expect(result.created_at).toBeUndefined();
   });
 });
 
@@ -237,22 +278,74 @@ describe('semanticSearch — filters', () => {
     expect(r.excerpt).toBe('[Диагностика] nomic оказалась непригодна на русском');
     expect(r.excerpt).not.toContain('##'); // markdown heading line stripped from the body
   });
+
+  it('skips the created_at lookup entirely on an empty result — no wasted PK query', async () => {
+    // match_chunks returns [] whenever nothing clears the similarity floor
+    // (no embeddings yet, or everything below threshold) — a common, not
+    // exceptional, outcome. enrichWithCreatedAt must not fire a second
+    // query for zero ids.
+    dbQuery.mockResolvedValueOnce([]); // match_chunks: nothing above the floor
+    const results = await semanticSearch('q', 5);
+    expect(results).toEqual([]);
+    expect(dbQuery).toHaveBeenCalledTimes(1); // match_chunks only, no id = any($1) call
+  });
+
+  it('attaches created_at without touching match_chunks itself', async () => {
+    dbQuery
+      .mockResolvedValueOnce([
+        { id: 'a', title: 'A', chunk_content: 'x', heading: null, tags: [], similarity: 0.8 },
+      ])
+      .mockResolvedValueOnce([{ id: 'a', created_at: '2026-05-01T00:00:00.000Z' }]);
+    const [result] = await semanticSearch('q', 5);
+    expect(dbQuery.mock.calls[0][0]).toContain('match_chunks'); // unchanged RPC, no migration
+    expect(result.created_at).toBe('2026-05-01T00:00:00.000Z');
+  });
 });
 
 describe('hybridSearch — candidate pool', () => {
   it('overfetches each arm beyond the final limit before RRF fusion', async () => {
-    dbQuery
-      .mockResolvedValueOnce([{ id: 'a', title: 'A', tags: [], rank: 0.5, headline: 'hi' }]) // FTS arm
-      .mockResolvedValueOnce([                                                                // semantic arm
-        { id: 'b', title: 'B', chunk_content: 'x', heading: null, tags: [], similarity: 0.8 },
-      ]);
+    // Each arm now also fires its own enrichWithCreatedAt call, and the two
+    // arms run concurrently (Promise.all), so their calls can interleave in
+    // either order — find each call by its SQL rather than assuming a fixed
+    // index.
+    dbQuery.mockImplementation(async (sql: string) => {
+      if (sql.includes('search_notes_fts')) return [{ id: 'a', title: 'A', tags: [], rank: 0.5, headline: 'hi' }];
+      if (sql.includes('match_chunks')) return [{ id: 'b', title: 'B', chunk_content: 'x', heading: null, tags: [], similarity: 0.8 }];
+      return [];
+    });
 
     await hybridSearch('q', 5);
 
-    const [, ftsParams] = dbQuery.mock.calls[0];
-    const [, semanticParams] = dbQuery.mock.calls[1];
-    expect(ftsParams[1]).toBeGreaterThan(5);
-    expect(semanticParams[1]).toBeGreaterThan(5);
+    const ftsCall = dbQuery.mock.calls.find(([sql]) => (sql as string).includes('search_notes_fts'))!;
+    const semanticCall = dbQuery.mock.calls.find(([sql]) => (sql as string).includes('match_chunks'))!;
+    expect((ftsCall[1] as unknown[])[1]).toBeGreaterThan(5);
+    expect((semanticCall[1] as unknown[])[1]).toBeGreaterThan(5);
+  });
+
+  it('carries created_at through from the arms — no extra lookup of its own', async () => {
+    // Each arm enriches its own candidate list (textSearch/semanticSearch),
+    // and rrfMerge's `...result` spread preserves the field through fusion —
+    // hybridSearch adding a third id=any($1) call on the already-enriched,
+    // deduped set would just re-fetch data that's already there. Dispatches
+    // on SQL content rather than call position: textSearch and semanticSearch
+    // run concurrently (Promise.all), so their two calls each can interleave
+    // in either order — asserting a fixed call index would be testing
+    // scheduling, not behavior.
+    const createdById: Record<string, string> = { a: '2026-06-01T00:00:00.000Z', b: '2026-06-02T00:00:00.000Z' };
+    dbQuery.mockImplementation(async (sql: string, params: unknown[] = []) => {
+      if (sql.includes('search_notes_fts')) return [{ id: 'a', title: 'A', tags: [], rank: 0.5, headline: 'hi' }];
+      if (sql.includes('match_chunks')) return [{ id: 'b', title: 'B', chunk_content: 'x', heading: null, tags: [], similarity: 0.8 }];
+      if (sql.includes('id = any')) {
+        const ids = params[0] as string[];
+        return ids.filter((id) => id in createdById).map((id) => ({ id, created_at: createdById[id] }));
+      }
+      return [];
+    });
+
+    const results = await hybridSearch('q', 5);
+    expect(dbQuery).toHaveBeenCalledTimes(4); // 2 per arm (search + enrich), nothing extra at the hybridSearch level
+    const byId = Object.fromEntries(results.map((r) => [r.id, r.created_at]));
+    expect(byId).toEqual(createdById);
   });
 });
 

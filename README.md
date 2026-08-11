@@ -226,10 +226,15 @@ manual tuning is needed when you switch.
 ## Export & Import
 
 Your notes are never locked in. Settings → **Export .zip** downloads the
-whole vault as plain markdown files with frontmatter (title, tags, dates),
-folders as directories — readable by any editor, Obsidian included.
-**Import .zip** merges a vault back; notes whose titles already exist are
-skipped. Imported notes are re-embedded automatically in the background.
+whole vault as plain markdown files with frontmatter (title, tags, created/
+updated dates), folders as directories — readable by any editor, Obsidian
+included. **Import .zip** merges a vault back; notes whose titles already
+exist are skipped. A new note's creation date is restored from the file;
+its "last updated" timestamp is set to the moment it lands back in the
+vault rather than carried over — that field tracks when this server last
+changed the row, so a re-imported note showing up as recently touched is
+correct, not a bug. Imported notes are re-embedded automatically in the
+background.
 
 The same via API:
 

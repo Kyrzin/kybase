@@ -148,7 +148,7 @@ export async function POST(req: NextRequest) {
         );
       }
       unzippedBytes += Buffer.byteLength(md, 'utf8');
-      const { title: fmTitle, tags, body: rawContent } = parseFrontmatter(md);
+      const { title: fmTitle, tags, body: rawContent, created } = parseFrontmatter(md);
       const content = stripNulBytes(rawContent);
 
       // "a/b/Note.md" → folders ["a","b"], fallback title "Note".
@@ -176,10 +176,14 @@ export async function POST(req: NextRequest) {
       }
 
       const folderId = await ensureFolderPath(segments, folderCache);
+      // created comes from frontmatter written by our own export (see
+      // parseFrontmatter) — round-trips the real creation date instead of
+      // stamping every re-imported note with "now". coalesce to the column's
+      // own now() default when absent (foreign files, or nothing parsed).
       await query(
-        `insert into notes (title, content, folder_id, tags, embedding_pending)
-         values ($1, $2, $3, $4, true)`,
-        [title, content, folderId, tags]
+        `insert into notes (title, content, folder_id, tags, embedding_pending, created_at)
+         values ($1, $2, $3, $4, true, coalesce($5::timestamptz, now()))`,
+        [title, content, folderId, tags, created ?? null]
       );
       imported++;
     } catch (err) {

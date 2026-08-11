@@ -150,6 +150,34 @@ describe('list_notes', () => {
     expect(sql).toContain('deleted_at is not null');
     expect(params).toEqual([20]);
   });
+
+  it('projects created_at and content_length alongside the existing columns', async () => {
+    await call('list_notes', {});
+    const [sql] = query.mock.calls[0];
+    expect(sql).toContain('created_at');
+    expect(sql).toContain('length(content) as content_length');
+  });
+
+  it('filters by created_after/created_before, symmetric with updated_after/updated_before', async () => {
+    await call('list_notes', { created_after: '2026-01-01', created_before: '2026-06-01' });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain('created_at >= $1');
+    expect(sql).toContain('created_at <= $2');
+    expect(params).toEqual(['2026-01-01', '2026-06-01', 50]);
+  });
+
+  it('defaults to sorting by updated_at (unchanged behavior)', async () => {
+    await call('list_notes', {});
+    const [sql] = query.mock.calls[0];
+    expect(sql).toContain('order by updated_at desc');
+  });
+
+  it('sort:"created" orders by created_at instead', async () => {
+    await call('list_notes', { sort: 'created' });
+    const [sql] = query.mock.calls[0];
+    expect(sql).toContain('order by created_at desc');
+    expect(sql).not.toContain('order by updated_at desc');
+  });
 });
 
 describe('indexing_status', () => {
@@ -504,6 +532,22 @@ describe('list_notes recency filter', () => {
     expect(sql).toContain('order by updated_at desc');
     expect(params).toContain('2026-01-01T00:00:00.000Z');
   });
+
+  it('created_after answers "what is new" — a distinct filter from updated_after', async () => {
+    await call('list_notes', { created_after: '2026-01-01T00:00:00.000Z' });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain('created_at >=');
+    expect(sql).not.toContain('updated_at >='); // the other filter was not also applied
+    expect(params).toContain('2026-01-01T00:00:00.000Z');
+  });
+
+  it('created_after and updated_after combine with AND when both are given', async () => {
+    await call('list_notes', { created_after: '2026-01-01', updated_after: '2026-06-01' });
+    const [sql, params] = query.mock.calls[0];
+    expect(sql).toContain('created_at >= $1');
+    expect(sql).toContain('updated_at >= $2');
+    expect(params).toEqual(['2026-01-01', '2026-06-01', 50]);
+  });
 });
 
 describe('update_note', () => {
@@ -599,7 +643,11 @@ describe('delete_note / restore_note', () => {
 });
 
 describe('search_notes', () => {
-  const noFilters = { folderId: undefined, tag: undefined, updatedAfter: undefined, updatedBefore: undefined };
+  const noFilters = {
+    folderId: undefined, tag: undefined,
+    createdAfter: undefined, createdBefore: undefined,
+    updatedAfter: undefined, updatedBefore: undefined,
+  };
 
   it('routes by type', async () => {
     await call('search_notes', { query: 'q', type: 'text' });
@@ -618,7 +666,20 @@ describe('search_notes', () => {
     });
     expect(textSearch).toHaveBeenCalledWith('q', 5, {
       folderId: '11111111-1111-4111-8111-111111111111',
-      tag: 'work', updatedAfter: '2026-01-01', updatedBefore: '2026-12-31',
+      tag: 'work', createdAfter: undefined, createdBefore: undefined,
+      updatedAfter: '2026-01-01', updatedBefore: '2026-12-31',
+    });
+  });
+
+  it('passes created_after/created_before through as filters, distinct from updated_after/before', async () => {
+    await call('search_notes', {
+      query: 'q', type: 'text',
+      created_after: '2026-01-01', created_before: '2026-12-31',
+    });
+    expect(textSearch).toHaveBeenCalledWith('q', 5, {
+      folderId: undefined, tag: undefined,
+      createdAfter: '2026-01-01', createdBefore: '2026-12-31',
+      updatedAfter: undefined, updatedBefore: undefined,
     });
   });
 

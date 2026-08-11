@@ -27,12 +27,17 @@ export function sanitizeName(name: string): string {
 }
 
 function frontmatter(note: ExportNote): string {
+  // created_at/updated_at are typed as string but the pg driver actually
+  // hands back Date objects for timestamptz — a bare `${note.created_at}`
+  // would call Date.prototype.toString() ("Mon Jul 13 2026 11:17:09 GMT+0000
+  // (Coordinated Universal Time)"), not ISO 8601. new Date(...).toISOString()
+  // normalizes either way, whether the value arrives as Date or string.
   return [
     '---',
     `title: ${JSON.stringify(note.title)}`,
     `tags: ${JSON.stringify(note.tags ?? [])}`,
-    `created: ${note.created_at}`,
-    `updated: ${note.updated_at}`,
+    `created: ${new Date(note.created_at).toISOString()}`,
+    `updated: ${new Date(note.updated_at).toISOString()}`,
     '---',
     '',
     '',
@@ -78,7 +83,7 @@ export function buildExportTree(notes: ExportNote[], folders: ExportFolder[]): E
   });
 }
 
-export type ParsedNote = { title?: string; tags: string[]; body: string };
+export type ParsedNote = { title?: string; tags: string[]; body: string; created?: string };
 
 function parseTags(raw: string): string[] {
   try {
@@ -107,11 +112,21 @@ export function parseFrontmatter(md: string): ParsedNote {
   const body = md.slice(match[0].length);
   let title: string | undefined;
   let tags: string[] = [];
+  let created: string | undefined;
   for (const line of match[1].split(/\r?\n/)) {
     const kv = line.match(/^(\w+):\s*(.*)$/);
     if (!kv) continue;
     if (kv[1] === 'title' && kv[2]) title = parseValue(kv[2]);
     if (kv[1] === 'tags' && kv[2]) tags = parseTags(kv[2]);
+    if (kv[1] === 'created' && kv[2]) {
+      // Not JSON.stringify'd on export (see frontmatter()), so no quotes to
+      // strip in the common case — parseValue still handles a hand-edited
+      // quoted value gracefully. A garbage, foreign-tool, or missing value
+      // is not an error here: the caller falls back to now() either way, so
+      // silently leaving `created` undefined is the entire "invalid" path.
+      const parsedDate = new Date(parseValue(kv[2]));
+      if (!Number.isNaN(parsedDate.getTime())) created = parsedDate.toISOString();
+    }
   }
-  return { title, tags, body };
+  return { title, tags, body, created };
 }

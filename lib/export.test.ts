@@ -65,12 +65,16 @@ describe('buildExportTree', () => {
 });
 
 describe('parseFrontmatter', () => {
-  it('round-trips an exported note', () => {
-    const [file] = buildExportTree([note({ title: 'Q: "test"', tags: ['a', 'b'], content: '# Hi\n' })], []);
+  it('round-trips an exported note, including its creation date', () => {
+    const [file] = buildExportTree(
+      [note({ title: 'Q: "test"', tags: ['a', 'b'], content: '# Hi\n', created_at: '2026-03-05T12:30:00.000Z' })],
+      []
+    );
     const parsed = parseFrontmatter(file.content);
     expect(parsed.title).toBe('Q: "test"');
     expect(parsed.tags).toEqual(['a', 'b']);
     expect(parsed.body).toBe('# Hi\n');
+    expect(parsed.created).toBe('2026-03-05T12:30:00.000Z');
   });
 
   it('tolerates unquoted YAML-ish frontmatter from other tools', () => {
@@ -84,5 +88,23 @@ describe('parseFrontmatter', () => {
     const parsed = parseFrontmatter('# Just markdown');
     expect(parsed.title).toBeUndefined();
     expect(parsed.body).toBe('# Just markdown');
+  });
+
+  it('leaves created undefined when the frontmatter has no created: line', () => {
+    const parsed = parseFrontmatter('---\ntitle: "No Date"\ntags: []\n---\nbody');
+    expect(parsed.created).toBeUndefined();
+  });
+
+  it('leaves created undefined on an unparseable value instead of throwing', () => {
+    const parsed = parseFrontmatter('---\ntitle: "Bad Date"\ncreated: not-a-date\n---\nbody');
+    expect(parsed.created).toBeUndefined();
+    expect(parsed.title).toBe('Bad Date'); // rest of the frontmatter still parses
+  });
+
+  it('parses the pre-fix export format (Date.toString(), not ISO) written before this fix', () => {
+    const parsed = parseFrontmatter(
+      '---\ntitle: "Old Export"\ncreated: Mon Jul 13 2026 11:17:09 GMT+0000 (Coordinated Universal Time)\n---\nbody'
+    );
+    expect(parsed.created).toBe('2026-07-13T11:17:09.000Z');
   });
 });

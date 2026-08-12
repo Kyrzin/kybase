@@ -453,6 +453,42 @@ export function useNotes(cb: UseNotesCallbacks) {
     setEditTitle(newNote.title);
   }, [notes, flushSave]);
 
+  // ── PDF import ─────────────────────────────────────────────────────────
+  // Raw-body upload (matches SettingsModal's ZIP importVault, not
+  // multipart/form-data) — headers carry filename/folder, body is the PDF
+  // bytes untouched. Conversion (lib/pdf-import.ts) runs server-side.
+  const [pdfImporting, setPdfImporting] = useState(false);
+  const importPdfFile = useCallback(async (file: File, folderId: string | null): Promise<void> => {
+    await flushSave();
+    setPdfImporting(true);
+    try {
+      const url = `/api/notes/import-pdf${folderId ? `?folder_id=${folderId}` : ''}`;
+      const res = await apiFetch(url, {
+        method: 'POST',
+        body: file,
+        headers: {
+          'Content-Type': 'application/pdf',
+          // Latin-1-only header value; this vault's titles are routinely
+          // Cyrillic/German — see the matching decodeURIComponent server-side.
+          'X-Filename': encodeURIComponent(file.name),
+        },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSyncError(`PDF import failed: ${typeof data.error === 'string' ? data.error : `HTTP ${res.status}`}`);
+        return;
+      }
+      setSyncError(null);
+      const newNote: Note = data;
+      setNotes(prev => [...prev, newNote]);
+      setActiveNoteId(newNote.id);
+    } catch {
+      setSyncError('PDF import failed: no connection to the server');
+    } finally {
+      setPdfImporting(false);
+    }
+  }, [flushSave]);
+
   const createFolder = useCallback(async (parentId: string | null = null) => {
     const name = prompt('Folder name:');
     if (!name) return;
@@ -578,5 +614,6 @@ export function useNotes(cb: UseNotesCallbacks) {
     flushSave, selectNote, saveNote, saveTags, addTag, removeTag,
     createNote, createFolder, deleteFolder, renameFolder, deleteNote, moveNote, moveFolder,
     reindexingNoteId, reindexNote,
+    pdfImporting, importPdfFile,
   };
 }

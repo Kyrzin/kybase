@@ -4,7 +4,7 @@
 // focus select and create buttons. Extracted from KybaseApp; focus state
 // stays in the parent because the graph consumes the same visibleNotes, so
 // it's passed in rather than owned here.
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useRef } from 'react';
 import type { Note, Folder } from '@/lib/types';
 import { Icons } from './Icons';
 import FolderPicker from './FolderPicker';
@@ -18,6 +18,7 @@ export default function Sidebar({
   activeNoteId, selectNote,
   expandedFolders, toggleFolder,
   createNote, createFolder, deleteNote, deleteFolder, moveFolder,
+  pdfImporting, importPdfFile,
 }: {
   sidebarOpen: boolean;
   setSidebarOpen: (v: boolean) => void;
@@ -40,7 +41,10 @@ export default function Sidebar({
   deleteNote: (id: string) => void;
   deleteFolder: (id: string) => void;
   moveFolder: (id: string, parentId: string | null) => Promise<string | null>;
+  pdfImporting: boolean;
+  importPdfFile: (file: File, folderId: string | null) => Promise<void>;
 }) {
+  const pdfInputRef = useRef<HTMLInputElement>(null);
   // Which folder is being moved, and the last cycle/error message to show.
   const [movingFolderId, setMovingFolderId] = useState<string | null>(null);
   const [moveError, setMoveError] = useState<string | null>(null);
@@ -149,6 +153,27 @@ export default function Sidebar({
           </select>
           <button title="New Note"   onClick={() => createNote(focusFolderId)}>{Icons.plus}</button>
           <button title="New Folder" onClick={() => createFolder(focusFolderId)}>{Icons.newFolder}</button>
+          <button
+            title="Import PDF — converts headings by font size, not by copy-pasted text"
+            disabled={pdfImporting}
+            style={{ opacity: pdfImporting ? 0.6 : 1, cursor: pdfImporting ? 'not-allowed' : 'pointer' }}
+            onClick={() => pdfInputRef.current?.click()}
+          >
+            {pdfImporting
+              ? <div style={{ width: 14, height: 14, border: '2px solid #45475a', borderTopColor: '#89b4fa', borderRadius: '50%', animation: 'spin 0.6s linear infinite' }} />
+              : Icons.uploadPdf}
+          </button>
+          <input
+            ref={pdfInputRef}
+            type="file"
+            accept="application/pdf"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              e.target.value = ''; // allow re-selecting the same file
+              if (file) importPdfFile(file, focusFolderId);
+            }}
+          />
         </div>
         <div className="search-box">
           <span className="search-icon">{Icons.search}</span>

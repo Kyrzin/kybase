@@ -124,6 +124,7 @@ export default function KybaseApp() {
     createNote, createFolder, deleteFolder, renameFolder, deleteNote, moveNote, moveFolder,
     syncError, setSyncError, canOverwriteConflict, overwriteConflict,
     reindexingNoteId, reindexNote,
+    pdfImporting, importPdfFile,
   } = useNotes({ onNoteOpened, onMoveDone, onRenameDone, onTagInputConsumed, restoreFocus });
   const [overwriting, setOverwriting] = useState(false);
 
@@ -351,6 +352,8 @@ export default function KybaseApp() {
             deleteNote={deleteNote}
             deleteFolder={deleteFolder}
             moveFolder={moveFolder}
+            pdfImporting={pdfImporting}
+            importPdfFile={importPdfFile}
           />
 
           {/* Editor */}

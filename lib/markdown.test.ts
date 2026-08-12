@@ -1,5 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { parseMarkdown, renderWithWikilinks, stripWikilinks, escapeAttr, safeUrl, extractHeadings } from './markdown';
+import {
+  parseMarkdown, renderWithWikilinks, stripWikilinks, escapeAttr, safeUrl, extractHeadings,
+  TABLE_ROW_RE, TABLE_SEPARATOR_RE,
+} from './markdown';
 import type { WikilinkNote } from './markdown';
 
 const notes: WikilinkNote[] = [];
@@ -76,6 +79,109 @@ describe('parseMarkdown — fenced code blocks are inert', () => {
   });
 });
 
+describe('parseMarkdown — tables', () => {
+  it('renders a header, separator, and body rows as a table', () => {
+    const html = parseMarkdown('| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |');
+    expect(html).toContain('<table');
+    expect(html).toContain('<th style="border:1px solid #313244;padding:6px 10px;background:#1e1e2e">A</th>');
+    expect(html).toContain('<td style="border:1px solid #313244;padding:6px 10px">1</td>');
+    expect(html).toContain('<td style="border:1px solid #313244;padding:6px 10px">3</td>');
+  });
+
+  it('applies left/center/right alignment from the separator row', () => {
+    const html = parseMarkdown('| Def | L | C | R |\n| --- | :--- | :---: | ---: |\n| a | b | c | d |');
+    expect(html).toContain('text-align:left');
+    expect(html).toContain('text-align:center');
+    expect(html).toContain('text-align:right');
+    // A bare --- (no colon) has no alignment marker — no explicit text-align
+    // for that column, browser default applies.
+    const firstTh = html.slice(html.indexOf('<th'), html.indexOf('</th>'));
+    expect(firstTh).not.toContain('text-align');
+  });
+
+  it('renders a header-only table (no body rows) even with no trailing newline', () => {
+    const html = parseMarkdown('| Only header |\n| --- |');
+    expect(html).toContain('<thead><tr><th');
+    expect(html).toContain('<tbody></tbody>');
+  });
+
+  it('does not swallow the paragraph break after a table', () => {
+    // The table match must stop before the blank line, or \n\n->paragraph
+    // never sees two newlines and degrades to a bare <br>.
+    const html = parseMarkdown('| A |\n| --- |\n| 1 |\n\nAfter the table.');
+    expect(html).toContain('</table></p><p>After the table.</p>');
+  });
+
+  it('renders two tables separated by a blank line as two separate tables', () => {
+    const html = parseMarkdown('| A |\n| --- |\n| 1 |\n\n| B |\n| --- |\n| 2 |');
+    expect(html.match(/<table/g)?.length ?? 0).toBe(2);
+  });
+
+  it('leaves a stray | that is not part of a table as plain text', () => {
+    const html = parseMarkdown('this has a | pipe but is not a table');
+    expect(html).not.toContain('<table');
+    expect(html).toContain('this has a | pipe but is not a table');
+  });
+
+  it('does not treat a | inside a fenced code block as table syntax', () => {
+    const html = parseMarkdown('```\n| a | b |\n| --- | --- |\n```');
+    expect(html).not.toContain('<table');
+    expect(html).toContain('<pre');
+  });
+
+  it('escapes HTML in a table cell — no script execution from cell content', () => {
+    const html = parseMarkdown('| A |\n| --- |\n| <script>alert(1)</script> |');
+    expect(html).not.toContain('<script>');
+    expect(html).toContain('&lt;script&gt;');
+  });
+
+  it('applies inline formatting inside table cells', () => {
+    const html = parseMarkdown('| A |\n| --- |\n| **bold** and `code` |');
+    expect(html).toContain('<strong>bold</strong>');
+    expect(html).toContain('<code');
+  });
+
+  it('does not need an <ol>/<ul> wrapper to work, matching the rest of the list handling', () => {
+    // Documents intent, not a defect: verifies this doesn't regress if a
+    // future change adds real list wrappers.
+    const html = parseMarkdown('| A |\n| --- |\n| 1 |');
+    expect(html).not.toContain('<ul>');
+    expect(html).not.toContain('<ol>');
+  });
+
+  // TABLE_ROW_RE/TABLE_SEPARATOR_RE are a separate definition from
+  // renderTables' own block regex (see the comment above them) — these
+  // cases are what actually keeps the two from silently drifting apart.
+  // Anything that makes parseMarkdown emit a <table> here must also read as
+  // row+separator through the exported regexes, and vice versa.
+  describe('TABLE_ROW_RE / TABLE_SEPARATOR_RE agree with what renderTables renders', () => {
+    it('classifies a real header + separator pair the same way renderTables treats them', () => {
+      const header = '| A | B |', sep = '|---|---|';
+      expect(TABLE_ROW_RE.test(header)).toBe(true);
+      expect(TABLE_SEPARATOR_RE.test(sep)).toBe(true);
+      expect(parseMarkdown(`${header}\n${sep}\n| 1 | 2 |`)).toContain('<table');
+    });
+
+    it('rejects a stray | line with no separator, same as renderTables', () => {
+      const line = 'this has a | pipe but is not a table';
+      expect(TABLE_ROW_RE.test(line)).toBe(false); // no closing |
+      expect(parseMarkdown(line)).not.toContain('<table');
+    });
+
+    it('accepts alignment markers in the separator, same as renderTables', () => {
+      const sep = '|:---|:---:|---:|';
+      expect(TABLE_SEPARATOR_RE.test(sep)).toBe(true);
+      expect(parseMarkdown(`| A | B | C |\n${sep}\n| 1 | 2 | 3 |`)).toContain('text-align');
+    });
+
+    it('does not classify a separator row itself as a plain row match failure', () => {
+      // A separator IS also row-shaped (pipes at both ends) — renderTables'
+      // block regex relies on exactly this to consume it as the second line.
+      expect(TABLE_ROW_RE.test('|---|---|')).toBe(true);
+    });
+  });
+});
+
 describe('renderWithWikilinks — attribute escaping', () => {
   it('escapes quotes in the wikilink title so it cannot break out of data-title', () => {
     const html = renderWithWikilinks('[[foo&quot; onmouseover=&quot;alert(1)]]', notes);
@@ -137,6 +243,21 @@ describe('heading ids and extractHeadings', () => {
     expect(html).toContain('<h3 id="details">Details</h3>');
   });
 
+  it('renders h4-h6 the same way, matching the chunker\'s existing #{1,6} depth', () => {
+    const content = '#### Fourth\n\n##### Fifth\n\n###### Sixth';
+    const html = parseMarkdown(content);
+    expect(html).toContain('<h4 id="fourth">Fourth</h4>');
+    expect(html).toContain('<h5 id="fifth">Fifth</h5>');
+    expect(html).toContain('<h6 id="sixth">Sixth</h6>');
+    expect(extractHeadings(content).map(h => h.level)).toEqual([4, 5, 6]);
+  });
+
+  it('does not treat a 7th # as a heading', () => {
+    const content = '####### Not a heading';
+    expect(extractHeadings(content)).toEqual([]);
+    expect(parseMarkdown(content)).not.toContain('<h');
+  });
+
   it('slugifies cyrillic and strips punctuation', () => {
     const html = parseMarkdown('## Открыто — план (приоритет)');
     expect(html).toContain('<h2 id="открыто-план-приоритет">');
@@ -195,5 +316,36 @@ describe('heading ids and extractHeadings', () => {
   it('escapes quotes that survive slugification into the id attribute', () => {
     const html = parseMarkdown('# "quoted"');
     expect(html).toContain('<h1 id="quoted">');
+  });
+});
+
+describe('parseMarkdown — lists', () => {
+  it('renders a numbered list, keeping the number as visible text', () => {
+    const html = parseMarkdown('1. First\n2. Second');
+    expect(html).toContain('<li style="margin-left:16px;list-style:none">1. First</li>');
+    expect(html).toContain('<li style="margin-left:16px;list-style:none">2. Second</li>');
+  });
+
+  it('suppresses the default disc marker so no bullet sits next to the number', () => {
+    // A bare <li> outside <ul>/<ol> defaults to list-style-type: disc — without
+    // an explicit override it would show as "• 1. Item", not "1. Item".
+    expect(parseMarkdown('1. Item')).toContain('list-style:none');
+  });
+
+  it('indents a nested bullet deeper than its unindented parent', () => {
+    const html = parseMarkdown('- Parent\n  - Child');
+    expect(html).toContain('<li style="margin-left:16px">Parent</li>');
+    expect(html).toContain('<li style="margin-left:32px">Child</li>');
+  });
+
+  it('indents nested checkboxes the same way as nested bullets', () => {
+    const html = parseMarkdown('- [x] Parent\n  - [ ] Child');
+    expect(html).toContain('<li style="margin-left:16px">☑ Parent</li>');
+    expect(html).toContain('<li style="margin-left:32px">☐ Child</li>');
+  });
+
+  it('indents a nested numbered item, keeping list-style suppressed', () => {
+    const html = parseMarkdown('1. Parent\n  1. Child');
+    expect(html).toContain('<li style="margin-left:32px;list-style:none">1. Child</li>');
   });
 });

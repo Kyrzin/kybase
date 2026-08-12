@@ -49,30 +49,56 @@ export function useNotes(cb: UseNotesCallbacks) {
   const [editTitle, setEditTitle]     = useState('');
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
   const [syncError, setSyncError] = useState<string | null>(null);
+  // Set alongside syncError only for a genuine 409 (not a network error, not
+  // a self-healed race) — carries what the overwrite button needs to retry
+  // the save as a deliberate act: which note, and the server's current
+  // updated_at to satisfy the guard with (the stale one that just got
+  // refused won't).
+  const [conflict, setConflict] = useState<{ id: string; freshUpdatedAt: string } | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activeNote = notes.find(n => n.id === activeNoteId) ?? null;
+
+  // Lets saveActiveNote/flushOnHide read the current notes array from inside
+  // a stable callback (deps: [send], itself stable) instead of depending on
+  // `notes` directly — keeping those callbacks' identity constant across
+  // note-list churn (tag edits, moves, other tabs) so effects built on them
+  // don't reset unrelated timers every time something elsewhere changes.
+  const notesRef = useRef(notes);
+  useEffect(() => { notesRef.current = notes; }, [notes]);
+
+  type SendResult<T> = { ok: true; data: T } | { ok: false; status: number | null };
 
   /**
    * Every write here used to treat "request sent" as "server agreed": the
    * local state updated regardless of the reply. A note trashed in another
    * tab or by the agent answers 404, and the editor went on showing edits as
    * saved that never reached the database. Callers now only commit to local
-   * state when this returns true, and the failure reaches the screen.
+   * state when this reports ok, and the failure reaches the screen.
+   *
+   * Returns the parsed body on success (not just a boolean) — callers that
+   * write updated_at into local state need the server's value, not a client
+   * clock guess: a locally-fabricated timestamp would never match what the
+   * database actually stored, and comparing against it (see saveActiveNote's
+   * expected_updated_at) would reject every second save.
    */
-  const send = useCallback(async (
+  const send = useCallback(async <T = unknown>(
     path: string, init: RequestInit, whatFailed: string
-  ): Promise<boolean> => {
+  ): Promise<SendResult<T>> => {
     try {
       const res = await apiFetch(path, init);
-      if (res.ok) { setSyncError(null); return true; }
+      if (res.ok) {
+        setSyncError(null);
+        const data = res.status === 204 ? ({} as T) : (await res.json() as T);
+        return { ok: true, data };
+      }
       const body = await res.json().catch(() => ({}));
       const detail = typeof body.error === 'string' ? body.error : `HTTP ${res.status}`;
       setSyncError(`${whatFailed}: ${detail}`);
-      return false;
+      return { ok: false, status: res.status };
     } catch {
       setSyncError(`${whatFailed}: no connection to the server`);
-      return false;
+      return { ok: false, status: null };
     }
   }, []);
 
@@ -126,26 +152,84 @@ export function useNotes(cb: UseNotesCallbacks) {
     }).finally(() => setLoading(false));
   }, [expandAncestors, restoreFocus]);
 
+  /**
+   * Shared PATCH path for the three call sites that write {title, content}:
+   * the debounce timer, flushSave, and saveNote. Carries expected_updated_at
+   * (the note's last known updated_at) so a concurrent write — an agent's
+   * append_to_note, another tab — gets a 409 instead of being silently
+   * overwritten by a stale autosave.
+   *
+   * A 409 isn't automatically a real conflict: the most common cause is our
+   * own previous PATCH landing after this one raced ahead of it (retry,
+   * double-fire). Re-reading the note and accepting the new updated_at when
+   * its content already matches what we tried to write avoids flashing a
+   * conflict banner on every second save — only a genuine mismatch surfaces
+   * as syncError, and the in-progress edit buffer is never touched either way
+   * so nothing typed is lost while the user decides what to do.
+   */
+  const saveActiveNote = useCallback(async (
+    id: string, title: string, content: string, expected_updated_at?: string
+  ): Promise<boolean> => {
+    const guardAt = expected_updated_at ?? notesRef.current.find(n => n.id === id)?.updated_at;
+    const result = await send<{ updated_at: string }>(
+      `/api/notes/${id}`,
+      { method: 'PATCH', body: JSON.stringify({ title, content, expected_updated_at: guardAt }) },
+      'Not saved'
+    );
+    if (result.ok) {
+      setConflict(null);
+      setNotes(prev => prev.map(n =>
+        n.id === id ? { ...n, title, content, updated_at: result.data.updated_at } : n
+      ));
+      return true;
+    }
+    if (result.status === 409) {
+      const fresh: { title: string; content: string; updated_at: string } | null = await apiFetch(`/api/notes/${id}`)
+        .then(r => (r.ok ? r.json() : null))
+        .catch(() => null);
+      // The server trims title (zod .trim()) before storing it, so a title
+      // sent with incidental leading/trailing whitespace never equals what
+      // comes back — comparing against the same trimmed form the server
+      // would have produced, not the raw local value.
+      if (fresh && fresh.title === title.trim() && fresh.content === content) {
+        setSyncError(null);
+        setConflict(null);
+        setNotes(prev => prev.map(n =>
+          n.id === id ? { ...n, title, content, updated_at: fresh.updated_at } : n
+        ));
+        return true;
+      }
+      setSyncError('Note changed elsewhere since you opened it — your edits are kept here but not saved. Overwrite to keep your version, or reload to see the latest.');
+      // fresh may be null (the re-read itself failed, e.g. offline) — no
+      // updated_at to retry with yet, so overwrite stays unavailable until
+      // a save attempt manages to read one.
+      setConflict(fresh ? { id, freshUpdatedAt: fresh.updated_at } : null);
+      return false;
+    }
+    return false;
+  }, [send]);
+
+  /** Retry the in-progress edit as a deliberate overwrite, using the conflicting save's fresh updated_at as the guard. */
+  const overwriteConflict = useCallback(async (): Promise<boolean> => {
+    if (!conflict || conflict.id !== activeNoteId) return false;
+    return saveActiveNote(activeNoteId, editTitle, editContent, conflict.freshUpdatedAt);
+  }, [conflict, activeNoteId, editTitle, editContent, saveActiveNote]);
+
   // ── Auto-save debounce (800ms) ───────────────────────────────────────────────
   useEffect(() => {
     if (!editMode || !activeNoteId) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = setTimeout(async () => {
-      const ok = await send(
-        `/api/notes/${activeNoteId}`,
-        { method: 'PATCH', body: JSON.stringify({ title: editTitle, content: editContent }) },
-        'Not saved'
-      );
-      if (!ok) return;
-      setNotes(prev => prev.map(n =>
-        n.id === activeNoteId
-          ? { ...n, title: editTitle, content: editContent, updated_at: new Date().toISOString() }
-          : n
-      ));
+    const id = activeNoteId, title = editTitle, content = editContent;
+    // Cleared right as the timer fires (before the save even starts), so
+    // saveTimerRef.current stays a precise "an edit is waiting to be sent"
+    // flag — flushOnHide below relies on exactly that to know whether a
+    // keepalive PATCH is worth attempting.
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      saveActiveNote(id, title, content);
     }, 800);
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editTitle, editContent]);
+  }, [editTitle, editContent, editMode, activeNoteId, saveActiveNote]);
 
   const flushSave = useCallback(async () => {
     if (saveTimerRef.current) {
@@ -153,19 +237,74 @@ export function useNotes(cb: UseNotesCallbacks) {
       saveTimerRef.current = null;
     }
     if (editMode && activeNoteId) {
-      const ok = await send(
-        `/api/notes/${activeNoteId}`,
-        { method: 'PATCH', body: JSON.stringify({ title: editTitle, content: editContent }) },
-        'Not saved'
-      );
-      if (!ok) return;
-      setNotes(prev => prev.map(n =>
-        n.id === activeNoteId
-          ? { ...n, title: editTitle, content: editContent, updated_at: new Date().toISOString() }
-          : n
-      ));
+      await saveActiveNote(activeNoteId, editTitle, editContent);
     }
-  }, [editMode, activeNoteId, editTitle, editContent, send]);
+  }, [editMode, activeNoteId, editTitle, editContent, saveActiveNote]);
+
+  // ── Best-effort flush on tab hide/close ──────────────────────────────────────
+  // flushSave can't be used here: it awaits a normal fetch, and a request
+  // started from beforeunload/pagehide gets cancelled along with the page
+  // before the browser sends it. keepalive keeps the request alive past
+  // unload, but only fire-and-forget — there is no page left to receive or
+  // act on the response (a 409 here is silently unrecoverable, same as never
+  // having tried).
+  const editStateRef = useRef({ editMode, activeNoteId, editTitle, editContent });
+  useEffect(() => {
+    editStateRef.current = { editMode, activeNoteId, editTitle, editContent };
+  }, [editMode, activeNoteId, editTitle, editContent]);
+  useEffect(() => {
+    const flushOnHide = () => {
+      const { editMode, activeNoteId, editTitle, editContent } = editStateRef.current;
+      // saveTimerRef unset means either nothing changed since the last save,
+      // or a save is already in flight with this exact content — nothing to
+      // do either way.
+      if (!editMode || !activeNoteId || !saveTimerRef.current) return;
+      const expected_updated_at = notesRef.current.find(n => n.id === activeNoteId)?.updated_at;
+      const body = JSON.stringify({ title: editTitle, content: editContent, expected_updated_at });
+      // keepalive requests cap their total body around 64KB and throw
+      // synchronously past that — skipping it here is honest about the loss;
+      // attempting it would look like a save that never actually left.
+      if (new Blob([body]).size > 60_000) return;
+      // Cancel the still-armed debounce timer, not just the "pending" flag —
+      // left alone it fires later with this same stale snapshot and sends a
+      // redundant second PATCH behind this one's back.
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+      const id = activeNoteId;
+      fetch(`/api/notes/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        keepalive: true,
+      })
+        .then(r => (r.ok ? r.json() : null))
+        // visibilitychange fires on every tab switch, not just real unload —
+        // the page is very much alive to receive this. Without it,
+        // notesRef.current keeps the pre-flush updated_at forever, so the
+        // next save (typing again after switching back) guard-fails against
+        // a write that already landed — a conflict banner with no conflict.
+        .then((data: { updated_at: string } | null) => {
+          if (!data) return;
+          setNotes(prev => prev.map(n =>
+            n.id === id ? { ...n, title: editTitle, content: editContent, updated_at: data.updated_at } : n
+          ));
+        })
+        .catch(() => {});
+    };
+    // visibilitychange is the primary signal — it fires on tab switch/minimize
+    // and, unlike beforeunload, reliably fires on mobile Safari/Android too.
+    // pagehide and beforeunload are desktop-close fallbacks, kept in case hide
+    // is somehow missed.
+    const onVisibility = () => { if (document.visibilityState === 'hidden') flushOnHide(); };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', flushOnHide);
+    window.addEventListener('beforeunload', flushOnHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', flushOnHide);
+      window.removeEventListener('beforeunload', flushOnHide);
+    };
+  }, []);
 
   const { onNoteOpened } = cb;
   const selectNote = useCallback(async (id: string) => {
@@ -230,21 +369,12 @@ export function useNotes(cb: UseNotesCallbacks) {
   const saveNote = useCallback(async () => {
     if (!activeNote) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-    const ok = await send(
-      `/api/notes/${activeNote.id}`,
-      { method: 'PATCH', body: JSON.stringify({ title: editTitle, content: editContent }) },
-      'Not saved'
-    );
     // Staying in edit mode on failure keeps the text in front of the user
     // instead of dropping them into a read-only view of the older version.
+    const ok = await saveActiveNote(activeNote.id, editTitle, editContent);
     if (!ok) return;
-    setNotes(prev => prev.map(n =>
-      n.id === activeNote.id
-        ? { ...n, title: editTitle, content: editContent, updated_at: new Date().toISOString() }
-        : n
-    ));
     setEditMode(false);
-  }, [activeNote, editTitle, editContent, send]);
+  }, [activeNote, editTitle, editContent, saveActiveNote]);
 
   // ── Tags ───────────────────────────────────────────────────────────────────
   // Optimistic local update + PATCH. Tags don't change embeddings, so the
@@ -252,9 +382,16 @@ export function useNotes(cb: UseNotesCallbacks) {
   const saveTags = useCallback(async (tags: string[]) => {
     if (!activeNote) return;
     const id = activeNote.id;
+    const prevTags = activeNote.tags;
     setNotes(prev => prev.map(n => (n.id === id ? { ...n, tags } : n)));
-    await apiFetch(`/api/notes/${id}`, { method: 'PATCH', body: JSON.stringify({ tags }) });
-  }, [activeNote]);
+    // Not guarded by expected_updated_at: a tag edit doesn't touch title/
+    // content, so it can't collide with an agent's append_to_note the way
+    // the content PATCHes in saveActiveNote can.
+    const result = await send(`/api/notes/${id}`, { method: 'PATCH', body: JSON.stringify({ tags }) }, 'Tag not saved');
+    if (!result.ok) {
+      setNotes(prev => prev.map(n => (n.id === id ? { ...n, tags: prevTags } : n)));
+    }
+  }, [activeNote, send]);
 
   const { onTagInputConsumed } = cb;
   const addTag = useCallback((raw: string) => {
@@ -319,8 +456,8 @@ export function useNotes(cb: UseNotesCallbacks) {
     // still stands, so clearing the tree anyway would show a whole subtree as
     // gone while every note sat untouched in the database — and absent from
     // Trash too, since nothing was deleted.
-    const ok = await send(`/api/folders/${id}`, { method: 'DELETE' }, 'Folder not deleted');
-    if (!ok) return;
+    const result = await send(`/api/folders/${id}`, { method: 'DELETE' }, 'Folder not deleted');
+    if (!result.ok) return;
     // The server cascades to descendant folders (FK) and soft-deletes every
     // note in the whole subtree, not just this one folder — mirror that here
     // so orphaned subfolders/notes don't linger in the tree until a reload.
@@ -365,8 +502,8 @@ export function useNotes(cb: UseNotesCallbacks) {
 
   const deleteNote = useCallback(async (id: string) => {
     if (!confirm('Delete this note?')) return;
-    const ok = await send(`/api/notes/${id}`, { method: 'DELETE' }, 'Not deleted');
-    if (!ok) return;
+    const result = await send(`/api/notes/${id}`, { method: 'DELETE' }, 'Not deleted');
+    if (!result.ok) return;
     setNotes(prev => {
       const next = prev.filter(n => n.id !== id);
       if (activeNoteId === id) {
@@ -382,15 +519,19 @@ export function useNotes(cb: UseNotesCallbacks) {
   const { onMoveDone } = cb;
   const moveNote = useCallback(async (folderId: string | null) => {
     if (!activeNoteId) return;
-    await apiFetch(`/api/notes/${activeNoteId}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ folder_id: folderId }),
-    });
+    // Not guarded by expected_updated_at — same reasoning as saveTags: a
+    // folder move doesn't touch title/content.
+    const result = await send(
+      `/api/notes/${activeNoteId}`,
+      { method: 'PATCH', body: JSON.stringify({ folder_id: folderId }) },
+      'Not moved'
+    );
+    if (!result.ok) return;
     setNotes(prev => prev.map(n =>
       n.id === activeNoteId ? { ...n, folder_id: folderId } : n
     ));
     onMoveDone();
-  }, [activeNoteId, onMoveDone]);
+  }, [activeNoteId, onMoveDone, send]);
 
   // Re-parent a folder. The Sidebar already hides the folder's own subtree
   // from the target picker, so a 400 (server's cycle guard) is a fallback,
@@ -415,6 +556,7 @@ export function useNotes(cb: UseNotesCallbacks) {
   return {
     notes, setNotes, folders, setFolders, loading, activeNote, activeNoteId, setActiveNoteId,
     syncError, setSyncError,
+    canOverwriteConflict: conflict !== null && conflict.id === activeNoteId, overwriteConflict,
     editMode, setEditMode, editContent, setEditContent, editTitle, setEditTitle,
     expandedFolders, toggleFolder, expandAncestors,
     flushSave, selectNote, saveNote, saveTags, addTag, removeTag,

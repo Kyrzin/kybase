@@ -7,8 +7,8 @@ const note = (over: Partial<ExportNote>): ExportNote => ({
   content: 'body',
   folder_id: null,
   tags: [],
-  created_at: '2026-01-01T00:00:00.000Z',
-  updated_at: '2026-01-02T00:00:00.000Z',
+  created_at: new Date('2026-01-01T00:00:00.000Z'),
+  updated_at: new Date('2026-01-02T00:00:00.000Z'),
   ...over,
 });
 
@@ -67,7 +67,7 @@ describe('buildExportTree', () => {
 describe('parseFrontmatter', () => {
   it('round-trips an exported note, including its creation date', () => {
     const [file] = buildExportTree(
-      [note({ title: 'Q: "test"', tags: ['a', 'b'], content: '# Hi\n', created_at: '2026-03-05T12:30:00.000Z' })],
+      [note({ title: 'Q: "test"', tags: ['a', 'b'], content: '# Hi\n', created_at: new Date('2026-03-05T12:30:00.000Z') })],
       []
     );
     const parsed = parseFrontmatter(file.content);

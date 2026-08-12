@@ -11,8 +11,8 @@ export type ExportNote = {
   content: string;
   folder_id: string | null;
   tags: string[];
-  created_at: string;
-  updated_at: string;
+  created_at: Date;
+  updated_at: Date;
 };
 export type ExportFolder = { id: string; name: string; parent_id: string | null };
 export type ExportFile = { path: string; content: string };
@@ -27,17 +27,17 @@ export function sanitizeName(name: string): string {
 }
 
 function frontmatter(note: ExportNote): string {
-  // created_at/updated_at are typed as string but the pg driver actually
-  // hands back Date objects for timestamptz — a bare `${note.created_at}`
-  // would call Date.prototype.toString() ("Mon Jul 13 2026 11:17:09 GMT+0000
-  // (Coordinated Universal Time)"), not ISO 8601. new Date(...).toISOString()
-  // normalizes either way, whether the value arrives as Date or string.
+  // created_at/updated_at are Date objects (pg's driver default for
+  // timestamptz) — a bare `${note.created_at}` would call
+  // Date.prototype.toString() ("Mon Jul 13 2026 11:17:09 GMT+0000
+  // (Coordinated Universal Time)"), not ISO 8601, so always go through
+  // toISOString() explicitly.
   return [
     '---',
     `title: ${JSON.stringify(note.title)}`,
     `tags: ${JSON.stringify(note.tags ?? [])}`,
-    `created: ${new Date(note.created_at).toISOString()}`,
-    `updated: ${new Date(note.updated_at).toISOString()}`,
+    `created: ${note.created_at.toISOString()}`,
+    `updated: ${note.updated_at.toISOString()}`,
     '---',
     '',
     '',

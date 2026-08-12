@@ -44,6 +44,8 @@ const UpdateNoteSchema = z.object({
   content:   z.string().max(MAX_NOTE_CONTENT_CHARS).optional(),
   folder_id: z.string().uuid().nullable().optional(),
   tags:      z.array(z.string()).optional(),
+  expected_updated_at: z.string().optional()
+    .describe('ISO updated_at read before this edit; refuses the write (409) if it changed since'),
 });
 
 export async function PATCH(
@@ -57,6 +59,18 @@ export async function PATCH(
     return NextResponse.json({ error: parsed.error.format() }, { status: 400 });
   }
   if (parsed.data.content !== undefined) parsed.data.content = stripNulBytes(parsed.data.content);
+  const { expected_updated_at } = parsed.data;
+
+  // Two writers editing the same note otherwise silently overwrite one
+  // another — the browser's 800ms autosave is the common case, replaying an
+  // edit buffer that's stale the moment an MCP append_to_note lands. This
+  // read only shapes the 400 message; the guarantee is the condition carried
+  // into the UPDATE below (see `guard`), because anything checked here can
+  // change before the write lands. Mirrors update_note's guard in
+  // lib/mcp-server.ts.
+  if (expected_updated_at !== undefined && Number.isNaN(new Date(expected_updated_at).getTime())) {
+    return NextResponse.json({ error: 'expected_updated_at is not a valid timestamp' }, { status: 400 });
+  }
 
   const sets: string[] = [];
   const sqlParams: unknown[] = [];
@@ -89,10 +103,21 @@ export async function PATCH(
       const contentChanged = parsed.data.content !== undefined && parsed.data.content !== existing.content;
       const finalSets = titleChanged || contentChanged ? [...sets, 'embedding_pending = true'] : sets;
 
+      sqlParams.push(id);
+      const idParam = sqlParams.length;
+      // date_trunc to milliseconds: the column keeps microseconds, but the
+      // caller only ever saw three decimals, so comparing raw would refuse
+      // every honest write whose stored value carries a finer fraction.
+      let guard = '';
+      if (expected_updated_at !== undefined) {
+        sqlParams.push(expected_updated_at);
+        guard = `and date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $${sqlParams.length}::timestamptz)`;
+      }
+
       const { rows } = await client.query(
-        `update notes set ${finalSets.join(', ')} where id = $${sqlParams.length + 1} and deleted_at is null
+        `update notes set ${finalSets.join(', ')} where id = $${idParam} and deleted_at is null ${guard}
          returning ${NOTE_SELECT}`,
-        [...sqlParams, id]
+        sqlParams
       );
       const note = rows[0] ?? null;
       if (titleChanged && note) {
@@ -114,9 +139,16 @@ export async function PATCH(
     return NextResponse.json({ error: message }, { status: 500 });
   }
 
-  // Trashed or deleted between the existence check and the update: 0 rows
-  // changed, so there is nothing to return and nothing to index.
-  if (!result || !result.note) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  if (!result) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  if (!result.note) {
+    // The note was there a moment ago (locked above), so nothing matching
+    // now means the guard caught a write that landed in between — not that
+    // the note vanished.
+    if (expected_updated_at !== undefined) {
+      return NextResponse.json({ error: 'Note changed since you read it' }, { status: 409 });
+    }
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  }
 
   // Re-index asynchronously (note embedding + chunks)
   if (result.titleChanged || result.contentChanged) {

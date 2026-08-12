@@ -33,7 +33,7 @@ Giving an agent persistent memory usually means assembling it yourself:
 a notes app, an MCP bridge, an embedding pipeline, and sync between them.
 Kybase is that whole stack as one `docker compose up`:
 
-- **MCP-native** — 17 tools (`search_notes`, `get_note_with_links`, `get_graph`, `get_backlinks`, `append_to_note`, `indexing_status`, CRUD for notes/folders) over Streamable HTTP, with instructions that teach the agent to interlink notes properly
+- **MCP-native** — 17 tools (`search_notes`, `get_note` with optional wikilink resolution, `get_graph`, `get_backlinks`, `append_to_note`, `replace_in_note`, `indexing_status`, CRUD for notes/folders) over Streamable HTTP, with instructions that teach the agent to interlink notes properly
 - **Local semantic search** — pgvector + Ollama embeddings, private by default; hybrid RRF fusion with bilingual full-text search and chunked, excerpt-based results
 - **Agent-friendly graph** — explicit wikilink edges plus *semantic edges* computed from embedding similarity, so the agent discovers related notes that were never linked
 - **A real notes app, not a black box** — web editor with backlinks, graph view with a similarity slider, workspace focus mode; renaming a note rewrites its wikilinks everywhere
@@ -147,8 +147,7 @@ revocable OAuth token — see **Settings → Connected clients** in the web UI.
 | Tool | Category | What it does for the agent |
 |------|----------|------------------------------|
 | `search_notes` | Search | Hybrid RRF search (pgvector + bilingual FTS) with calibrated `relevance`/`confidence` per hit |
-| `get_note` | Read | Fetch a note by id or fuzzy title; windowed for large notes, with a heading outline |
-| `get_note_with_links` | Read | A note plus every note it `[[wikilinks]]` to, one level deep, in a single round-trip |
+| `get_note` | Read | Fetch a note by id or fuzzy title; windowed for large notes, with a heading outline. `resolve_links:true` also resolves every `[[wikilink]]` inside it, one level deep, in the same round-trip |
 | `list_notes` | Read | Newest-first listing, filterable by folder/tag/updated date |
 | `list_tags` | Read | All tags in use with counts, so the agent reuses existing tags instead of coining duplicates |
 | `list_folders` | Read | Flat folder list for reconstructing the tree |
@@ -156,7 +155,8 @@ revocable OAuth token — see **Settings → Connected clients** in the web UI.
 | `get_graph` | Graph | The knowledge graph — wikilink edges plus semantic edges — scoped by folder or by hop count from a root note |
 | `create_note` | Write | Create a note; embedding is generated automatically in the background |
 | `update_note` | Write | Update fields; supports `expected_updated_at` to refuse a stale overwrite instead of silently clobbering a concurrent edit |
-| `append_to_note` | Write | Append to a note or one section without resending the rest — safe under concurrent writers (row-locked) |
+| `append_to_note` | Write | Insert text at a note/section boundary (`at`: note/section start or end) without resending the rest — safe under concurrent writers (row-locked) |
+| `replace_in_note` | Write | Find-and-replace exact text; refuses unless the match count equals `expected_count`, so a loose `find` can't silently rewrite more than intended |
 | `delete_note` | Write | Soft-delete; recoverable with `restore_note` before it ages out of the trash |
 | `restore_note` | Write | Undo `delete_note` |
 | `create_folder` | Organize | Create a folder, optionally nested |

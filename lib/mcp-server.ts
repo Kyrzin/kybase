@@ -1,15 +1,16 @@
-// lib/mcp-server.ts — MCP server factory with 17 tools
+// lib/mcp-server.ts — MCP server factory with 18 tools
 // Uses @modelcontextprotocol/sdk McpServer (high-level API)
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { query, queryOne, withTransaction, isUniqueViolation, FOLDER_REPARENT_LOCK_KEY } from './db';
 import { softDeleteNote, restoreNote, trashFolderNotes, TRASH_RETENTION_DAYS } from './trash';
 import { escapeLike } from './sql';
-import { textSearch, semanticSearch, hybridSearch, makeExcerpt, bestSemanticScore, type SearchResult } from './search';
+import { textSearch, semanticSearch, hybridSearch, makeExcerpt, bestSemanticScore, type SearchResult, type HybridSearchResult } from './search';
 import { getMinSimilarity } from './embeddings';
 import { indexNoteAsync } from './indexing';
 import { extractAllWikilinks } from './wikilinks';
 import { buildGraph } from './graph-data';
+import { indexedForm } from './graph';
 import { extractHeadings, type Heading } from './markdown';
 import { MAX_NOTE_CONTENT_CHARS, stripNulBytes } from './types';
 
@@ -59,7 +60,7 @@ async function findNoteByTitle<T>(title: string, cols: string): Promise<T> {
       const candidates = rows.map(({ id, title: t }) => ({ id, title: t }));
       throw new Error(
         `"${title}" matches ${rows.length} notes — call get_note again with a full title or an id:\n` +
-        JSON.stringify(candidates, null, 2)
+        JSON.stringify(candidates)
       );
     }
   }
@@ -91,8 +92,7 @@ const LINKED_NOTE_CONTENT_LIMIT = 4_000;
 type FolderRow = { id: string; name: string; parent_id: string | null };
 
 /** Folder id -> full path (cycle-safe — mirrors lib/export.ts's folderPaths). */
-async function folderPathMap(): Promise<Map<string, string>> {
-  const folders = await query<FolderRow>('select id, name, parent_id from folders');
+function buildFolderPathMap(folders: FolderRow[]): Map<string, string> {
   const byId = new Map(folders.map((f) => [f.id, f]));
   const paths = new Map<string, string>();
   const resolve = (id: string, seen: Set<string>): string => {
@@ -107,6 +107,11 @@ async function folderPathMap(): Promise<Map<string, string>> {
   };
   folders.forEach((f) => resolve(f.id, new Set()));
   return paths;
+}
+
+async function folderPathMap(): Promise<Map<string, string>> {
+  const folders = await query<FolderRow>('select id, name, parent_id from folders');
+  return buildFolderPathMap(folders);
 }
 
 function withFolderPath<T extends { folder_id: string | null }>(
@@ -137,6 +142,71 @@ export function sectionRange(
   if (i === -1) return null;
   const next = headings.slice(i + 1).find(h => h.level <= headings[i].level);
   return { start: headings[i].offset, end: next ? next.offset : total };
+}
+
+export type AppendAt = 'note_end' | 'note_start' | 'section_end' | 'section_start' | 'before_section' | 'after_section';
+
+/**
+ * Where an addition lands for a given `at`. note_start is NOT offset 0:
+ * sectionRange's own end-of-section rule (next heading at the same rank or
+ * shallower) applied to the H1 itself would walk past every subsection all
+ * the way to the end of the note — a note's H1, and whatever intro sits
+ * under it (a format-legend blockquote, say), is the note's own lead-in, not
+ * a section to insert above. This lands right before the first heading
+ * NESTED under the H1 (a deeper level, not merely the next heading) instead,
+ * so a "new entries on top" journal still reads title-first. A note with
+ * only one heading, or none at all, has no such boundary — falls back to
+ * the end of the note.
+ */
+export function resolveInsertOffset(
+  content: string,
+  headings: Heading[],
+  at: AppendAt,
+  section: string | undefined
+): number {
+  if (at === 'note_end') return content.length;
+  if (at === 'note_start') {
+    if (headings.length === 0) return 0;
+    const nested = headings.slice(1).find(h => h.level > headings[0].level);
+    return nested ? nested.offset : content.length;
+  }
+  if (!section) throw new Error(`at: "${at}" requires section`);
+  const range = sectionRange(headings, content.length, section);
+  if (!range) {
+    const available = headings.map(h => h.text).join(' | ') || '(this note has no headings)';
+    throw new Error(`No section "${section}" in this note. Available: ${available}`);
+  }
+  if (at === 'before_section') return range.start;
+  if (at === 'section_end' || at === 'after_section') return range.end;
+  // section_start: right after the heading's own line, before its body/subsections.
+  const lineEnd = content.indexOf('\n', range.start);
+  return lineEnd === -1 ? content.length : lineEnd + 1;
+}
+
+/**
+ * Splices `addition` into `content` at `offset`, blank-line-separated from
+ * whatever is on either side. Exactly reproduces append_to_note's original
+ * two shapes (offset = content.length for a whole-note append, offset =
+ * range.end for a section append) as special cases of one rule, so neither
+ * had to change to gain the other four `at` positions.
+ */
+export function insertAddition(content: string, offset: number, addition: string): string {
+  const head = content.slice(0, offset).trimEnd();
+  const tail = content.slice(offset);
+  return `${head}\n\n${addition}\n${tail ? `\n${tail}` : ''}`;
+}
+
+/** Non-overlapping literal occurrences of `needle` in `haystack`. */
+export function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  let count = 0;
+  let pos = 0;
+  for (;;) {
+    const i = haystack.indexOf(needle, pos);
+    if (i === -1) return count;
+    count++;
+    pos = i + needle.length;
+  }
 }
 
 export function windowContent<T extends { content: string }>(
@@ -206,7 +276,7 @@ export function createMcpServer(): McpServer {
       updated_after:  z.string().optional().describe('ISO timestamp — only notes updated at or after this'),
       updated_before: z.string().optional().describe('ISO timestamp — only notes updated at or before this'),
       sort:      z.enum(['created', 'updated']).default('updated').describe('Which date drives the ordering'),
-      limit:     z.number().int().min(1).max(200).default(50),
+      limit:     z.number().int().min(1).max(200).default(20),
       trashed:   z.boolean().default(false).describe('List soft-deleted notes instead of live ones'),
     },
     async ({ folder_id, tag, created_after, created_before, updated_after, updated_before, sort, limit, trashed }) => {
@@ -215,7 +285,7 @@ export function createMcpServer(): McpServer {
           'select id, title, folder_id, deleted_at from notes where deleted_at is not null order by deleted_at desc limit $1',
           [limit]
         );
-        return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+        return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] };
       }
 
       const conds: string[] = ['deleted_at is null'];
@@ -239,7 +309,7 @@ export function createMcpServer(): McpServer {
         ),
         folderPathMap(),
       ]);
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data.map((n) => withFolderPath(n, paths)), null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data.map((n) => withFolderPath(n, paths))) }] };
     }
   );
 
@@ -253,7 +323,13 @@ export function createMcpServer(): McpServer {
     'content_truncated and content_total_length in the response, and pass next_offset back as ' +
     '`offset` to fetch the rest. Every response carries `headings` — the H1–H3 outline with ' +
     'character offsets, so a truncated note still shows what is in the part you did not get. ' +
-    'Jump there with that offset, or name it in `section` to get that heading and its body alone.',
+    'Jump there with that offset, or name it in `section` to get that heading and its body alone. ' +
+    'Pass `resolve_links: true` to also resolve [[wikilinks]] inside it one level deep — use when ' +
+    'you need a note\'s linked context without extra round-trips. Each linked note comes back as ' +
+    'id/title/folder_path only by default; pass include_content:true for the full text of each ' +
+    `(expensive if the note links to many others), capped at ${LINKED_NOTE_CONTENT_LIMIT} chars — call ` +
+    'get_note on a specific id for its full text. Unresolved links (targets not found) are listed ' +
+    'separately.',
     {
       id:      z.string().uuid().optional(),
       title:   z.string().optional(),
@@ -262,19 +338,59 @@ export function createMcpServer(): McpServer {
       offset:  z.number().int().min(0).default(0).describe('Character offset into content to start from'),
       limit:   z.number().int().min(1000).max(200_000).default(DEFAULT_CONTENT_LIMIT)
         .describe('Max characters of content to return'),
+      resolve_links:   z.boolean().default(false)
+        .describe('Also resolve [[wikilinks]] inside the note one level deep'),
+      include_content: z.boolean().default(false)
+        .describe('With resolve_links: include full text of linked notes, not just id/title/folder_path'),
     },
-    async ({ id, title, section, offset, limit }) => {
+    async ({ id, title, section, offset, limit, resolve_links, include_content }) => {
       if (!id && !title) throw new Error('Provide either id or title');
       const cols = 'id, title, content, folder_id, tags, created_at, updated_at';
       // findNoteByTitle escapes %/_ at every stage, so wildcards in a real
       // title can't widen the match beyond the step being attempted.
       const [data, paths] = await Promise.all([
         id
-          ? queryOne<{ content: string; folder_id: string | null }>(`select ${cols} from notes where id = $1 and deleted_at is null`, [id])
-          : findNoteByTitle<{ content: string; folder_id: string | null }>(title!, cols),
+          ? queryOne<{ id: string; title: string; content: string; folder_id: string | null }>(`select ${cols} from notes where id = $1 and deleted_at is null`, [id])
+          : findNoteByTitle<{ id: string; title: string; content: string; folder_id: string | null }>(title!, cols),
         folderPathMap(),
       ]);
       if (!data) throw new Error('Note not found');
+
+      // Links are resolved from the note's full, unwindowed content — same
+      // as the old dedicated tool did — so requesting a `section` narrows
+      // what comes back as `content` without narrowing which links count.
+      let linkFields: { linked_notes: Record<string, unknown>[]; unresolved_links: string[] } | null = null;
+      if (resolve_links) {
+        const linkTargets = extractAllWikilinks(data.content);
+        const resolved: Record<string, unknown>[] = [];
+        const missing: string[] = [];
+        // [[Guide]] and [[guide]] are one note — titles are unique
+        // case-insensitively, so resolve each spelling only once or the
+        // agent reads the same note twice and pays for it twice.
+        const seen = new Set<string>();
+        await Promise.all(
+          linkTargets.map(async (target) => {
+            const key = target.toLowerCase();
+            if (key === data.title.toLowerCase()) return;
+            if (seen.has(key)) return;
+            seen.add(key);
+            const linked = await queryOne<{ id: string; title: string; content: string; folder_id: string | null }>(
+              'select id, title, content, folder_id, tags, updated_at from notes where title ilike $1 and deleted_at is null',
+              [escapeLike(target)]
+            );
+            if (!linked) { missing.push(target); return; }
+            resolved.push(
+              include_content
+                ? withFolderPath(windowContent(linked, 0, LINKED_NOTE_CONTENT_LIMIT), paths)
+                : withFolderPath(
+                    { id: linked.id, title: linked.title, folder_id: linked.folder_id, content_total_length: linked.content.length },
+                    paths
+                  )
+            );
+          })
+        );
+        linkFields = { linked_notes: resolved, unresolved_links: missing };
+      }
 
       // The outline travels with every response: on a windowed note it is the
       // only way to know what sits in the part that did not come back.
@@ -290,7 +406,7 @@ export function createMcpServer(): McpServer {
         body = { ...data, content: data.content.slice(range.start, range.end) };
       }
       const windowed = withFolderPath(windowContent(body, offset, limit), paths);
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ ...windowed, headings }, null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ ...windowed, headings, ...linkFields }) }] };
     }
   );
 
@@ -309,14 +425,21 @@ export function createMcpServer(): McpServer {
     },
     async ({ title, content: rawContent, folder_id, tags }) => {
       const content = stripNulBytes(rawContent);
-      let note;
+      // Echoing the content back would double its cost for nothing — the
+      // caller just sent it and knows what it is. length(content) lets it
+      // confirm the write landed intact without paying for the text again.
+      let note: { id: string; title: string; folder_id: string | null; tags: string[]; created_at: string; content_length: number } | null;
+      let paths: Map<string, string>;
       try {
-        note = await queryOne<{ id: string }>(
-          `insert into notes (title, content, folder_id, tags, embedding_pending)
-           values ($1, $2, $3, $4, true)
-           returning id, title, content, folder_id, tags, created_at`,
-          [title, content, folder_id ?? null, tags]
-        );
+        [note, paths] = await Promise.all([
+          queryOne<{ id: string; title: string; folder_id: string | null; tags: string[]; created_at: string; content_length: number }>(
+            `insert into notes (title, content, folder_id, tags, embedding_pending)
+             values ($1, $2, $3, $4, true)
+             returning id, title, folder_id, tags, created_at, length(content) as content_length`,
+            [title, content, folder_id ?? null, tags]
+          ),
+          folderPathMap(),
+        ]);
       } catch (err) {
         if (isUniqueViolation(err)) throw new Error(`A note titled "${title}" already exists — update it or pick another title`);
         throw err;
@@ -326,7 +449,7 @@ export function createMcpServer(): McpServer {
       // background index (note embedding + chunks)
       indexNoteAsync(note.id, title, content);
 
-      return { content: [{ type: 'text' as const, text: JSON.stringify(note, null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify(withFolderPath(note, paths)) }] };
     }
   );
 
@@ -350,9 +473,12 @@ export function createMcpServer(): McpServer {
     },
     async ({ id, title, content: rawContent, folder_id, tags, expected_updated_at }) => {
       const content = rawContent !== undefined ? stripNulBytes(rawContent) : undefined;
-      const existing = await queryOne<{ title: string; content: string; updated_at: string }>(
-        'select title, content, updated_at from notes where id = $1 and deleted_at is null', [id]
-      );
+      const [existing, paths] = await Promise.all([
+        queryOne<{ title: string; content: string; updated_at: string }>(
+          'select title, content, updated_at from notes where id = $1 and deleted_at is null', [id]
+        ),
+        folderPathMap(),
+      ]);
       if (!existing) throw new Error('Note not found');
 
       // Two sessions editing the same note otherwise silently overwrite one
@@ -392,7 +518,8 @@ export function createMcpServer(): McpServer {
         guard = `and date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $${params.length}::timestamptz)`;
       }
       type UpdateResult = {
-        note: Record<string, unknown> | null; changed: boolean; newTitle: string; newContent: string;
+        note: { id: string; title: string; folder_id: string | null; tags: string[]; updated_at: string; content_length: number } | null;
+        changed: boolean; newTitle: string; newContent: string;
       };
       let result: UpdateResult | null;
       try {
@@ -416,10 +543,10 @@ export function createMcpServer(): McpServer {
             (content !== undefined && content !== locked.content);
           const finalSets = changed ? [...sets, 'embedding_pending = true'] : sets;
 
-          const { rows } = await client.query(
+          const { rows } = await client.query<{ id: string; title: string; folder_id: string | null; tags: string[]; updated_at: string; content_length: number }>(
             `update notes set ${finalSets.join(', ')}
              where id = $${idParam} and deleted_at is null ${guard}
-             returning id, title, content, folder_id, tags, updated_at`,
+             returning id, title, folder_id, tags, updated_at, length(content) as content_length`,
             params
           );
           const note = rows[0] ?? null;
@@ -439,24 +566,30 @@ export function createMcpServer(): McpServer {
       if (result.changed) {
         indexNoteAsync(id, result.newTitle, result.newContent);
       }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(result.note, null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify(withFolderPath(result.note, paths)) }] };
     }
   );
 
   // ── append_to_note ───────────────────────────────────────────────────────
   server.tool(
     'append_to_note',
-    'Add text to the end of a note, or to the end of one section, without resending the rest — ' +
-    'prefer it over update_note for journals, logs and running lists. A blank line separates your ' +
-    'text from what was there. Re-embeds in the background like any content change.',
+    'Add text to a note without resending the rest — prefer it over update_note for journals, logs ' +
+    'and running lists. A blank line separates your text from what was there. Re-embeds in the ' +
+    'background like any content change.',
     {
       id:      z.string().uuid().optional(),
       title:   z.string().optional().describe('Alternative to id; resolved like get_note'),
       content: z.string().min(1).max(MAX_NOTE_CONTENT_CHARS),
       section: z.string().optional()
-        .describe('Append at the end of this section (heading text or slug) instead of the note'),
+        .describe('Target this section (heading text or slug) instead of the whole note'),
+      at: z.enum(['note_end', 'note_start', 'section_end', 'section_start', 'before_section', 'after_section'])
+        .optional()
+        .describe(
+          'Default section_end if section given, else note_end. note_start is after the H1/intro, ' +
+          'before its first nested heading — not offset 0.'
+        ),
     },
-    async ({ id, title, content, section }) => {
+    async ({ id, title, content, section, at }) => {
       if (!id && !title) throw new Error('Provide either id or title');
       const found = id
         ? await queryOne<{ id: string }>(
@@ -465,6 +598,7 @@ export function createMcpServer(): McpServer {
       if (!found) throw new Error('Note not found');
 
       const addition = stripNulBytes(content).trimEnd();
+      const effectiveAt: AppendAt = at ?? (section !== undefined ? 'section_end' : 'note_end');
       // Read and write inside one transaction with the row locked. Appending
       // is read-modify-write, so two sessions logging at once would otherwise
       // both build on the same text and the first one's line would vanish —
@@ -477,22 +611,9 @@ export function createMcpServer(): McpServer {
         const existing = rows[0];
         if (!existing) throw new Error('Note not found');
 
-        let next: string;
-        if (section === undefined) {
-          next = `${existing.content.trimEnd()}\n\n${addition}\n`;
-        } else {
-          const headings = extractHeadings(existing.content);
-          const range = sectionRange(headings, existing.content.length, section);
-          if (!range) {
-            const available = headings.map(h => h.text).join(' | ') || '(this note has no headings)';
-            throw new Error(`No section "${section}" in this note. Available: ${available}`);
-          }
-          // Land before the next heading, not after it, or the text reads as
-          // part of the following section for everyone who opens the note.
-          const head = existing.content.slice(0, range.end).trimEnd();
-          const tail = existing.content.slice(range.end);
-          next = `${head}\n\n${addition}\n${tail ? `\n${tail}` : ''}`;
-        }
+        const headings = extractHeadings(existing.content);
+        const offset = resolveInsertOffset(existing.content, headings, effectiveAt, section);
+        const next = insertAddition(existing.content, offset, addition);
         if (next.length > MAX_NOTE_CONTENT_CHARS) {
           throw new Error(`Appending would exceed the ${MAX_NOTE_CONTENT_CHARS}-character limit for a note`);
         }
@@ -510,7 +631,89 @@ export function createMcpServer(): McpServer {
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ ...note, appended_chars: addition.length, content_total_length: next.length }, null, 2),
+          text: JSON.stringify({ ...note, appended_chars: addition.length, content_total_length: next.length }),
+        }],
+      };
+    }
+  );
+
+  // ── replace_in_note ──────────────────────────────────────────────────────
+  server.tool(
+    'replace_in_note',
+    'Replace exact text in a note without resending the rest. Refuses unless find occurs exactly ' +
+    'expected_count times (default 1) — protects against a loose find rewriting more than intended.',
+    {
+      id:      z.string().uuid().optional(),
+      title:   z.string().optional().describe('Alternative to id; resolved like get_note'),
+      find:    z.string().min(1),
+      replace: z.string(),
+      expected_count: z.number().int().min(1).default(1),
+      expected_updated_at: z.string().optional()
+        .describe('ISO updated_at from when you read the note; refuses the write if it changed since'),
+    },
+    async ({ id, title, find, replace, expected_count, expected_updated_at }) => {
+      if (!id && !title) throw new Error('Provide either id or title');
+      const found = id
+        ? await queryOne<{ id: string }>(
+            'select id from notes where id = $1 and deleted_at is null', [id])
+        : await findNoteByTitle<{ id: string }>(title!, 'id');
+      if (!found) throw new Error('Note not found');
+
+      if (expected_updated_at !== undefined && Number.isNaN(new Date(expected_updated_at).getTime())) {
+        throw new Error('expected_updated_at is not a valid timestamp');
+      }
+
+      const findText = stripNulBytes(find);
+      const replaceText = stripNulBytes(replace);
+      // Read and write inside one transaction with the row locked, same as
+      // append_to_note — this is read-modify-write too, and find/replace is
+      // no safer against a lost concurrent write than a plain append is.
+      const result = await withTransaction(async (client) => {
+        const { rows } = await client.query<{ title: string; content: string; updated_at: string }>(
+          'select title, content, updated_at from notes where id = $1 and deleted_at is null for update',
+          [found.id]
+        );
+        const existing = rows[0];
+        if (!existing) throw new Error('Note not found');
+
+        // Optional and secondary to the count check below: the row is
+        // already locked at this point, so comparing here (not pushed into
+        // the UPDATE's WHERE like update_note's guard) is already atomic —
+        // no concurrent write can land between this check and ours.
+        if (expected_updated_at !== undefined
+            && new Date(expected_updated_at).getTime() !== new Date(existing.updated_at).getTime()) {
+          throw new Error('Note changed since you read it — re-read it with get_note and reapply your edit');
+        }
+
+        const count = countOccurrences(existing.content, findText);
+        if (count !== expected_count) {
+          throw new Error(
+            count === 0
+              ? `find text not found in this note (expected ${expected_count} occurrence${expected_count === 1 ? '' : 's'})`
+              : `find text occurs ${count} time${count === 1 ? '' : 's'} in this note, expected ${expected_count} — ` +
+                'narrow find or adjust expected_count'
+          );
+        }
+
+        const next = existing.content.split(findText).join(replaceText);
+        if (next.length > MAX_NOTE_CONTENT_CHARS) {
+          throw new Error(`Replacing would exceed the ${MAX_NOTE_CONTENT_CHARS}-character limit for a note`);
+        }
+
+        const updated = await client.query<{ id: string; title: string; updated_at: string }>(
+          `update notes set content = $1, embedding_pending = true where id = $2
+           returning id, title, updated_at`,
+          [next, found.id]
+        );
+        return { note: updated.rows[0], title: existing.title, next, count };
+      });
+
+      const { note, next, count } = result;
+      indexNoteAsync(found.id, result.title, next);
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ ...note, replaced_count: count, content_length: next.length }),
         }],
       };
     }
@@ -558,20 +761,13 @@ export function createMcpServer(): McpServer {
     'Search notes. type: "text" (fast), "semantic" (meaning-based), "hybrid" (best, uses RRF). ' +
     'Hybrid is the right default; prefer type=text for exact identifiers, code fragments, or quoted ' +
     'phrases, where FTS beats meaning-matching. ' +
-    'Returns short excerpts, not full notes — call get_note with the id to read a full note. ' +
-    'Every hit carries `relevance` (0..1, normalized against model-calibrated anchors) and ' +
-    '`confidence` ("strong" | "moderate" | "weak") — use THESE to decide whether the results ' +
-    'suffice to answer: strong hits can be quoted directly, moderate ones deserve a get_note check, ' +
-    'an all-weak page means reformulate. Relevance is comparable within one query\'s results, not ' +
-    'across queries or models. The raw fields remain for debugging: `score` is RRF rank fusion ' +
-    '(hybrid sort order, NOT relevance), text_score is FTS ts_rank, semantic_score is raw cosine. ' +
-    'Optional filters (folder_id, tag, created_after/before, updated_after/before) narrow to notes ' +
-    'matching ALL given ones. created_after answers "what is new" (creation date, fixed at import/' +
-    'creation time); updated_after answers "what changed since I was last here" (moves on every ' +
-    'real edit) — pick the one that matches the question, they are not interchangeable. ' +
-    'An empty semantic/hybrid result includes threshold/best_score/pending_embeddings ' +
-    'so you can tell "nothing this relevant exists" from "just under the threshold" from "embeddings ' +
-    'not generated yet" — a bare [] can\'t distinguish those.',
+    'Returns short excerpts, not full notes — call get_note on the top 1-2 hits to read them. ' +
+    'Each hit carries `relevance` (0..1) and `confidence` ("strong"/"moderate"/"weak") — strong hits ' +
+    'can be quoted directly, weak means reformulate. Comparable within one query\'s results only. ' +
+    'Filters: folder_id, tag, created_after/before (when a note was made), updated_after/before ' +
+    '(when it last changed) — these are NOT interchangeable. ' +
+    'An empty semantic/hybrid result includes threshold/best_score/pending_embeddings so you can ' +
+    'tell "nothing relevant" from "just under threshold" from "embeddings not generated yet".',
     {
       query:          z.string().min(1),
       type:           z.enum(['text', 'semantic', 'hybrid']).default('hybrid'),
@@ -589,13 +785,13 @@ export function createMcpServer(): McpServer {
         createdAfter: created_after, createdBefore: created_before,
         updatedAfter: updated_after, updatedBefore: updated_before,
       };
-      let results: SearchResult[];
+      let results: SearchResult[] | HybridSearchResult[];
       if      (type === 'semantic') results = await semanticSearch(q, limit, filters);
       else if (type === 'hybrid')   results = await hybridSearch(q, limit, filters);
       else                          results = await textSearch(q, limit, filters);
 
       if (results.length > 0 || type === 'text') {
-        return { content: [{ type: 'text' as const, text: JSON.stringify(results, null, 2) }] };
+        return { content: [{ type: 'text' as const, text: JSON.stringify(results) }] };
       }
 
       const [threshold, bestScore, pendingRows] = await Promise.all([
@@ -611,7 +807,7 @@ export function createMcpServer(): McpServer {
             threshold,
             best_score: bestScore,
             pending_embeddings: pendingRows[0]?.count ?? 0,
-          }, null, 2),
+          }),
         }],
       };
     }
@@ -620,13 +816,9 @@ export function createMcpServer(): McpServer {
   // ── indexing_status ──────────────────────────────────────────────────────
   server.tool(
     'indexing_status',
-    'Report semantic-index progress across the vault: how many live notes are embedded vs still ' +
-    'pending. Semantic and hybrid search — and the semantic graph edges — only see indexed notes; ' +
-    'a pending note is still found by type=text search but is invisible to meaning-based search ' +
-    'until it is embedded (automatic in the background after create/update or a provider switch). ' +
-    'Use this to tell "still indexing" from "done": complete=true means every note is searchable ' +
-    'semantically. A pending count that stays high while nothing is being edited points at an ' +
-    'embedding failure (e.g. Ollama unreachable) — check the server logs.',
+    'Semantic-index progress: total/indexed/pending notes, complete=true when pending=0. Pending ' +
+    'notes are still found by text search but not semantic/hybrid until embedded (automatic, ' +
+    'background). Stuck pending count while nothing is being edited = check Ollama/server logs.',
     {},
     async () => {
       const row = await queryOne<{ total: number; pending: number }>(
@@ -639,7 +831,7 @@ export function createMcpServer(): McpServer {
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ total, indexed: total - pending, pending, complete: pending === 0 }, null, 2),
+          text: JSON.stringify({ total, indexed: total - pending, pending, complete: pending === 0 }),
         }],
       };
     }
@@ -648,28 +840,39 @@ export function createMcpServer(): McpServer {
   // ── list_tags ────────────────────────────────────────────────────────────
   server.tool(
     'list_tags',
-    'List every tag in use with the number of notes carrying it, most-used first. Call this before ' +
-    'tagging a note and reuse an existing tag when one fits, rather than coining a near-duplicate — ' +
-    'the vault has no tag synonyms, so "workflow" and "воркфлоу" are two separate tags that fragment ' +
-    'the same concept.',
-    {},
-    async () => {
+    'List tags in use with the number of notes carrying each, most-used first, capped at `limit` ' +
+    '(default 40). Call this before tagging a note and reuse an existing tag when one fits, rather ' +
+    'than coining a near-duplicate — the vault has no tag synonyms, so "workflow" and "воркфлоу" are ' +
+    'two separate tags that fragment the same concept. The default cuts off the one-off tail: a tag ' +
+    'used once is not one worth reusing, so it is not shown unless you raise limit.',
+    {
+      limit: z.number().int().min(1).max(1000).default(40).describe('Max tags to return, most-used first'),
+    },
+    async ({ limit }) => {
       const rows = await query<{ tag: string; count: number }>(
         `select unnest(tags) as tag, count(*)::int as count
-         from notes where deleted_at is null group by 1 order by count desc, tag`
+         from notes where deleted_at is null group by 1 order by count desc, tag limit $1`,
+        [limit]
       );
-      return { content: [{ type: 'text' as const, text: JSON.stringify(rows, null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify(rows) }] };
     }
   );
 
   // ── list_folders ─────────────────────────────────────────────────────────
   server.tool(
     'list_folders',
-    'List all folders (flat array, use parent_id to reconstruct tree).',
+    'List all folders (flat array) with the full path already resolved — no need to walk parent_id ' +
+    'yourself. Pass a folder\'s own id as parent_id to create_folder/update_folder to nest under it.',
     {},
     async () => {
-      const data = await query('select * from folders order by name');
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      const data = await query<FolderRow>('select id, name, parent_id from folders order by name');
+      const paths = buildFolderPathMap(data);
+      // parent_id dropped: path already encodes the full chain, and creating
+      // a subfolder only ever needs a folder's own id, never its parent's.
+      // name stays — folder names aren't barred from containing "/", so a
+      // literal one there would be indistinguishable from a path separator.
+      const result = data.map((f) => ({ id: f.id, name: f.name, path: paths.get(f.id) ?? f.name }));
+      return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
     }
   );
 
@@ -692,7 +895,7 @@ export function createMcpServer(): McpServer {
         if (isUniqueViolation(err)) throw new Error(`A folder named "${name}" already exists in this location`);
         throw err;
       }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] };
     }
   );
 
@@ -743,7 +946,7 @@ export function createMcpServer(): McpServer {
         return rows[0] ?? null;
       });
       if (!data) throw new Error('Folder not found');
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] };
     }
   );
 
@@ -820,77 +1023,9 @@ export function createMcpServer(): McpServer {
             results,
             total,
             ...(offset + limit < total ? { next_offset: offset + limit } : {}),
-          }, null, 2),
+          }),
         }],
       };
-    }
-  );
-
-  // ── get_note_with_links ──────────────────────────────────────────────────
-  server.tool(
-    'get_note_with_links',
-    // The tail below is ONE template literal on purpose: this Next build drops the
-    // trailing static text of a template literal that is `+`-concatenated with
-    // another interpolated one, which silently shipped "default 200004000 chars"
-    // to every agent. Keep the two limits inside a single literal.
-    'Get a note and automatically resolve all [[wikilinks]] inside it (1 level deep). Returns the ' +
-    'main note plus the content of every linked note found in the knowledge base. Unresolved links ' +
-    '(notes not found) are listed separately. The main note is resolved by title exactly like ' +
-    'get_note (exact, then prefix, then substring) and its content is windowed the same way ' +
-    `(limit/offset, default ${DEFAULT_CONTENT_LIMIT} chars); each linked note is capped at ${LINKED_NOTE_CONTENT_LIMIT} chars — call get_note on its id for the full text.`,
-    {
-      id:     z.string().uuid().optional(),
-      title:  z.string().optional(),
-      offset: z.number().int().min(0).default(0).describe('Character offset into the main note\'s content'),
-      limit:  z.number().int().min(1000).max(200_000).default(DEFAULT_CONTENT_LIMIT)
-        .describe('Max characters of the main note\'s content to return'),
-    },
-    async ({ id, title, offset, limit }) => {
-      if (!id && !title) throw new Error('Provide either id or title');
-
-      // Fetch the main note
-      const cols = 'id, title, content, folder_id, tags, created_at, updated_at';
-      const [note, paths] = await Promise.all([
-        id
-          ? queryOne<{ id: string; title: string; content: string; folder_id: string | null }>(
-              `select ${cols} from notes where id = $1 and deleted_at is null`, [id])
-          : findNoteByTitle<{ id: string; title: string; content: string; folder_id: string | null }>(title!, cols),
-        folderPathMap(),
-      ]);
-      if (!note) throw new Error('Note not found');
-
-      // Extract all wikilink targets
-      const linkTargets = extractAllWikilinks(note.content);
-
-      // Resolve each link by title (case-insensitive), skip self
-      const resolved: Record<string, unknown>[] = [];
-      const missing: string[] = [];
-      // [[Guide]] and [[guide]] are one note — titles are unique
-      // case-insensitively, so resolve each spelling only once or the agent
-      // reads the same note twice and pays for it twice.
-      const seen = new Set<string>();
-
-      await Promise.all(
-        linkTargets.map(async (target) => {
-          const key = target.toLowerCase();
-          if (key === note.title.toLowerCase()) return;
-          if (seen.has(key)) return;
-          seen.add(key);
-          const linked = await queryOne<{ content: string; folder_id: string | null }>(
-            'select id, title, content, folder_id, tags, updated_at from notes where title ilike $1 and deleted_at is null',
-            [escapeLike(target)]
-          );
-          if (linked) resolved.push(withFolderPath(windowContent(linked, 0, LINKED_NOTE_CONTENT_LIMIT), paths));
-          else        missing.push(target);
-        })
-      );
-
-      const result = {
-        note: withFolderPath(windowContent(note, offset, limit), paths),
-        linked_notes: resolved,
-        unresolved_links: missing,
-      };
-      return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] };
     }
   );
 
@@ -899,10 +1034,13 @@ export function createMcpServer(): McpServer {
     'get_graph',
     'Get the knowledge graph: note nodes, directed edges from [[wikilinks]], and undirected ' +
     'semantic_edges (embedding cosine similarity) between related notes that may lack explicit links. ' +
-    'Unfiltered, this returns the ENTIRE vault in one response — fine for small vaults, but it will ' +
-    'stop fitting in context as the vault grows. Scope it with folder_id (a subtree) or root_title+depth ' +
-    '(the neighborhood around one note) when you only need part of the graph. Node titles in the result ' +
-    'are valid [[wikilink]] targets — but only within whatever scope you asked for.',
+    'Nodes are `{i, id, t}` (t = title); edges and semantic_edges reference nodes by `i`, not id — ' +
+    '`["edges"][0] = [2, 5]` means nodes[2] links to nodes[5], and a semantic_edges triple\'s third ' +
+    'number is the cosine score. Unfiltered, this returns the ENTIRE vault in one response — fine for ' +
+    'small vaults, but it will stop fitting in context as the vault grows. Scope it with folder_id (a ' +
+    'subtree) or root_title+depth (the neighborhood around one note) when you only need part of the ' +
+    'graph. Node titles in the result are valid [[wikilink]] targets — but only within whatever scope ' +
+    'you asked for.',
     {
       folder_id:        z.string().uuid().optional()
         .describe('Restrict to notes in this folder and its descendant folders'),
@@ -922,7 +1060,7 @@ export function createMcpServer(): McpServer {
         includeSemantic: include_semantic,
         minScore: min_score,
       });
-      return { content: [{ type: 'text' as const, text: JSON.stringify(graph, null, 2) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify(indexedForm(graph)) }] };
     }
   );
 

@@ -41,7 +41,7 @@ export function slugDeduper(): (slug: string) => string {
 }
 
 export type Heading = {
-  level: 1 | 2 | 3;
+  level: 1 | 2 | 3 | 4 | 5 | 6;
   text: string;
   slug: string;
   /** Character offset of the heading line — lets a reader seek to a section. */
@@ -61,10 +61,12 @@ export function unpairedFenceIndex(lines: string[]): number {
 }
 
 /**
- * Headings (H1–H3) of a note in document order, with the same slugs
- * parseMarkdown puts on the rendered <h1>–<h3> ids. Skips headings inside
+ * Headings (H1–H6) of a note in document order, with the same slugs
+ * parseMarkdown puts on the rendered <h1>–<h6> ids. Skips headings inside
  * fenced code blocks — mirroring both the renderer (fences are extracted to
- * placeholders before heading markup runs) and the chunker's fence handling.
+ * placeholders before heading markup runs) and the chunker's fence handling
+ * (lib/chunking.ts already split sections on #{1,6} before this did — this
+ * just catches extractHeadings/parseMarkdown up to the same depth).
  */
 export function extractHeadings(content: string): Heading[] {
   const out: Heading[] = [];
@@ -81,10 +83,10 @@ export function extractHeadings(content: string): Heading[] {
     // \r? before the anchor: notes imported from a vault written on Windows
     // arrive CRLF, and `.` never matches \r, so `$` could not be reached and
     // every heading in such a note was invisible here and to the chunker.
-    const m = line.match(/^(#{1,3}) (.+)\r?$/);
+    const m = line.match(/^(#{1,6}) (.+)\r?$/);
     if (!m) continue;
     out.push({
-      level: m[1].length as 1 | 2 | 3,
+      level: m[1].length as Heading['level'],
       text: m[2].trim(),
       slug: dedupe(slugifyHeading(m[2])),
       offset: lineStart,
@@ -95,6 +97,72 @@ export function extractHeadings(content: string): Heading[] {
 
 export function safeUrl(url: string): string {
   return /^(https?:|mailto:|\/|#)/i.test(url.trim()) ? url : '#';
+}
+
+// Nesting depth for a list item's leading whitespace — every 2 spaces is one
+// level, on top of the 16px every list item already gets. Indentation itself
+// is what carries the nesting (no <ul>/<ol> wrapper exists to nest inside).
+function listIndentPx(indent: string): number {
+  return 16 + Math.floor(indent.length / 2) * 16;
+}
+
+// A row's cells are whatever sits between its required leading/trailing `|`
+// — a literal `|` inside a cell has no escape (`\|`) here, matching how thin
+// the rest of this renderer's markdown support already is elsewhere.
+function splitTableRow(row: string): string[] {
+  return row.replace(/^\|/, '').replace(/\|[ \t]*$/, '').split('|').map((c) => c.trim());
+}
+
+type Align = 'left' | 'right' | 'center' | '';
+
+function alignOf(cell: string): Align {
+  const left = cell.startsWith(':'), right = cell.endsWith(':');
+  return left && right ? 'center' : right ? 'right' : left ? 'left' : '';
+}
+
+const TABLE_CELL_STYLE = 'border:1px solid #313244;padding:6px 10px';
+
+// The single definition of "table row" / "separator row" — lib/search.ts's
+// excerpt table-header recovery imports these instead of re-deriving the
+// shape, so an excerpt and the rendered page never disagree about what
+// counts as a table. renderTables below doesn't build its own block-match
+// regex from these (that regex's repetition needs the pattern un-anchored
+// and its existing per-row whitespace handling is already covered by tests
+// this file ships with — reconstructing it from these anchored, ^$-bound
+// forms risked a silent behavior change for no reader who asked for it);
+// markdown.test.ts's "table detection agrees with renderTables" cases are
+// what actually keeps the two from drifting apart.
+export const TABLE_ROW_RE = /^\|.*\|[ \t]*\r?$/;
+export const TABLE_SEPARATOR_RE = /^\|(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*\r?$/;
+
+/**
+ * GFM-style tables: a header row, a separator row (`---`/`:--`/`--:`/`:-:`
+ * per column, alignment optional), then zero or more body rows — all three
+ * matched as one block. Must run before \n→<br> would turn the row breaks
+ * into unrelated line breaks and before \n\n→</p><p> could split the block
+ * across paragraphs; content is already &/</>-escaped by this point (see
+ * parseMarkdown), so this only ever builds tags around already-safe text.
+ */
+function renderTables(text: string): string {
+  return text.replace(
+    /^\|(.+)\|[ \t]*\r?\n\|((?:[ \t]*:?-+:?[ \t]*\|)+)[ \t]*(?:\r?\n(\|.*\|(?:[ \t]*\r?\n\|.*\|)*))?/gm,
+    (_match: string, headerRow: string, sepRow: string, bodyBlock: string | undefined) => {
+      const headerCells = splitTableRow(`|${headerRow}|`);
+      const aligns = sepRow.split('|').map((c) => c.trim()).filter(Boolean).map(alignOf);
+      const bodyRows = (bodyBlock ?? '')
+        .split(/\r?\n/)
+        .filter((line) => line.trim().length > 0)
+        .map((line) => splitTableRow(line));
+
+      const cellStyle = (i: number) => aligns[i] ? `${TABLE_CELL_STYLE};text-align:${aligns[i]}` : TABLE_CELL_STYLE;
+      const th = headerCells.map((c, i) => `<th style="${cellStyle(i)};background:#1e1e2e">${c}</th>`).join('');
+      const rows = bodyRows
+        .map((cells) => `<tr>${cells.map((c, i) => `<td style="${cellStyle(i)}">${c}</td>`).join('')}</tr>`)
+        .join('');
+      return `<table style="border-collapse:collapse;margin:8px 0;width:100%">` +
+        `<thead><tr>${th}</tr></thead><tbody>${rows}</tbody></table>`;
+    }
+  );
 }
 
 export function parseMarkdown(text: string): string {
@@ -108,7 +176,7 @@ export function parseMarkdown(text: string): string {
   // -2/-3 suffixes in DOCUMENT order — the same order extractHeadings uses;
   // three per-level passes would number them h3-first and desync the ids.
   const dedupe = slugDeduper();
-  const html = text
+  const afterCodeBlocks = text
     .replace(/\u0000/g, '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -117,8 +185,13 @@ export function parseMarkdown(text: string): string {
       codeBlocks.push(
         `<pre style="background:#1e1e2e;padding:12px;border-radius:6px;overflow-x:auto;margin:8px 0"><code>${code.trim()}</code></pre>`);
       return `\u0000${codeBlocks.length - 1}\u0000`;
-    })
-    .replace(/^(#{1,3}) (.+)$/gm, (_: string, hashes: string, heading: string) => {
+    });
+  // Tables run as their own pass here: code blocks are already placeholders
+  // (so a `|` inside a fence can't be mistaken for table syntax), and this
+  // still runs before the \n->br / \n\n->paragraph replacements below, which
+  // would otherwise mangle a table's row breaks into unrelated line breaks.
+  const html = renderTables(afterCodeBlocks)
+    .replace(/^(#{1,6}) (.+)$/gm, (_: string, hashes: string, heading: string) => {
       const level = hashes.length;
       return `<h${level} id="${escapeAttr(dedupe(slugifyHeading(heading)))}">${heading}</h${level}>`;
     })
@@ -129,9 +202,18 @@ export function parseMarkdown(text: string): string {
     .replace(/`([^`]+)`/g, '<code style="background:#1e1e2e;padding:2px 6px;border-radius:3px;font-size:0.9em">$1</code>')
     .replace(/^&gt; (.+)$/gm, '<blockquote style="border-left:3px solid #6c7086;padding-left:12px;color:#a6adc8;margin:8px 0">$1</blockquote>')
     .replace(/^---$/gm, '<hr style="border:none;border-top:1px solid #313244;margin:16px 0">')
-    .replace(/^- \[x\] (.+)$/gm, '<li style="margin-left:16px">☑ $1</li>')
-    .replace(/^- \[ \] (.+)$/gm, '<li style="margin-left:16px">☐ $1</li>')
-    .replace(/^- (.+)$/gm, '<li style="margin-left:16px">$1</li>')
+    .replace(/^(\s*)- \[x\] (.+)$/gm, (_: string, indent: string, item: string) =>
+      `<li style="margin-left:${listIndentPx(indent)}px">☑ ${item}</li>`)
+    .replace(/^(\s*)- \[ \] (.+)$/gm, (_: string, indent: string, item: string) =>
+      `<li style="margin-left:${listIndentPx(indent)}px">☐ ${item}</li>`)
+    .replace(/^(\s*)- (.+)$/gm, (_: string, indent: string, item: string) =>
+      `<li style="margin-left:${listIndentPx(indent)}px">${item}</li>`)
+    // No <ol> wrapper (same bare-<li> approach the bullet list above uses),
+    // so a bare <li> would fall back to its default disc marker — list-style
+    // is explicitly killed here and the number kept as plain text instead,
+    // otherwise every item shows a bullet next to its own number.
+    .replace(/^(\s*)(\d+)\. (.+)$/gm, (_: string, indent: string, num: string, item: string) =>
+      `<li style="margin-left:${listIndentPx(indent)}px;list-style:none">${num}. ${item}</li>`)
     .replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_: string, alt: string, url: string) =>
       `<img src="${escapeAttr(safeUrl(url))}" alt="${escapeAttr(alt)}" style="max-width:100%;border-radius:6px;margin:8px 0">`)
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_: string, label: string, url: string) =>

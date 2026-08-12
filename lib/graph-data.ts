@@ -49,7 +49,7 @@ function resolveRootTitle<T extends TitledNote>(notes: T[], rootTitle: string, f
     if (hits.length > 1) {
       throw new Error(
         `root_title "${rootTitle}" matches ${hits.length} notes — pass a fuller title:\n` +
-        JSON.stringify(hits.map(({ id, title }) => ({ id, title })), null, 2)
+        JSON.stringify(hits.map(({ id, title }) => ({ id, title })))
       );
     }
   }

@@ -90,19 +90,51 @@ describe('getEmbedding - ollama provider', () => {
     expect(body.input).toBe('hello world');
   });
 
-  it('throws when Ollama returns non-ok status', async () => {
+  it('throws immediately on a 4xx (bad input is not fixed by retrying)', async () => {
     process.env.EMBEDDING_PROVIDER = 'ollama';
     process.env.OLLAMA_URL = 'http://ollama:11434';
     process.env.OLLAMA_MODEL = 'nomic-embed-text';
 
     mockFetch.mockResolvedValueOnce({
       ok: false,
-      status: 503,
-      text: async () => '{"error":"model is loading"}',
+      status: 400,
+      text: async () => '{"error":"input length exceeds the context length"}',
     });
 
     const { getEmbedding } = await import('./embeddings');
-    await expect(getEmbedding('test')).rejects.toThrow('Ollama error (503): {"error":"model is loading"}');
+    await expect(getEmbedding('test')).rejects.toThrow(
+      'Ollama error (400): {"error":"input length exceeds the context length"}'
+    );
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries once on a 5xx, then returns the embedding if the retry succeeds', async () => {
+    process.env.EMBEDDING_PROVIDER = 'ollama';
+    process.env.OLLAMA_URL = 'http://ollama:11434';
+    process.env.OLLAMA_MODEL = 'nomic-embed-text';
+
+    const fakeEmbedding = Array.from({ length: 768 }, (_, i) => i * 0.001);
+    mockFetch
+      .mockResolvedValueOnce({ ok: false, status: 503, text: async () => '{"error":"model is loading"}' })
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ embeddings: [fakeEmbedding] }) });
+
+    const { getEmbedding } = await import('./embeddings');
+    const result = await getEmbedding('test');
+
+    expect(result).toHaveLength(768);
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries once on a network failure, then gives up if the retry also fails', async () => {
+    process.env.EMBEDDING_PROVIDER = 'ollama';
+    process.env.OLLAMA_URL = 'http://ollama:11434';
+    process.env.OLLAMA_MODEL = 'nomic-embed-text';
+
+    mockFetch.mockRejectedValue(new Error('fetch failed: ECONNREFUSED'));
+
+    const { getEmbedding } = await import('./embeddings');
+    await expect(getEmbedding('test')).rejects.toThrow('fetch failed: ECONNREFUSED');
+    expect(mockFetch).toHaveBeenCalledTimes(2);
   });
 });
 

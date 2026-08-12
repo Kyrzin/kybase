@@ -7,7 +7,8 @@ vi.mock('./search', () => ({ textSearch: vi.fn(), semanticSearch: vi.fn(), hybri
 vi.mock('./indexing', () => ({ indexNoteAsync: vi.fn() }));
 vi.mock('./semantic-edges', () => ({ getSemanticEdges: vi.fn() }));
 
-import { windowContent } from './mcp-server';
+import { windowContent, resolveInsertOffset, insertAddition } from './mcp-server';
+import { extractHeadings } from './markdown';
 
 describe('windowContent', () => {
   it('leaves a note that fits within the default limit untouched', () => {
@@ -57,5 +58,92 @@ describe('windowContent', () => {
     expect(out.id).toBe('1');
     expect(out.title).toBe('Hello');
     expect(out.tags).toEqual(['a']);
+  });
+});
+
+describe('resolveInsertOffset', () => {
+  const NOTE = ['# Title', 'intro', '', '## Alpha', 'alpha body', '', '## Beta', 'beta body'].join('\n');
+  const headings = () => extractHeadings(NOTE);
+
+  it('note_end is always content.length', () => {
+    expect(resolveInsertOffset(NOTE, headings(), 'note_end', undefined)).toBe(NOTE.length);
+  });
+
+  it('note_start lands before the first heading nested under the H1, not offset 0', () => {
+    expect(resolveInsertOffset(NOTE, headings(), 'note_start', undefined)).toBe(NOTE.indexOf('## Alpha'));
+  });
+
+  it('note_start falls back to the end of the note with only one heading', () => {
+    const one = '# Only\nprose';
+    expect(resolveInsertOffset(one, extractHeadings(one), 'note_start', undefined)).toBe(one.length);
+  });
+
+  it('note_start is offset 0 on a note with no headings at all', () => {
+    const none = 'just prose';
+    expect(resolveInsertOffset(none, extractHeadings(none), 'note_start', undefined)).toBe(0);
+  });
+
+  it('before_section lands at the section\'s own heading — first section boundary', () => {
+    expect(resolveInsertOffset(NOTE, headings(), 'before_section', 'Alpha')).toBe(NOTE.indexOf('## Alpha'));
+  });
+
+  it('before_section works the same at the last section boundary', () => {
+    expect(resolveInsertOffset(NOTE, headings(), 'before_section', 'Beta')).toBe(NOTE.indexOf('## Beta'));
+  });
+
+  it('section_end and after_section both land past the whole section, at the next heading', () => {
+    expect(resolveInsertOffset(NOTE, headings(), 'section_end', 'Alpha')).toBe(NOTE.indexOf('## Beta'));
+    expect(resolveInsertOffset(NOTE, headings(), 'after_section', 'Alpha')).toBe(NOTE.indexOf('## Beta'));
+  });
+
+  it('section_end on the last section lands at the end of the note', () => {
+    expect(resolveInsertOffset(NOTE, headings(), 'section_end', 'Beta')).toBe(NOTE.length);
+  });
+
+  it('section_start lands right after the heading line, before its body', () => {
+    const offset = resolveInsertOffset(NOTE, headings(), 'section_start', 'Alpha');
+    expect(NOTE.slice(0, offset)).toBe('# Title\nintro\n\n## Alpha\n');
+    expect(NOTE.slice(offset)).toBe('alpha body\n\n## Beta\nbeta body');
+  });
+
+  it('a section-relative at without a section throws instead of guessing', () => {
+    expect(() => resolveInsertOffset(NOTE, headings(), 'before_section', undefined)).toThrow('requires section');
+  });
+
+  it('an unresolvable section throws the same available-sections message sectionRange callers rely on', () => {
+    expect(() => resolveInsertOffset(NOTE, headings(), 'before_section', 'Nope')).toThrow('Alpha');
+  });
+
+  it('resolves a section across Unicode normal forms, same as sectionRange', () => {
+    const note = '# Intro\nx\n\n## Café\naccent body\n';
+    const nfd = 'Café'; // e + combining acute — same word, different encoding
+    expect(resolveInsertOffset(note, extractHeadings(note), 'before_section', nfd)).toBe(note.indexOf('## Café'));
+  });
+
+  it('resolves a section in a CRLF note', () => {
+    const note = '# Title\r\nintro\r\n\r\n## Alpha\r\nbody\r\n';
+    expect(resolveInsertOffset(note, extractHeadings(note), 'before_section', 'Alpha')).toBe(note.indexOf('## Alpha'));
+  });
+});
+
+describe('insertAddition', () => {
+  it('reproduces the original whole-note append shape (offset = content.length)', () => {
+    const out = insertAddition('existing text', 'existing text'.length, 'new text');
+    expect(out).toBe('existing text\n\nnew text\n');
+  });
+
+  it('reproduces the original section-append shape (offset mid-content, tail follows)', () => {
+    const content = 'head\n\n## Next\ntail body';
+    const out = insertAddition(content, content.indexOf('## Next'), 'inserted');
+    expect(out).toBe('head\n\ninserted\n\n## Next\ntail body');
+  });
+
+  it('trims trailing whitespace from the head before splicing', () => {
+    const content = 'head   \n\n\ntail';
+    expect(insertAddition(content, content.indexOf('tail'), 'x')).toBe('head\n\nx\n\ntail');
+  });
+
+  it('does not add a trailing blank block when there is no tail', () => {
+    expect(insertAddition('head', 4, 'x')).toBe('head\n\nx\n');
   });
 });

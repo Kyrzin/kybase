@@ -16,7 +16,7 @@ vi.mock('./embeddings', () => ({
   getRelevanceAnchors: (...a: unknown[]) => getRelevanceAnchors(...a),
 }));
 
-import { rrfMerge, makeExcerpt, stripLeadingHeading, textSearch, semanticSearch, hybridSearch, bestSemanticScore, normalizeRelevance, confidenceFor } from './search';
+import { rrfMerge, makeExcerpt, tableHeaderAbove, stripLeadingHeading, textSearch, semanticSearch, hybridSearch, bestSemanticScore, normalizeRelevance, confidenceFor } from './search';
 
 beforeEach(() => {
   dbQuery.mockReset().mockResolvedValue([]);
@@ -55,10 +55,10 @@ describe('rrfMerge', () => {
     expect(merged.map((r) => r.id).sort()).toEqual(['a', 'b']);
   });
 
-  it('score is the sum of RRF contributions', () => {
-    // single list, rank 0 → score = 1/(60+1) ≈ 0.01639
+  it('rrf_score is the sum of RRF contributions', () => {
+    // single list, rank 0 → rrf_score = 1/(60+1) ≈ 0.01639
     const merged = rrfMerge([text([make('x')])]);
-    expect(merged[0].score).toBeCloseTo(1 / 61, 5);
+    expect(merged[0].rrf_score).toBeCloseTo(1 / 61, 5);
   });
 
   it('preserves each pass\'s own raw score under text_score/semantic_score', () => {
@@ -68,8 +68,8 @@ describe('rrfMerge', () => {
     ]);
     expect(merged[0].text_score).toBe(0.9);
     expect(merged[0].semantic_score).toBe(0.72);
-    // score itself stays the RRF fusion, not either raw value
-    expect(merged[0].score).toBeCloseTo(1 / 61 + 1 / 61, 5);
+    // rrf_score itself stays the RRF fusion, not either raw value
+    expect(merged[0].rrf_score).toBeCloseTo(1 / 61 + 1 / 61, 5);
   });
 
   it('a note that only matched one pass has no score for the other', () => {
@@ -158,6 +158,138 @@ describe('makeExcerpt', () => {
   });
 });
 
+describe('makeExcerpt — table header recovery', () => {
+  // Enough that the window's natural center-on-match start lands well past
+  // the header row, not just a few characters short of it — reproduces the
+  // live failure (search on "Kybase — методика оценки embedding-моделей"),
+  // not a construction that happens to snap back to the header for free.
+  const filler = (n: number) => 'Вступительный текст перед таблицей для объёма. '.repeat(n);
+
+  it('prepends header + separator when the window opens inside a table body', () => {
+    const content = filler(20) + '\n\n' +
+      '| Параметр | Значение | Комментарий |\n' +
+      '|---|---|---|\n' +
+      '| ОС | Linux 6.8 | аптайм 39 дней |\n' +
+      '| RAM | 7.8 ГБ | swap увеличен недавно на диске |\n' +
+      '| Контейнеры | ~39 шт | Traefik единственный вход |';
+    const out = makeExcerpt(content, 'swap увеличен недавно', 100);
+    expect(out).toContain('| Параметр | Значение | Комментарий |');
+    expect(out).toContain('|---|---|---|');
+    expect(out).toContain('swap увеличен недавно');
+  });
+
+  it('does not exceed the requested budget — the tail is shaved to make room for the header', () => {
+    const content = filler(20) + '\n\n' +
+      '| Параметр | Значение | Комментарий |\n' +
+      '|---|---|---|\n' +
+      '| ОС | Linux 6.8 | аптайм 39 дней |\n' +
+      '| RAM | 7.8 ГБ | swap увеличен недавно на диске |\n' +
+      '| Контейнеры | ~39 шт | Traefik единственный вход |';
+    const out = makeExcerpt(content, 'swap увеличен недавно', 100);
+    expect(out.length).toBeLessThanOrEqual(100 + '| Параметр | Значение | Комментарий |\n|---|---|---|\n'.length + 1);
+  });
+
+  it('recovers the header when the table is the very first thing in the note', () => {
+    const rows = Array.from({ length: 20 }, (_, i) => `| Строка${i} | Значение номер ${i} с текстом заполнения |`);
+    const content = '| Параметр | Значение |\n|---|---|\n' + rows.join('\n');
+    const out = makeExcerpt(content, 'Значение номер 15', 80);
+    expect(out).toContain('| Параметр | Значение |');
+    expect(out).toContain('|---|---|');
+    expect(out).toContain('Значение номер 15');
+  });
+
+  it('recovers the header when the table is the last thing in the note', () => {
+    const rows = Array.from({ length: 20 }, (_, i) => `| Строка${i} | Значение номер ${i} с текстом заполнения |`);
+    const content = filler(10) + '\n\n| Параметр | Значение |\n|---|---|\n' + rows.join('\n');
+    const out = makeExcerpt(content, 'Значение номер 18', 80);
+    expect(out).toContain('| Параметр | Значение |');
+    expect(out).toContain('Значение номер 18');
+  });
+
+  it('match in the very first body row still shows the header (no duplicate)', () => {
+    const content = filler(20) + '\n\n| Параметр | Значение |\n|---|---|\n| Первая строка | искомое значение тут |\n| Вторая | x |';
+    const out = makeExcerpt(content, 'искомое значение', 60);
+    const occurrences = out.split('| Параметр | Значение |').length - 1;
+    expect(occurrences).toBe(1); // present, not duplicated
+  });
+
+  it('does not duplicate the header when the natural window already includes it', () => {
+    // Short enough overall that centering on the match still lands at or
+    // before the header — repair must recognize "already have it" and add
+    // nothing.
+    const content = 'x'.repeat(50) + '\n\n| A | B |\n|---|---|\n| match here | y |';
+    const out = makeExcerpt(content, 'match here', 300);
+    const occurrences = out.split('| A | B |').length - 1;
+    expect(occurrences).toBeLessThanOrEqual(1);
+  });
+
+  it('leaves behavior unchanged when the whole table fits in the window', () => {
+    const content = filler(20) + '\n\n| A | B |\n|---|---|\n| 1 | 2 |';
+    const out = makeExcerpt(content, '| 1 | 2 |', 300);
+    expect(out).toContain('| A | B |');
+    expect(out.split('| A | B |').length - 1).toBe(1);
+  });
+
+  it('a table with no body rows does not break a match found after it', () => {
+    const content = '| A | B |\n|---|---|\n\n' + filler(30) + 'хвостовая фраза для поиска здесь';
+    const out = makeExcerpt(content, 'хвостовая фраза', 60);
+    expect(out).toContain('хвостовая фраза');
+    // Nothing to recover — the match isn't inside a table at all.
+    expect(out).not.toContain('| A | B |');
+  });
+
+  it('two tables in a row: a match in the second table recovers the second header, not the first', () => {
+    const content = filler(15) +
+      '\n\n| First | Table |\n|---|---|\n| f1 | f2 |\n\n' +
+      '| Second | Table |\n|---|---|\n' +
+      Array.from({ length: 10 }, (_, i) => `| row${i} | искомое совпадение номер ${i} с заполнением |`).join('\n');
+    const out = makeExcerpt(content, 'искомое совпадение номер 7', 80);
+    expect(out).toContain('| Second | Table |');
+    expect(out).not.toContain('| First | Table |');
+  });
+
+  it('a | inside a fenced code block is not mistaken for a table', () => {
+    const fence = '```\n| this | looks | like | a | table | but | is | code |\n|---|---|\n```';
+    const content = filler(20) + '\n\n' + fence + '\n\n' + filler(5) + 'ключевая фраза в коде-фенсе тест';
+    // Land the search match inside the fence content itself.
+    const idxInFence = content.indexOf('| this | looks');
+    const header = tableHeaderAbove(content, idxInFence);
+    expect(header).toBeNull();
+  });
+
+  it('resolves through CRLF line endings', () => {
+    // A few padding rows between the header and the match, same reasoning
+    // as filler() above: without them the natural window can land exactly
+    // on the header's own line by coincidence, which isn't what this case
+    // is testing for.
+    const content = filler(20).replace(/\n/g, '\r\n') + '\r\n\r\n' +
+      '| Параметр | Значение |\r\n|---|---|\r\n' +
+      '| A | заполняющая строка один |\r\n| B | заполняющая строка два |\r\n' +
+      '| C | искомое значение тут |\r\n| D | y |';
+    const out = makeExcerpt(content, 'искомое значение', 60);
+    expect(out).toContain('| Параметр | Значение |');
+  });
+});
+
+describe('tableHeaderAbove', () => {
+  it('returns null when offset is not inside a table at all', () => {
+    expect(tableHeaderAbove('just plain prose, no pipes here', 10)).toBeNull();
+  });
+
+  it('returns null for a stray | line with no separator row (not a real table)', () => {
+    const content = 'a | b | c\nmore text here that is not a table row';
+    expect(tableHeaderAbove(content, 2)).toBeNull();
+  });
+
+  it('returns the header/separator and the offset where they start', () => {
+    const content = 'intro\n\n| H1 | H2 |\n|---|---|\n| a | b |';
+    const bodyOffset = content.indexOf('| a | b |');
+    const result = tableHeaderAbove(content, bodyOffset);
+    expect(result?.text).toBe('| H1 | H2 |\n|---|---|\n');
+    expect(result?.offset).toBe(content.indexOf('| H1 | H2 |'));
+  });
+});
+
 describe('stripLeadingHeading', () => {
   it('drops a leading markdown heading line', () => {
     expect(stripLeadingHeading('## Раздел\n\nтело секции')).toBe('тело секции');
@@ -174,7 +306,7 @@ describe('textSearch — filters', () => {
   it('without filters, requests exactly `limit` rows and does not query notes for a filter id set', async () => {
     dbQuery
       .mockResolvedValueOnce([{ id: 'a', title: 'A', tags: [], rank: 0.5, headline: 'hi' }])
-      .mockResolvedValueOnce([{ id: 'a', created_at: '2026-01-01T00:00:00.000Z' }]); // enrichWithCreatedAt
+      .mockResolvedValueOnce([{ id: 'a', created_at: '2026-01-01T00:00:00.000Z' }]); // enrichResults
     const results = await textSearch('q', 5);
     expect(dbQuery.mock.calls[0]).toEqual(['select * from search_notes_fts($1, $2)', ['q', 5]]);
     expect(dbQuery).toHaveBeenCalledTimes(2); // FTS + unconditional created_at lookup, no filter id-set query
@@ -220,21 +352,22 @@ describe('textSearch — filters', () => {
     expect(params).toEqual(['2026-01-01', '2026-12-31']);
   });
 
-  it('attaches created_at to every result via one id = any($1) lookup', async () => {
+  it('attaches created_at and content_length to every result via one id = any($1) lookup', async () => {
     dbQuery
       .mockResolvedValueOnce([
         { id: 'a', title: 'A', tags: [], rank: 0.9, headline: 'hi' },
         { id: 'b', title: 'B', tags: [], rank: 0.5, headline: 'hi' },
       ])
       .mockResolvedValueOnce([
-        { id: 'a', created_at: '2026-01-01T00:00:00.000Z' },
-        { id: 'b', created_at: '2026-02-01T00:00:00.000Z' },
+        { id: 'a', created_at: '2026-01-01T00:00:00.000Z', content_length: 120 },
+        { id: 'b', created_at: '2026-02-01T00:00:00.000Z', content_length: 4300 },
       ]);
     const results = await textSearch('q', 5);
     const [sql, params] = dbQuery.mock.calls[1];
-    expect(sql).toBe('select id, created_at from notes where id = any($1)');
+    expect(sql).toBe('select id, created_at, length(content) as content_length from notes where id = any($1)');
     expect(params).toEqual([['a', 'b']]);
     expect(results.map((r) => r.created_at)).toEqual(['2026-01-01T00:00:00.000Z', '2026-02-01T00:00:00.000Z']);
+    expect(results.map((r) => r.content_length)).toEqual([120, 4300]);
   });
 
   it('leaves created_at undefined (not throwing) for a result missing from the lookup', async () => {
@@ -245,6 +378,108 @@ describe('textSearch — filters', () => {
       .mockResolvedValueOnce([]); // 'a' no longer found
     const [result] = await textSearch('q', 5);
     expect(result.created_at).toBeUndefined();
+  });
+});
+
+describe('textSearch — table header repair', () => {
+  const NOTE_CONTENT = 'Вступление в заметку с достаточным объёмом текста для окна.\n\n' +
+    '| Параметр | Значение |\n|---|---|\n| A | не это |\n' +
+    '| B | часть строки, которую вернул ts_headline как сниппет |\n| C | y |';
+
+  it('repairs a headline that opens inside a table with no separator in view', async () => {
+    const brokenHeadline = '| B | часть строки, которую вернул ts_headline как сниппет |';
+    dbQuery
+      .mockResolvedValueOnce([{ id: 'a', title: 'A', tags: [], rank: 0.9, headline: brokenHeadline }])
+      .mockResolvedValueOnce([{ id: 'a', content: NOTE_CONTENT }]) // repair fetch
+      .mockResolvedValueOnce([{ id: 'a', created_at: '2026-01-01T00:00:00.000Z', content_length: 10 }]); // enrichResults
+
+    const [result] = await textSearch('q', 5);
+    expect(result.excerpt).toContain('| Параметр | Значение |');
+    expect(result.excerpt).toContain('|---|---|');
+    expect(result.excerpt).toContain(brokenHeadline);
+
+    const [repairSql, repairParams] = dbQuery.mock.calls[1];
+    expect(repairSql).toBe('select id, content from notes where id = any($1)');
+    expect(repairParams).toEqual([['a']]);
+  });
+
+  it('does not touch an excerpt that already has its header, and fetches nothing extra', async () => {
+    const cleanHeadline = '| Параметр | Значение |\n|---|---|\n| A | не это |';
+    dbQuery
+      .mockResolvedValueOnce([{ id: 'a', title: 'A', tags: [], rank: 0.9, headline: cleanHeadline }])
+      .mockResolvedValueOnce([{ id: 'a', created_at: '2026-01-01T00:00:00.000Z', content_length: 10 }]); // enrichResults only
+
+    const [result] = await textSearch('q', 5);
+    expect(result.excerpt).toBe(cleanHeadline);
+    expect(dbQuery).toHaveBeenCalledTimes(2); // FTS + enrichResults — no repair round trip
+  });
+
+  it('does not touch an excerpt with no table-shaped line at all', async () => {
+    dbQuery
+      .mockResolvedValueOnce([{ id: 'a', title: 'A', tags: [], rank: 0.9, headline: 'plain prose snippet, nothing table-shaped here' }])
+      .mockResolvedValueOnce([{ id: 'a', created_at: '2026-01-01T00:00:00.000Z', content_length: 10 }]);
+    await textSearch('q', 5);
+    expect(dbQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it('catches a snippet cropped mid-cell on both edges — no line is fully |...|-shaped', async () => {
+    // Live case (Kybase — методика оценки embedding-моделей, query
+    // "непригодна для RU"): ts_headline's MaxWords=45 crop landed after the
+    // row's opening | and before its closing one on both lines, so neither
+    // TABLE_ROW_RE nor a naive "starts and ends with |" check matches
+    // either line — only counting | characters catches it.
+    const brokenHeadline =
+      'без префикса −0.004) | полоса 0.60–0.68, топ по «борщу» — нерелевантный «Кейс для резюме» 0.68 | непригодна для RU |\n' +
+      '| embeddinggemma | separation +0.21 | резюме → топ сплошь резюме; борщ → ничего | разделяет RU';
+    const noteContent = 'Вступление с достаточным объёмом текста, чтобы окно не совпало с началом.\n\n' +
+      '| | контроль | живой прогон | вывод |\n|---|---|---|---|\n' +
+      '| nomic-embed-text | separation +0.06 (без префикса −0.004) | полоса 0.60–0.68, топ по «борщу» — нерелевантный «Кейс для резюме» 0.68 | непригодна для RU |\n' +
+      '| embeddinggemma | separation +0.21 | резюме → топ сплошь резюме; борщ → ничего | разделяет RU |';
+    dbQuery
+      .mockResolvedValueOnce([{ id: 'a', title: 'A', tags: [], rank: 0.9, headline: brokenHeadline }])
+      .mockResolvedValueOnce([{ id: 'a', content: noteContent }])
+      .mockResolvedValueOnce([{ id: 'a', created_at: '2026-01-01T00:00:00.000Z', content_length: 10 }]);
+
+    const [result] = await textSearch('q', 5);
+    expect(result.excerpt).toContain('| | контроль | живой прогон | вывод |');
+    expect(result.excerpt).toContain('|---|---|---|---|');
+  });
+
+  it('caps repairs at MAX_TABLE_REPAIR_FETCHES and logs when the cap is hit', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const broken = (id: string) => ({ id, title: id, tags: [], rank: 0.5, headline: `| ${id} | broken row no separator |` });
+    dbQuery
+      .mockResolvedValueOnce([broken('a'), broken('b'), broken('c'), broken('d')]) // 4 broken, cap is 3
+      .mockResolvedValueOnce([]) // repair fetch: none resolve, doesn't matter for the cap assertion
+      .mockResolvedValueOnce([]); // enrichResults
+
+    await textSearch('q', 5);
+    const [, repairParams] = dbQuery.mock.calls[1];
+    expect(repairParams[0]).toHaveLength(3); // only the first 3 of 4 fetched
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('4 broken excerpts'));
+    warn.mockRestore();
+  });
+
+  it('leaves the excerpt untouched if the note is gone by repair time (deleted concurrently)', async () => {
+    const brokenHeadline = '| B | broken row no separator here |';
+    dbQuery
+      .mockResolvedValueOnce([{ id: 'a', title: 'A', tags: [], rank: 0.9, headline: brokenHeadline }])
+      .mockResolvedValueOnce([]) // repair fetch: id no longer found
+      .mockResolvedValueOnce([]); // enrichResults
+    const [result] = await textSearch('q', 5);
+    expect(result.excerpt).toBe(brokenHeadline); // unchanged, not thrown
+  });
+
+  it('leaves the excerpt untouched if its first line cannot be located in the fetched content', async () => {
+    // Content drifted since the FTS snapshot (edited concurrently) — the
+    // headline's first line is no longer a literal substring.
+    const brokenHeadline = '| B | this exact text is no longer in the note |';
+    dbQuery
+      .mockResolvedValueOnce([{ id: 'a', title: 'A', tags: [], rank: 0.9, headline: brokenHeadline }])
+      .mockResolvedValueOnce([{ id: 'a', content: 'completely different content now' }])
+      .mockResolvedValueOnce([]);
+    const [result] = await textSearch('q', 5);
+    expect(result.excerpt).toBe(brokenHeadline);
   });
 });
 
@@ -282,7 +517,7 @@ describe('semanticSearch — filters', () => {
   it('skips the created_at lookup entirely on an empty result — no wasted PK query', async () => {
     // match_chunks returns [] whenever nothing clears the similarity floor
     // (no embeddings yet, or everything below threshold) — a common, not
-    // exceptional, outcome. enrichWithCreatedAt must not fire a second
+    // exceptional, outcome. enrichResults must not fire a second
     // query for zero ids.
     dbQuery.mockResolvedValueOnce([]); // match_chunks: nothing above the floor
     const results = await semanticSearch('q', 5);
@@ -304,7 +539,7 @@ describe('semanticSearch — filters', () => {
 
 describe('hybridSearch — candidate pool', () => {
   it('overfetches each arm beyond the final limit before RRF fusion', async () => {
-    // Each arm now also fires its own enrichWithCreatedAt call, and the two
+    // Each arm now also fires its own enrichResults call, and the two
     // arms run concurrently (Promise.all), so their calls can interleave in
     // either order — find each call by its SQL rather than assuming a fixed
     // index.

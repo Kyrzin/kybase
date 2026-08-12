@@ -122,8 +122,9 @@ export default function KybaseApp() {
     expandedFolders, toggleFolder,
     selectNote, saveNote, addTag, removeTag,
     createNote, createFolder, deleteFolder, renameFolder, deleteNote, moveNote, moveFolder,
-    syncError, setSyncError,
+    syncError, setSyncError, canOverwriteConflict, overwriteConflict,
   } = useNotes({ onNoteOpened, onMoveDone, onRenameDone, onTagInputConsumed, restoreFocus });
+  const [overwriting, setOverwriting] = useState(false);
 
   // Scroll sidebar to active note after folders have expanded
   useEffect(() => {
@@ -273,6 +274,19 @@ export default function KybaseApp() {
             style={{ position: 'fixed', top: 8, left: '50%', transform: 'translateX(-50%)', zIndex: 1000, maxWidth: 'min(560px, calc(100vw - 32px))', display: 'flex', alignItems: 'flex-start', gap: 10, background: '#2a1b22', border: '1px solid #f38ba8', borderRadius: 8, color: '#f38ba8', padding: '10px 12px', fontSize: 13, boxShadow: '0 4px 16px rgba(0,0,0,.4)' }}
           >
             <span style={{ flex: 1 }}>{syncError}</span>
+            {canOverwriteConflict && (
+              <button
+                onClick={async () => {
+                  setOverwriting(true);
+                  await overwriteConflict();
+                  setOverwriting(false);
+                }}
+                disabled={overwriting}
+                style={{ background: 'none', border: '1px solid #f38ba8', borderRadius: 4, color: '#f38ba8', cursor: overwriting ? 'default' : 'pointer', fontSize: 12, lineHeight: 1.4, padding: '3px 8px', fontFamily: 'inherit', opacity: overwriting ? 0.6 : 1, whiteSpace: 'nowrap' }}
+              >
+                {overwriting ? 'Overwriting…' : 'Overwrite'}
+              </button>
+            )}
             <button
               onClick={() => setSyncError(null)}
               aria-label="Dismiss"

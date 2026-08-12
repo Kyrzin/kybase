@@ -10,6 +10,14 @@ export type EmbedTask = 'query' | 'document';
 //   - nomic-embed-text: compressed high band ~0.6–0.7 → 0.55
 //   - Google text-embedding-004: relevant ~0.62–0.74 → 0.55
 //   - OpenAI 3-small: unverified here, 0.45 as a conservative middle
+// A 2026-08-11 recalibration attempt lowered this to 0.35 (24-query RU
+// battery found correct top-1 hits as low as 0.22) but was reverted the same
+// day after live testing: a 0.35 floor let genuinely off-topic notes through
+// as "weak" hits on queries with no real match in the vault (e.g. cosine
+// 0.35 for a firewall-commands note on a VPN-router query) — the vault
+// owner prioritizes "nothing relevant" reading as empty over catching a few
+// more true positives at the cost of that noise. Keep at 0.40 unless
+// re-litigated with the owner.
 // Used by lib/search.ts semanticSearch (passed to the match_chunks RPC).
 function minSimilarityFor(cfg: EmbeddingConfig): number {
   if (cfg.provider === 'ollama') {
@@ -32,6 +40,8 @@ export type RelevanceAnchors = { floor: number; strong: number };
 //   - nomic-embed-text: its compressed band tops out ~0.76 → strong 0.75
 //   - Google text-embedding-004: clear hits ~0.73–0.78 → strong 0.75
 //   - OpenAI 3-small: unverified, 0.65 as a conservative middle
+// Lowered to 0.55 alongside the floor above on 2026-08-11, reverted the same
+// day for the same reason — see minSimilarityFor.
 // Like the floors, these are per-model calibration — re-derive both with the
 // battery (see the "методика оценки embedding-моделей" note) on model changes.
 function strongSimilarityFor(cfg: EmbeddingConfig): number {
@@ -116,21 +126,52 @@ function ollamaPromptInput(model: string, task: EmbedTask, text: string): string
   return text;
 }
 
+// A 4xx (bad input, e.g. context-length overflow) won't be fixed by retrying
+// the same request — indexNote's own shrink-and-retry loop (embedNoteHead)
+// already handles that case at a higher level. Only a network-level failure
+// (container mid-restart, connection reset/refused — fetch rejects rather
+// than resolving) or a 5xx look like "Ollama isn't ready yet" and are worth
+// one retry; unlike fetchWithRetry above, there's no Retry-After to honor
+// and no quota to back off from, so this is one short fixed pause, not
+// exponential backoff.
+const OLLAMA_RETRY_DELAY_MS = 500;
+
+class OllamaRetryableError extends Error {}
+
+async function ollamaEmbedOnce(url: string, model: string, input: string): Promise<number[]> {
+  let res: Response;
+  try {
+    res = await fetch(`${url}/api/embed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, input }),
+      signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
+    });
+  } catch (err) {
+    throw new OllamaRetryableError(err instanceof Error ? err.message : 'fetch failed');
+  }
+  if (!res.ok) {
+    // Include the body: Ollama's statusText is just "Bad Request", the real
+    // cause ("input length exceeds the context length") is in the JSON.
+    const message = `Ollama error (${res.status}): ${(await res.text()).slice(0, 200)}`;
+    if (res.status >= 500) throw new OllamaRetryableError(message);
+    throw new Error(message);
+  }
+  const data = await res.json();
+  return data.embeddings[0] as number[];
+}
+
 async function ollamaEmbed(text: string, model: string | undefined, task: EmbedTask): Promise<number[]> {
   const url = process.env.OLLAMA_URL ?? 'http://ollama:11434';
   const resolvedModel = model ?? 'embeddinggemma';
   const input = ollamaPromptInput(resolvedModel, task, text);
-  const res = await fetch(`${url}/api/embed`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: resolvedModel, input }),
-    signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
-  });
-  // Include the body: Ollama's statusText is just "Bad Request", the real
-  // cause ("input length exceeds the context length") is in the JSON.
-  if (!res.ok) throw new Error(`Ollama error (${res.status}): ${(await res.text()).slice(0, 200)}`);
-  const data = await res.json();
-  return data.embeddings[0] as number[];
+  try {
+    return await ollamaEmbedOnce(url, resolvedModel, input);
+  } catch (err) {
+    if (!(err instanceof OllamaRetryableError)) throw err;
+    await new Promise(r => setTimeout(r, OLLAMA_RETRY_DELAY_MS));
+    return ollamaEmbedOnce(url, resolvedModel, input);
+  }
 }
 
 async function googleEmbed(text: string, apiKey?: string): Promise<number[]> {

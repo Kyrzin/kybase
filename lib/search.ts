@@ -2,6 +2,7 @@
 import { query as dbQuery, toVector } from './db';
 import { getEmbedding, getRelevanceAnchors, type RelevanceAnchors } from './embeddings';
 import { escapeLike } from './sql';
+import { TABLE_ROW_RE, TABLE_SEPARATOR_RE, unpairedFenceIndex } from './markdown';
 
 export type Confidence = 'strong' | 'moderate' | 'weak';
 
@@ -33,10 +34,13 @@ export type SearchResult = {
   // out on the other pass's rank contribution entirely (RRF's known
   // single-arm penalty), which this makes visible instead of implicit.
   matched_by?: ('text_score' | 'semantic_score')[];
-  // Filled in by enrichWithCreatedAt (a single id = any($1) lookup, not part
+  // Filled in by enrichResults (a single id = any($1) lookup, not part
   // of search_notes_fts/match_chunks — see there for why). Absent only if
   // the note was deleted in the gap between the search RPC and the lookup.
   created_at?: string;
+  // Same lookup as created_at — lets a caller tell a long note from a short
+  // one before spending a get_note call on it (list_notes already does this).
+  content_length?: number;
 };
 
 /**
@@ -79,6 +83,16 @@ const EXCERPT_LENGTH = 300;
 // long unbroken run (a URL, a CJK sentence, the x/y fillers in tests) keeps
 // its hard cut instead of losing half the window to the snap.
 const EXCERPT_SNAP_WINDOW = 24;
+
+// ts_headline (search_notes_fts, migration 009) builds its snippet in
+// Postgres with no access to note structure — makeExcerpt's table-header
+// recovery above doesn't apply to it, so a hit whose headline opens inside a
+// table body still loses its header there. Repairing it needs the note's
+// full content, which search_notes_fts deliberately doesn't return (see
+// FtsRow) to keep the common, non-table case cheap. Capped so a query that
+// happens to land inside several table-heavy notes can't turn every
+// textSearch call into N single-row content fetches.
+const MAX_TABLE_REPAIR_FETCHES = 3;
 
 export type SearchFilters = {
   folderId?: string;
@@ -131,25 +145,30 @@ async function applyFilters(
 }
 
 /**
- * Attaches created_at to each result with one extra id = any($1) lookup —
- * deliberately NOT inside applyFilters (which only ever runs when filters
- * are given) and NOT a rewrite of search_notes_fts/match_chunks (which would
- * mean a migration to alter two working, tested SQL functions for one
- * column). Called once at the end of textSearch and semanticSearch, on
- * their own final (already limited) result list — not on hybridSearch's
- * per-arm overfetch candidates. hybridSearch does not call this itself: its
- * two arms are already enriched by the time rrfMerge runs, and rrfMerge
- * preserves extra fields via its `...result` spread, so a third lookup on
- * the merged/sliced set would just re-fetch data already present.
+ * Attaches created_at and content_length to each result with one extra
+ * id = any($1) lookup — deliberately NOT inside applyFilters (which only
+ * ever runs when filters are given) and NOT a rewrite of
+ * search_notes_fts/match_chunks (which would mean a migration to alter two
+ * working, tested SQL functions for two columns). Called once at the end of
+ * textSearch and semanticSearch, on their own final (already limited) result
+ * list — not on hybridSearch's per-arm overfetch candidates. hybridSearch
+ * does not call this itself: its two arms are already enriched by the time
+ * rrfMerge runs, and rrfMerge preserves extra fields via its `...result`
+ * spread, so a third lookup on the merged/sliced set would just re-fetch
+ * data already present.
  */
-async function enrichWithCreatedAt(results: SearchResult[]): Promise<SearchResult[]> {
+async function enrichResults(results: SearchResult[]): Promise<SearchResult[]> {
   if (results.length === 0) return results;
-  const rows = await dbQuery<{ id: string; created_at: string }>(
-    'select id, created_at from notes where id = any($1)',
+  const rows = await dbQuery<{ id: string; created_at: string; content_length: number }>(
+    'select id, created_at, length(content) as content_length from notes where id = any($1)',
     [results.map((r) => r.id)]
   );
-  const createdById = new Map(rows.map((r) => [r.id, r.created_at]));
-  return results.map((r) => ({ ...r, created_at: createdById.get(r.id) }));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return results.map((r) => ({
+    ...r,
+    created_at: byId.get(r.id)?.created_at,
+    content_length: byId.get(r.id)?.content_length,
+  }));
 }
 
 function overfetchLimit(limit: number, filters: SearchFilters | undefined): number {
@@ -168,20 +187,72 @@ export function stripLeadingHeading(content: string): string {
 }
 
 /**
+ * If `offset` lands inside a table's body, returns its header + separator
+ * row (with trailing newlines, ready to prepend) and the character offset
+ * where that pair starts. Returns null when `offset` isn't inside a table —
+ * including a false one (pipe-looking text with no separator row) — or when
+ * it falls ON the header/separator lines themselves, since a caller windowing
+ * from there already has them.
+ *
+ * Table-row shape is TABLE_ROW_RE/TABLE_SEPARATOR_RE from lib/markdown.ts —
+ * the same definition renderTables uses to decide what parseMarkdown renders
+ * as a <table>, so an excerpt and the rendered note never disagree about
+ * what counts as one.
+ */
+export function tableHeaderAbove(content: string, offset: number): { text: string; offset: number } | null {
+  const lines = content.split('\n');
+  const starts: number[] = [];
+  let pos = 0;
+  for (const line of lines) { starts.push(pos); pos += line.length + 1; }
+
+  const i0 = starts.findIndex((s, idx) => s <= offset && (idx === lines.length - 1 || starts[idx + 1] > offset));
+  if (i0 === -1 || !TABLE_ROW_RE.test(lines[i0])) return null;
+
+  // A `|`-looking line inside a fenced code block is code, not a table —
+  // mirrors parseMarkdown's own ordering (fences come out as placeholders
+  // before renderTables ever sees the text; nothing extracts them on this
+  // path, so the check has to happen here instead).
+  const unpaired = unpairedFenceIndex(lines);
+  let inFence = false;
+  for (let k = 0; k <= i0; k++) {
+    if (k !== unpaired && /^```/.test(lines[k].trim())) inFence = !inFence;
+  }
+  if (inFence) return null;
+
+  // Walk up through consecutive row-shaped lines to the top of this table.
+  let i = i0;
+  while (i > 0 && TABLE_ROW_RE.test(lines[i - 1])) i--;
+  if (i + 1 >= lines.length || !TABLE_SEPARATOR_RE.test(lines[i + 1])) return null;
+
+  return { text: `${lines[i]}\n${lines[i + 1]}\n`, offset: starts[i] };
+}
+
+/**
  * Build a short excerpt from note content.
  * If `query` occurs in the content (case-insensitive), the window is centered
  * on the first match; otherwise the head of the document is used. The window
  * is one contiguous slice (never stitched from several places), and its cut
  * points are snapped to nearby whitespace so it doesn't begin or end
  * mid-word; the "…" markers appear only where content was actually dropped.
+ *
+ * A window that opens inside a table loses the header row it depends on for
+ * meaning — "0.68" or "46 nodes" read as nothing without the column name
+ * above them. When that happens, the header + separator row is prepended
+ * (see tableHeaderAbove) and the tail is shaved by the same amount, so a
+ * table hit doesn't grow the excerpt budget — same maxLen, reallocated
+ * toward the row that makes the rest of it readable.
  */
 export function makeExcerpt(content: string, query?: string, maxLen = EXCERPT_LENGTH): string {
   if (content.length <= maxLen) return content;
 
   let start = 0;
+  let matchEnd = 0; // end of the actual match text — the tail shave below must never cut into it
   if (query) {
     const idx = content.toLowerCase().indexOf(query.toLowerCase());
-    if (idx > 0) start = Math.max(0, idx - Math.floor((maxLen - query.length) / 2));
+    if (idx > 0) {
+      start = Math.max(0, idx - Math.floor((maxLen - query.length) / 2));
+      matchEnd = idx + query.length;
+    }
   }
   let end = Math.min(content.length, start + maxLen);
 
@@ -191,29 +262,56 @@ export function makeExcerpt(content: string, query?: string, maxLen = EXCERPT_LE
     const ws = content.slice(start, start + EXCERPT_SNAP_WINDOW).search(/\s/);
     if (ws !== -1) start += ws + 1;
   }
-  if (end < content.length) {
+
+  let tableHeader = '';
+  let pinnedToMatchEnd = false;
+  if (start > 0) {
+    const header = tableHeaderAbove(content, start);
+    if (header && header.offset + header.text.length <= start) {
+      tableHeader = header.text;
+      const shaved = Math.max(start, end - tableHeader.length);
+      // Never shave past the match itself — showing the header only to lose
+      // the row that was searched for defeats the point of both. Pinned
+      // here skips the whitespace-snap below too: snapping backward from an
+      // already-tight matchEnd boundary would cut into the match text it
+      // exists to protect.
+      if (shaved < matchEnd) { end = matchEnd; pinnedToMatchEnd = true; }
+      else { end = shaved; }
+    }
+  }
+
+  if (end < content.length && !pinnedToMatchEnd) {
     const from = Math.max(start + 1, end - EXCERPT_SNAP_WINDOW);
     const ws = content.slice(from, end).search(/\s\S*$/); // start of the last (partial) word
     if (ws !== -1) end = from + ws;
   }
 
   const body = content.slice(start, end).trim();
-  return (start > 0 ? '…' : '') + body + (end < content.length ? '…' : '');
+  return tableHeader + (start > 0 ? '…' : '') + body + (end < content.length ? '…' : '');
 }
 
 export type NamedResultList = { field: 'text_score' | 'semantic_score'; results: SearchResult[] };
+
+// A single-arm SearchResult's `score` is that arm's own ranking value (ts_rank,
+// cosine, positional fallback) — meaningful on its own. Once merged, it isn't:
+// rrf_score is rank-based fusion across arms, useful for explaining hybrid's
+// sort order but not comparable to a relevance score, so the merged shape
+// carries a differently-named field instead of overloading `score` with two
+// unrelated meanings depending on whether you're looking at a raw or a
+// hybrid result.
+export type HybridSearchResult = Omit<SearchResult, 'score'> & { rrf_score: number };
 
 /**
  * Reciprocal Rank Fusion — merges multiple ranked result lists into one.
  * Deduplicates by id, re-sorts by combined RRF score.
  * Avoids the incompatible-scale problem (FTS ts_rank vs cosine similarity):
- * `score` on the merged result is the RRF fusion, which is rank-based and
+ * `rrf_score` on the merged result is the RRF fusion, which is rank-based and
  * says nothing about how relevant a hit actually is — only its position
  * within each pass. Each contributing pass's own score is preserved under
  * `field` (text_score / semantic_score) so a caller can still tell "this
  * matched with cosine 0.72" from "this only showed up in the text pass".
  */
-export function rrfMerge(lists: NamedResultList[]): SearchResult[] {
+export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
   const scoreMap = new Map<string, { result: SearchResult; rrfScore: number; relevance: number; extra: Partial<SearchResult> }>();
 
   for (const { field, results } of lists) {
@@ -236,18 +334,85 @@ export function rrfMerge(lists: NamedResultList[]): SearchResult[] {
 
   return [...scoreMap.values()]
     .sort((a, b) => b.rrfScore - a.rrfScore)
-    .map(({ result, rrfScore, relevance, extra }) => ({
-      ...result,
-      ...extra,
-      score: rrfScore,
-      relevance,
-      confidence: confidenceFor(relevance),
-      matched_by: Object.keys(extra) as ('text_score' | 'semantic_score')[],
-    }));
+    .map(({ result, rrfScore, relevance, extra }) => {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars -- drop `score`, forward everything else
+      const { score: _score, ...rest } = result;
+      return {
+        ...rest,
+        ...extra,
+        rrf_score: rrfScore,
+        relevance,
+        confidence: confidenceFor(relevance),
+        matched_by: Object.keys(extra) as ('text_score' | 'semantic_score')[],
+      };
+    });
 }
 
 type FtsRow = { id: string; title: string; tags: string[]; rank: number; headline: string };
 type NoteRow = { id: string; title: string; content: string; tags: string[] };
+
+/**
+ * A ts_headline snippet that looks like loose table-cell fragments (at
+ * least a couple of `|` delimiters) with no separator row anywhere in it.
+ * Deliberately NOT line-anchored like TABLE_ROW_RE/TABLE_SEPARATOR_RE:
+ * ts_headline crops at word boundaries (MaxWords=45, migration 009), not
+ * cell boundaries, so a genuinely broken snippet routinely has NO full
+ * `|...|`-shaped line at all — the row's own opening pipe falls before the
+ * crop, its closing one after. A real live case: `без префикса −0.004) |
+ * полоса 0.60–0.68 ... |` starts and ends mid-cell, no line passes
+ * TABLE_ROW_RE, and a check built on that regex misses it outright. Pipe
+ * counting plus a substring separator check catches it anyway. Errs toward
+ * over-flagging on purpose — a false positive costs one wasted point-fetch
+ * in repairBrokenTableExcerpts below (cheap, capped); a false negative
+ * leaves a hit silently unreadable, the failure this pass exists to catch.
+ */
+function looksLikeBrokenTableExcerpt(excerpt: string): boolean {
+  const pipeCount = (excerpt.match(/\|/g) ?? []).length;
+  if (pipeCount < 2) return false;
+  return !/\|[ \t]*:?-{2,}:?[ \t]*\|/.test(excerpt);
+}
+
+/**
+ * Point-fixes ts_headline snippets flagged by looksLikeBrokenTableExcerpt:
+ * one batched `id = any($1)` fetch (same pattern as enrichResults) for at
+ * most MAX_TABLE_REPAIR_FETCHES of them, locates the snippet inside the
+ * fetched content via indexOf on its own first line (the headline is a
+ * verbatim substring of the note once <b> tags are stripped — same trick
+ * makeExcerpt's own centering uses), and prepends the table header
+ * tableHeaderAbove finds there. Mutates `results` in place. Silent no-op
+ * for any candidate that doesn't resolve (note edited concurrently, or the
+ * headline genuinely wasn't inside a table after all) — the excerpt is left
+ * exactly as ts_headline produced it, no worse than before this ran.
+ */
+async function repairBrokenTableExcerpts(results: SearchResult[]): Promise<void> {
+  const candidates = results.filter((r) => looksLikeBrokenTableExcerpt(r.excerpt));
+  if (candidates.length === 0) return;
+  const toFix = candidates.slice(0, MAX_TABLE_REPAIR_FETCHES);
+  if (candidates.length > toFix.length) {
+    console.warn(
+      `[search] table-header repair: ${candidates.length} broken excerpts this call, ` +
+      `fixing only ${toFix.length} (MAX_TABLE_REPAIR_FETCHES)`
+    );
+  }
+
+  const rows = await dbQuery<{ id: string; content: string }>(
+    'select id, content from notes where id = any($1)',
+    [toFix.map((r) => r.id)]
+  );
+  const contentById = new Map(rows.map((r) => [r.id, r.content]));
+
+  for (const r of toFix) {
+    const content = contentById.get(r.id);
+    if (!content) continue;
+    const firstLine = r.excerpt.split('\n')[0];
+    const idx = content.indexOf(firstLine);
+    if (idx === -1) continue;
+    const header = tableHeaderAbove(content, idx);
+    if (header && header.offset + header.text.length <= idx) {
+      r.excerpt = header.text + r.excerpt;
+    }
+  }
+}
 
 /**
  * Full-text search with ru+en morphology via the search_notes_fts RPC
@@ -261,7 +426,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     'select * from search_notes_fts($1, $2)',
     [query, fetchLimit]
   );
-  if (rows.length === 0) return enrichWithCreatedAt(await substringSearch(query, limit, filters));
+  if (rows.length === 0) return enrichResults(await substringSearch(query, limit, filters));
 
   // n.rank is Postgres's actual ts_rank for this query — a genuine
   // relevance signal, unlike the positional score substringSearch falls
@@ -278,7 +443,9 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
       confidence: confidenceFor(relevance),
     };
   });
-  return enrichWithCreatedAt(await applyFilters(results, limit, filters));
+  const filtered = await applyFilters(results, limit, filters);
+  await repairBrokenTableExcerpts(filtered);
+  return enrichResults(filtered);
 }
 
 /** Title matches rank above content matches (queried separately, merged in order). */
@@ -357,7 +524,7 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
       confidence: confidenceFor(relevance),
     };
   });
-  return enrichWithCreatedAt(await applyFilters(results, limit, filters));
+  return enrichResults(await applyFilters(results, limit, filters));
 }
 
 /**
@@ -375,7 +542,7 @@ export async function bestSemanticScore(query: string): Promise<number | null> {
   return row?.similarity ?? null;
 }
 
-export async function hybridSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
+export async function hybridSearch(query: string, limit = 10, filters?: SearchFilters): Promise<HybridSearchResult[]> {
   const candidateLimit = Math.min(RRF_CANDIDATE_CAP, limit * RRF_CANDIDATE_FACTOR);
   const [text, semantic] = await Promise.all([
     textSearch(query, candidateLimit, filters),

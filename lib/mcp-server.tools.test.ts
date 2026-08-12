@@ -93,9 +93,9 @@ describe('tools/list', () => {
     const { tools } = await client.listTools();
     expect(tools.map(t => t.name).sort()).toEqual([
       'append_to_note', 'create_folder', 'create_note', 'delete_folder', 'delete_note',
-      'get_backlinks', 'get_graph', 'get_note', 'get_note_with_links', 'indexing_status',
-      'list_folders', 'list_notes', 'list_tags', 'restore_note', 'search_notes',
-      'update_folder', 'update_note',
+      'get_backlinks', 'get_graph', 'get_note', 'indexing_status',
+      'list_folders', 'list_notes', 'list_tags', 'replace_in_note', 'restore_note',
+      'search_notes', 'update_folder', 'update_note',
     ]);
   });
 
@@ -105,9 +105,9 @@ describe('tools/list', () => {
   it('states both content limits intelligibly', async () => {
     const client = await connectClient();
     const { tools } = await client.listTools();
-    const withLinks = tools.find((t) => t.name === 'get_note_with_links')!;
-    expect(withLinks.description).toContain('default 20000 chars');
-    expect(withLinks.description).toContain('capped at 4000 chars');
+    const getNote = tools.find((t) => t.name === 'get_note')!;
+    expect(getNote.description).toContain('20000 chars by default');
+    expect(getNote.description).toContain('capped at 4000 chars');
     for (const t of tools) expect(t.description).not.toMatch(/\d{6,}/);
   });
 
@@ -140,7 +140,7 @@ describe('list_notes', () => {
     await call('list_notes', {});
     const [sql, params] = query.mock.calls[0];
     expect(sql).toContain('deleted_at is null');
-    expect(params).toEqual([50]); // default limit
+    expect(params).toEqual([20]); // default limit
   });
 
   it('trashed:true lists soft-deleted notes instead, ignoring folder_id/tag', async () => {
@@ -163,7 +163,7 @@ describe('list_notes', () => {
     const [sql, params] = query.mock.calls[0];
     expect(sql).toContain('created_at >= $1');
     expect(sql).toContain('created_at <= $2');
-    expect(params).toEqual(['2026-01-01', '2026-06-01', 50]);
+    expect(params).toEqual(['2026-01-01', '2026-06-01', 20]);
   });
 
   it('defaults to sorting by updated_at (unchanged behavior)', async () => {
@@ -207,11 +207,20 @@ describe('list_tags', () => {
   it('returns the tag/count rows from an unnest+group-by, most-used first', async () => {
     query.mockResolvedValue([{ tag: 'workflow', count: 9 }, { tag: 'проект', count: 3 }]);
     const out = await call('list_tags', {}) as { tag: string; count: number }[];
-    const [sql] = query.mock.calls[0];
+    const [sql, params] = query.mock.calls[0];
     expect(sql).toContain('unnest(tags)');
     expect(sql).toContain('count(*)');
     expect(sql).toContain('order by count desc');
+    expect(sql).toContain('limit $1');
+    expect(params).toEqual([40]); // default limit
     expect(out).toEqual([{ tag: 'workflow', count: 9 }, { tag: 'проект', count: 3 }]);
+  });
+
+  it('caps the tag list at a caller-given limit', async () => {
+    query.mockResolvedValue([]);
+    await call('list_tags', { limit: 5 });
+    const [, params] = query.mock.calls[0];
+    expect(params).toEqual([5]);
   });
 
   it('is advertised in the create_note/update_note tag guidance', async () => {
@@ -387,13 +396,13 @@ describe('get_note title fallback', () => {
     expect(patterns).toEqual(['50\\%\\_off%', '%50\\%\\_off%']);
   });
 
-  it('applies the same resolution in get_note_with_links', async () => {
+  it('applies the same resolution with resolve_links', async () => {
     queryOne.mockResolvedValue(null);
     query.mockImplementation(notesMatching({
       'Хэндофф%': [{ id: 'n9', title: 'Хэндофф проектному агенту: Zoho MCP', content: 'no links here' }],
     }));
-    const out = await call('get_note_with_links', { title: 'Хэндофф' }) as Record<string, unknown>;
-    expect((out.note as Record<string, unknown>).id).toBe('n9');
+    const out = await call('get_note', { title: 'Хэндофф', resolve_links: true }) as Record<string, unknown>;
+    expect(out.id).toBe('n9');
   });
 });
 
@@ -451,6 +460,216 @@ describe('append_to_note', () => {
       id: ID, content: 'x', section: 'Missing',
     });
     expect(err).toContain('Today');
+  });
+
+  it('refuses a write that would exceed the note content limit, note left untouched', async () => {
+    mockNote('# Log\n\nshort');
+    const err = await callExpectingError('append_to_note', {
+      id: ID, content: 'x'.repeat(MAX_NOTE_CONTENT_CHARS),
+    });
+    expect(err).toContain(`${MAX_NOTE_CONTENT_CHARS}-character limit`);
+    // Only the locked read happened — no update statement was sent.
+    expect(txClientQuery).toHaveBeenCalledTimes(1);
+  });
+
+  describe('at', () => {
+    // The actual failure mode this guards: a journal with an H1 title and a
+    // blockquote legend under it, "new entries on top" convention. Naive
+    // offset-0 insertion lands the new entry ABOVE the H1 — the one case
+    // this parameter exists to fix.
+    const JOURNAL = [
+      '# Kybase — journal',
+      '',
+      '> Closed passes, newest first.',
+      '> Format: ...',
+      '',
+      '## External review 2026-08-11',
+      'body one',
+      '',
+      '## Roadmap',
+      'body two',
+    ].join('\n');
+
+    it('note_start lands after the H1/intro, before the first nested heading — not offset 0', async () => {
+      mockNote(JOURNAL);
+      await call('append_to_note', { id: ID, content: 'new entry', at: 'note_start' });
+      const body = txClientQuery.mock.calls[1][1][0] as string;
+      expect(body.indexOf('# Kybase — journal')).toBeLessThan(body.indexOf('new entry'));
+      expect(body.indexOf('Closed passes')).toBeLessThan(body.indexOf('new entry'));
+      expect(body.indexOf('new entry')).toBeLessThan(body.indexOf('## External review 2026-08-11'));
+    });
+
+    it('note_start falls back to the end of the note when there is only one heading', async () => {
+      mockNote(['# Only heading', 'some prose'].join('\n'));
+      await call('append_to_note', { id: ID, content: 'tail entry', at: 'note_start' });
+      const body = txClientQuery.mock.calls[1][1][0] as string;
+      expect(body.trim().endsWith('tail entry')).toBe(true);
+    });
+
+    it('note_start on a note with no headings at all lands at offset 0', async () => {
+      mockNote('just prose, no headings');
+      await call('append_to_note', { id: ID, content: 'front entry', at: 'note_start' });
+      const body = txClientQuery.mock.calls[1][1][0] as string;
+      // insertAddition always blank-line-separates from head, even an empty
+      // one — same as today's note_end against an empty note. What matters
+      // here is order: the addition precedes the original text, not offset 0
+      // literally being glued to "front entry" with no separator at all.
+      expect(body.trim().startsWith('front entry')).toBe(true);
+      expect(body.indexOf('front entry')).toBeLessThan(body.indexOf('just prose'));
+    });
+
+    it('before_section lands above the section\'s own heading line', async () => {
+      mockNote();
+      await call('append_to_note', { id: ID, content: 'new section text', section: 'Later', at: 'before_section' });
+      const body = txClientQuery.mock.calls[1][1][0] as string;
+      expect(body.indexOf('new section text')).toBeGreaterThan(body.indexOf('## Today'));
+      expect(body.indexOf('new section text')).toBeLessThan(body.indexOf('## Later'));
+    });
+
+    it('after_section behaves like today\'s section append (past the whole section)', async () => {
+      mockNote();
+      await call('append_to_note', { id: ID, content: 'trailing', section: 'Today', at: 'after_section' });
+      const body = txClientQuery.mock.calls[1][1][0] as string;
+      expect(body.indexOf('trailing')).toBeGreaterThan(body.indexOf('first entry'));
+      expect(body.indexOf('trailing')).toBeLessThan(body.indexOf('## Later'));
+    });
+
+    it('section_start lands right under the heading, before the section\'s existing body', async () => {
+      mockNote();
+      await call('append_to_note', { id: ID, content: 'leading line', section: 'Today', at: 'section_start' });
+      const body = txClientQuery.mock.calls[1][1][0] as string;
+      expect(body.indexOf('## Today')).toBeLessThan(body.indexOf('leading line'));
+      expect(body.indexOf('leading line')).toBeLessThan(body.indexOf('first entry'));
+    });
+
+    it('a section-relative at without section gives a clear error, not a crash', async () => {
+      mockNote();
+      const err = await callExpectingError('append_to_note', { id: ID, content: 'x', at: 'before_section' });
+      expect(err).toContain('requires section');
+    });
+
+    it('an unknown section with at: before_section lists available sections, same as today', async () => {
+      mockNote();
+      const err = await callExpectingError('append_to_note', {
+        id: ID, content: 'x', section: 'Missing', at: 'before_section',
+      });
+      expect(err).toContain('Today');
+      expect(err).toContain('Later');
+    });
+
+    it('omitting at keeps default behavior: note_end without section, section_end with it', async () => {
+      mockNote();
+      await call('append_to_note', { id: ID, content: 'default no-section' });
+      const noSectionBody = txClientQuery.mock.calls[1][1][0] as string;
+      expect(noSectionBody.trim().endsWith('default no-section')).toBe(true);
+
+      mockNote();
+      await call('append_to_note', { id: ID, content: 'default with-section', section: 'Today' });
+      // Second call in this test — calls[0]/[1] belong to the first
+      // invocation above, this one's locked-read/update land at [2]/[3].
+      const sectionBody = txClientQuery.mock.calls[3][1][0] as string;
+      expect(sectionBody.indexOf('default with-section')).toBeLessThan(sectionBody.indexOf('## Later'));
+      expect(sectionBody.indexOf('default with-section')).toBeGreaterThan(sectionBody.indexOf('first entry'));
+    });
+  });
+});
+
+describe('replace_in_note', () => {
+  const ID = '11111111-1111-4111-8111-111111111111';
+  const UPDATED_AT = '2026-01-01T00:00:00.000Z';
+
+  /** Resolve the id, then the locked read (and the write, if the handler reaches it). */
+  const mockReplace = (content: string, updatedAt = UPDATED_AT) => {
+    queryOne.mockResolvedValue({ id: 'n1' });
+    txClientQuery
+      .mockResolvedValueOnce({ rows: [{ title: 'T', content, updated_at: updatedAt }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'n1', title: 'T', updated_at: updatedAt }] });
+  };
+
+  it('replaces the one match and reports content_length', async () => {
+    mockReplace('before\n\n- [ ] task\n\nafter');
+    const out = await call('replace_in_note', {
+      id: ID, find: '- [ ] task', replace: '- [x] task',
+    }) as { replaced_count: number; content_length: number };
+    const body = txClientQuery.mock.calls[1][1][0] as string;
+    expect(body).toContain('- [x] task');
+    expect(body).not.toContain('- [ ] task');
+    expect(out.replaced_count).toBe(1);
+    expect(out.content_length).toBe(body.length);
+  });
+
+  it('refuses when find is not found, note left untouched', async () => {
+    mockReplace('nothing to see here');
+    const err = await callExpectingError('replace_in_note', {
+      id: ID, find: '- [ ] task', replace: '- [x] task',
+    });
+    expect(err).toContain('not found');
+    expect(txClientQuery).toHaveBeenCalledTimes(1); // locked read only, no update
+  });
+
+  it('refuses when find matches more than expected_count, reporting the actual count', async () => {
+    mockReplace('- [ ] a\n- [ ] b\n- [ ] c');
+    const err = await callExpectingError('replace_in_note', {
+      id: ID, find: '- [ ] ', replace: '- [x] ',
+    }); // default expected_count is 1, but this matches 3 times
+    expect(err).toContain('3');
+    expect(err).toContain('expected 1');
+    expect(txClientQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('replaces all matches when expected_count matches the actual count', async () => {
+    mockReplace('- [ ] a\n- [ ] b\n- [ ] c');
+    const out = await call('replace_in_note', {
+      id: ID, find: '- [ ] ', replace: '- [x] ', expected_count: 3,
+    }) as { replaced_count: number };
+    const body = txClientQuery.mock.calls[1][1][0] as string;
+    expect(body).toBe('- [x] a\n- [x] b\n- [x] c');
+    expect(out.replaced_count).toBe(3);
+  });
+
+  it('reads the note under a row lock, same as append_to_note', async () => {
+    mockReplace('x');
+    const err = await callExpectingError('replace_in_note', { id: ID, find: 'y', replace: 'z' });
+    expect(err).toContain('not found');
+    expect(txClientQuery.mock.calls[0][0]).toMatch(/select[\s\S]*for update/i);
+  });
+
+  it('re-embeds the note in the background', async () => {
+    mockReplace('x');
+    await call('replace_in_note', { id: ID, find: 'x', replace: 'y' });
+    expect(indexNoteAsync).toHaveBeenCalledOnce();
+  });
+
+  it('expected_updated_at does not need to be given — find/replace self-anchors', async () => {
+    mockReplace('x');
+    await call('replace_in_note', { id: ID, find: 'x', replace: 'y' });
+    expect(txClientQuery).toHaveBeenCalledTimes(2); // reached the update, no guard blocked it
+  });
+
+  it('refuses a stale expected_updated_at, note left untouched', async () => {
+    mockReplace('x', '2026-01-02T00:00:00.000Z'); // actual updated_at is newer than expected below
+    const err = await callExpectingError('replace_in_note', {
+      id: ID, find: 'x', replace: 'y', expected_updated_at: '2026-01-01T00:00:00.000Z',
+    });
+    expect(err).toContain('changed since you read it');
+    expect(txClientQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('goes through with a matching expected_updated_at', async () => {
+    mockReplace('x', UPDATED_AT);
+    await call('replace_in_note', {
+      id: ID, find: 'x', replace: 'y', expected_updated_at: UPDATED_AT,
+    });
+    expect(txClientQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses a write that would exceed the note content limit, note left untouched', async () => {
+    mockReplace('x');
+    const err = await callExpectingError('replace_in_note', {
+      id: ID, find: 'x', replace: 'y'.repeat(MAX_NOTE_CONTENT_CHARS + 1),
+    });
+    expect(err).toContain(`${MAX_NOTE_CONTENT_CHARS}-character limit`);
+    expect(txClientQuery).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -546,7 +765,7 @@ describe('list_notes recency filter', () => {
     const [sql, params] = query.mock.calls[0];
     expect(sql).toContain('created_at >= $1');
     expect(sql).toContain('updated_at >= $2');
-    expect(params).toEqual(['2026-01-01', '2026-06-01', 50]);
+    expect(params).toEqual(['2026-01-01', '2026-06-01', 20]);
   });
 });
 
@@ -704,6 +923,20 @@ describe('search_notes', () => {
 });
 
 describe('folders', () => {
+  it('list_folders resolves path from a single query, no created_at/parent_id', async () => {
+    query.mockResolvedValue([
+      { id: 'a', name: 'Parent', parent_id: null },
+      { id: 'b', name: 'Child', parent_id: 'a' },
+    ]);
+    type Row = { id: string; name: string; path: string; created_at?: string; parent_id?: string };
+    const out = await call('list_folders', {}) as Row[];
+    expect(query).toHaveBeenCalledTimes(1); // no second folderPathMap() round trip
+    expect(out.find(f => f.id === 'a')!.path).toBe('Parent');
+    expect(out.find(f => f.id === 'b')!.path).toBe('Parent/Child');
+    expect(out.every(f => f.created_at === undefined && f.parent_id === undefined)).toBe(true);
+    expect(Object.keys(out[0]).sort()).toEqual(['id', 'name', 'path']);
+  });
+
   it('create_folder inserts with an optional parent', async () => {
     queryOne.mockResolvedValue({ id: 'f', name: 'N', parent_id: null });
     await call('create_folder', { name: 'N' });
@@ -791,31 +1024,42 @@ describe('get_backlinks', () => {
   });
 });
 
-describe('get_note_with_links', () => {
+describe('get_note with resolve_links', () => {
   it('resolves present links and separates missing ones', async () => {
     queryOne
       .mockResolvedValueOnce({ id: 'main', title: 'Main', content: 'links [[Found]] and [[Gone]]' })
       .mockImplementation(async (_sql: string, params: unknown[]) =>
         params[0] === 'Found' ? { id: 'f', title: 'Found', content: 'linked body' } : null);
-    const out = await call('get_note_with_links', { id: '11111111-1111-4111-8111-111111111111' }) as {
+    const out = await call('get_note', { id: '11111111-1111-4111-8111-111111111111', resolve_links: true }) as {
       linked_notes: { title: string }[]; unresolved_links: string[];
     };
     expect(out.linked_notes.map(n => n.title)).toEqual(['Found']);
     expect(out.unresolved_links).toEqual(['Gone']);
   });
+
+  it('omits linked_notes/unresolved_links entirely when resolve_links is not set', async () => {
+    queryOne.mockResolvedValueOnce({ id: 'main', title: 'Main', content: 'links [[Found]]' });
+    const out = await call('get_note', { id: '11111111-1111-4111-8111-111111111111' }) as Record<string, unknown>;
+    expect(out.linked_notes).toBeUndefined();
+    expect(out.unresolved_links).toBeUndefined();
+  });
 });
 
 describe('get_graph', () => {
-  it('builds directed edges from wikilinks and includes semantic edges', async () => {
+  it('builds directed edges from wikilinks, indexed against nodes, includes semantic edges', async () => {
     query.mockResolvedValue([
       { id: 'a', title: 'A', content: 'to [[B]]' },
       { id: 'b', title: 'B', content: 'no links' },
     ]);
     getSemanticEdges.mockResolvedValue([{ from: 'a', to: 'b', score: 0.9 }]);
-    const out = await call('get_graph') as { nodes: unknown[]; edges: { from: string; to: string }[]; semantic_edges: unknown[] };
-    expect(out.nodes).toHaveLength(2);
-    expect(out.edges).toEqual([{ from: 'a', to: 'b' }]);
-    expect(out.semantic_edges).toHaveLength(1);
+    const out = await call('get_graph') as {
+      nodes: { i: number; id: string; t: string }[];
+      edges: [number, number][];
+      semantic_edges: [number, number, number][];
+    };
+    expect(out.nodes).toEqual([{ i: 0, id: 'a', t: 'A' }, { i: 1, id: 'b', t: 'B' }]);
+    expect(out.edges).toEqual([[0, 1]]);
+    expect(out.semantic_edges).toEqual([[0, 1, 0.9]]);
   });
 
   it('still returns the wikilink graph when semantic edges fail', async () => {

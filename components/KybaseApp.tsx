@@ -123,6 +123,7 @@ export default function KybaseApp() {
     selectNote, saveNote, addTag, removeTag,
     createNote, createFolder, deleteFolder, renameFolder, deleteNote, moveNote, moveFolder,
     syncError, setSyncError, canOverwriteConflict, overwriteConflict,
+    reindexingNoteId, reindexNote,
   } = useNotes({ onNoteOpened, onMoveDone, onRenameDone, onTagInputConsumed, restoreFocus });
   const [overwriting, setOverwriting] = useState(false);
 
@@ -393,6 +394,8 @@ export default function KybaseApp() {
               filterByTag={filterByTag}
               wikilinkPreview={wikilinkPreview}
               setWikilinkPreview={setWikilinkPreview}
+              reindexingNoteId={reindexingNoteId}
+              reindexNote={reindexNote}
             />
           ) : (
             <div className="editor-area">

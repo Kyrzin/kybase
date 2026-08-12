@@ -407,6 +407,22 @@ export function useNotes(cb: UseNotesCallbacks) {
     saveTags(activeNote.tags.filter(t => t !== tag));
   }, [activeNote, saveTags]);
 
+  // ── Manual per-note reindex ──────────────────────────────────────────────
+  // Escape hatch for embedding_pending stuck true after a provider failure
+  // (Ollama timeout/restart, or a note too long) — the automatic index fires
+  // async on save and any error there is invisible beyond that flag. This
+  // route (app/api/notes/[id]/reindex) is synchronous, so a real failure
+  // surfaces in syncError instead of being swallowed.
+  const [reindexingNoteId, setReindexingNoteId] = useState<string | null>(null);
+  const reindexNote = useCallback(async (id: string) => {
+    setReindexingNoteId(id);
+    const result = await send(`/api/notes/${id}/reindex`, { method: 'POST' }, 'Reindex failed');
+    setReindexingNoteId(null);
+    if (result.ok) {
+      setNotes(prev => prev.map(n => (n.id === id ? { ...n, embedding_pending: false } : n)));
+    }
+  }, [send]);
+
   const createNote = useCallback(async (folderId: string | null = null) => {
     // Flush the current note's pending debounced edit before switching away
     // — otherwise its still-scheduled autosave timer gets cleared (by the
@@ -561,5 +577,6 @@ export function useNotes(cb: UseNotesCallbacks) {
     expandedFolders, toggleFolder, expandAncestors,
     flushSave, selectNote, saveNote, saveTags, addTag, removeTag,
     createNote, createFolder, deleteFolder, renameFolder, deleteNote, moveNote, moveFolder,
+    reindexingNoteId, reindexNote,
   };
 }

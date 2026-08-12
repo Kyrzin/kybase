@@ -51,6 +51,8 @@ export default function Editor(p: {
   filterByTag: (tag: string) => void;
   wikilinkPreview: WikilinkPreview;
   setWikilinkPreview: (v: WikilinkPreview) => void;
+  reindexingNoteId: string | null;
+  reindexNote: (id: string) => void;
 }) {
   const {
     activeNote, activeFolder, notes, folders, activeNoteId,
@@ -61,6 +63,7 @@ export default function Editor(p: {
     linkPickerOpen, setLinkPickerOpen, linkSearch, setLinkSearch, linkInlineTrigger, setLinkInlineTrigger,
     addingTag, setAddingTag, newTag, setNewTag, addTag, removeTag, filterByTag,
     wikilinkPreview, setWikilinkPreview,
+    reindexingNoteId, reindexNote,
   } = p;
 
   const editorRef        = useRef<HTMLTextAreaElement>(null);
@@ -326,8 +329,27 @@ export default function Editor(p: {
                       />
                       {/* Low-emphasis by design: metadata, not content — lives after
                           the note body so it doesn't compete for attention above it. */}
-                      <div style={{ maxWidth: 760, marginTop: 24, paddingTop: 12, borderTop: '1px solid #313244', fontSize: 11, color: '#585b70' }}>
-                        Created {new Date(activeNote.created_at).toLocaleDateString()} · Updated {new Date(activeNote.updated_at).toLocaleDateString()}
+                      <div style={{ maxWidth: 760, marginTop: 24, paddingTop: 12, borderTop: '1px solid #313244', fontSize: 11, color: '#585b70', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span>
+                          Created {new Date(activeNote.created_at).toLocaleDateString()} · Updated {new Date(activeNote.updated_at).toLocaleDateString()}
+                          {activeNote.embedding_pending && <span style={{ color: '#f9e2af' }}> · Not indexed yet</span>}
+                        </span>
+                        <button
+                          onClick={() => reindexNote(activeNote.id)}
+                          disabled={reindexingNoteId === activeNote.id}
+                          title="Recompute this note's embeddings — use if semantic/hybrid search doesn't find it, or after an indexing error"
+                          style={{
+                            display: 'flex', alignItems: 'center', gap: 4, marginLeft: 'auto',
+                            background: 'transparent', border: 'none', color: '#585b70', fontSize: 11,
+                            cursor: reindexingNoteId === activeNote.id ? 'not-allowed' : 'pointer',
+                            padding: '2px 4px', fontFamily: 'inherit',
+                          }}
+                        >
+                          <span style={{ display: 'inline-flex', animation: reindexingNoteId === activeNote.id ? 'spin 0.9s linear infinite' : 'none' }}>
+                            {Icons.refresh}
+                          </span>
+                          {reindexingNoteId === activeNote.id ? 'Reindexing…' : 'Reindex'}
+                        </button>
                       </div>
                     </>
                   )}

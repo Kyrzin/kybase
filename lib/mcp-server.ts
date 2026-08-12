@@ -763,7 +763,11 @@ export function createMcpServer(): McpServer {
     'phrases, where FTS beats meaning-matching. ' +
     'Returns short excerpts, not full notes — call get_note on the top 1-2 hits to read them. ' +
     'Each hit carries `relevance` (0..1) and `confidence` ("strong"/"moderate"/"weak") — strong hits ' +
-    'can be quoted directly, weak means reformulate. Comparable within one query\'s results only. ' +
+    'can be quoted directly, weak usually means reformulate. Exception: if a weak hit is the only or ' +
+    'top-ranked result and its excerpt already answers the question, read it before discarding it — ' +
+    'the embedding model under-scores cross-lingual matches (a Russian query against English note ' +
+    'content) and long-form book-style notes, so "weak" there reflects the model\'s scale, not ' +
+    'necessarily wrong content. Comparable within one query\'s results only. ' +
     'Filters: folder_id, tag, created_after/before (when a note was made), updated_after/before ' +
     '(when it last changed) — these are NOT interchangeable. ' +
     'An empty semantic/hybrid result includes threshold/best_score/pending_embeddings so you can ' +

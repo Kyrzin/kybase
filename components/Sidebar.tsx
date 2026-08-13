@@ -154,7 +154,7 @@ export default function Sidebar({
           <button title="New Note"   onClick={() => createNote(focusFolderId)}>{Icons.plus}</button>
           <button title="New Folder" onClick={() => createFolder(focusFolderId)}>{Icons.newFolder}</button>
           <button
-            title="Import PDF — converts headings by font size, not by copy-pasted text"
+            title="Import PDF/EPUB/DOCX — headings from real structure (EPUB/DOCX) or font size (PDF), not copy-pasted text"
             disabled={pdfImporting}
             style={{ opacity: pdfImporting ? 0.6 : 1, cursor: pdfImporting ? 'not-allowed' : 'pointer' }}
             onClick={() => pdfInputRef.current?.click()}
@@ -166,7 +166,7 @@ export default function Sidebar({
           <input
             ref={pdfInputRef}
             type="file"
-            accept="application/pdf"
+            accept=".pdf,.epub,.docx"
             style={{ display: 'none' }}
             onChange={(e) => {
               const file = e.target.files?.[0];

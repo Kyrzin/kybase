@@ -453,21 +453,22 @@ export function useNotes(cb: UseNotesCallbacks) {
     setEditTitle(newNote.title);
   }, [notes, flushSave]);
 
-  // ── PDF import ─────────────────────────────────────────────────────────
+  // ── Document import (PDF/EPUB/DOCX) ──────────────────────────────────────
   // Raw-body upload (matches SettingsModal's ZIP importVault, not
-  // multipart/form-data) — headers carry filename/folder, body is the PDF
-  // bytes untouched. Conversion (lib/pdf-import.ts) runs server-side.
+  // multipart/form-data) — headers carry filename/folder, body is the file
+  // bytes untouched. Format dispatch + conversion runs server-side
+  // (app/api/notes/import-document, by filename extension).
   const [pdfImporting, setPdfImporting] = useState(false);
   const importPdfFile = useCallback(async (file: File, folderId: string | null): Promise<void> => {
     await flushSave();
     setPdfImporting(true);
     try {
-      const url = `/api/notes/import-pdf${folderId ? `?folder_id=${folderId}` : ''}`;
+      const url = `/api/notes/import-document${folderId ? `?folder_id=${folderId}` : ''}`;
       const res = await apiFetch(url, {
         method: 'POST',
         body: file,
         headers: {
-          'Content-Type': 'application/pdf',
+          'Content-Type': 'application/octet-stream', // dispatch is by filename extension, not this
           // Latin-1-only header value; this vault's titles are routinely
           // Cyrillic/German — see the matching decodeURIComponent server-side.
           'X-Filename': encodeURIComponent(file.name),
@@ -475,7 +476,7 @@ export function useNotes(cb: UseNotesCallbacks) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setSyncError(`PDF import failed: ${typeof data.error === 'string' ? data.error : `HTTP ${res.status}`}`);
+        setSyncError(`Import failed: ${typeof data.error === 'string' ? data.error : `HTTP ${res.status}`}`);
         return;
       }
       setSyncError(null);
@@ -483,7 +484,7 @@ export function useNotes(cb: UseNotesCallbacks) {
       setNotes(prev => [...prev, newNote]);
       setActiveNoteId(newNote.id);
     } catch {
-      setSyncError('PDF import failed: no connection to the server');
+      setSyncError('Import failed: no connection to the server');
     } finally {
       setPdfImporting(false);
     }

@@ -209,6 +209,14 @@ export function countOccurrences(haystack: string, needle: string): number {
   }
 }
 
+/** Text to replace in a note — one step of a replace_in_note batch. */
+type NoteEdit = { find: string; replace: string; expected_count: number };
+
+/** Keeps a mismatched `find` readable in an error message instead of dumping a whole paragraph. */
+function truncateForError(s: string, max = 80): string {
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
 export function windowContent<T extends { content: string }>(
   note: T,
   offset: number,
@@ -638,21 +646,72 @@ export function createMcpServer(): McpServer {
   );
 
   // ── replace_in_note ──────────────────────────────────────────────────────
+  const editItemShape = {
+    find:       z.string().min(1).optional().describe('Text to replace. Alias: old_string'),
+    replace:    z.string().optional().describe('Replacement text. Alias: new_string'),
+    old_string: z.string().min(1).optional().describe('Alias for find'),
+    new_string: z.string().optional().describe('Alias for replace'),
+    expected_count: z.number().int().min(1).default(1),
+  };
   server.tool(
     'replace_in_note',
     'Replace exact text in a note without resending the rest. Refuses unless find occurs exactly ' +
-    'expected_count times (default 1) — protects against a loose find rewriting more than intended.',
+    'expected_count times (default 1) — protects against a loose find rewriting more than intended. ' +
+    'Accepts either find/replace or old_string/new_string (same pair, either naming works).\n\n' +
+    'For several replacements in one note, pass `edits` (array of {find/old_string, replace/new_string, ' +
+    'expected_count}) instead of the singular fields — one row lock and one re-embed for the whole ' +
+    'batch instead of one per call. Edits apply in order, and each one\'s find is matched against the ' +
+    'note as already changed by the edits before it, not the original content — an earlier edit can ' +
+    'create the text a later one needs, or remove the text a later one expects to find; sequence them ' +
+    'accordingly. If any step\'s count does not match, the whole batch is refused and the note is left ' +
+    'completely untouched — the error names which edit index failed and how many times its find text ' +
+    'actually occurred. Do not combine `edits` with the singular find/replace/old_string/new_string/' +
+    'expected_count fields — use one form or the other.',
     {
       id:      z.string().uuid().optional(),
       title:   z.string().optional().describe('Alternative to id; resolved like get_note'),
-      find:    z.string().min(1),
-      replace: z.string(),
-      expected_count: z.number().int().min(1).default(1),
+      ...editItemShape,
+      expected_count: z.number().int().min(1).optional(),
+      edits: z.array(z.object(editItemShape)).min(1).max(50).optional()
+        .describe('Multiple find/replace steps applied in order in a single call — see main description.'),
       expected_updated_at: z.string().optional()
         .describe('ISO updated_at from when you read the note; refuses the write if it changed since'),
     },
-    async ({ id, title, find, replace, expected_count, expected_updated_at }) => {
+    async ({ id, title, find, replace, old_string, new_string, expected_count, edits, expected_updated_at }) => {
       if (!id && !title) throw new Error('Provide either id or title');
+
+      // Two accepted spellings for the same pair — find/replace (this tool's
+      // own convention) and old_string/new_string (Claude Code's Edit tool
+      // convention, which agents reach for on autopilot). Whichever half of
+      // each pair is present wins; ?? only falls through on undefined, so an
+      // intentional empty-string replace (a deletion) still comes through.
+      const resolvePair = (f: string | undefined, o: string | undefined, r: string | undefined, n: string | undefined, prefix: string) => {
+        const findRaw = f ?? o;
+        const replaceRaw = r ?? n;
+        if (findRaw === undefined) throw new Error(`${prefix}Provide find (or old_string)`);
+        if (replaceRaw === undefined) throw new Error(`${prefix}Provide replace (or new_string) — pass an empty string to delete the matched text`);
+        return { find: stripNulBytes(findRaw), replace: stripNulBytes(replaceRaw) };
+      };
+
+      let editsList: NoteEdit[];
+      if (edits !== undefined) {
+        // Silently preferring `edits` over singular fields would drop half of
+        // a caller's intent with no signal that anything was ignored — worse
+        // than refusing outright.
+        if ([find, replace, old_string, new_string, expected_count].some((v) => v !== undefined)) {
+          throw new Error('Provide either `edits` or find/replace (old_string/new_string/expected_count) — not both');
+        }
+        editsList = edits.map((e, i) => ({
+          ...resolvePair(e.find, e.old_string, e.replace, e.new_string, `edits[${i}]: `),
+          expected_count: e.expected_count,
+        }));
+      } else {
+        editsList = [{
+          ...resolvePair(find, old_string, replace, new_string, ''),
+          expected_count: expected_count ?? 1,
+        }];
+      }
+
       const found = id
         ? await queryOne<{ id: string }>(
             'select id from notes where id = $1 and deleted_at is null', [id])
@@ -663,8 +722,6 @@ export function createMcpServer(): McpServer {
         throw new Error('expected_updated_at is not a valid timestamp');
       }
 
-      const findText = stripNulBytes(find);
-      const replaceText = stripNulBytes(replace);
       // Read and write inside one transaction with the row locked, same as
       // append_to_note — this is read-modify-write too, and find/replace is
       // no safer against a lost concurrent write than a plain append is.
@@ -685,35 +742,50 @@ export function createMcpServer(): McpServer {
           throw new Error('Note changed since you read it — re-read it with get_note and reapply your edit');
         }
 
-        const count = countOccurrences(existing.content, findText);
-        if (count !== expected_count) {
-          throw new Error(
-            count === 0
-              ? `find text not found in this note (expected ${expected_count} occurrence${expected_count === 1 ? '' : 's'})`
-              : `find text occurs ${count} time${count === 1 ? '' : 's'} in this note, expected ${expected_count} — ` +
-                'narrow find or adjust expected_count'
-          );
-        }
+        // Applied against the running `current`, not existing.content — each
+        // edit sees the note as the edits before it left it. A single-edit
+        // call (the common case) keeps the plain, pre-batch error wording;
+        // a real batch names the failing step so an agent doesn't have to
+        // bisect it by hand.
+        const single = editsList.length === 1;
+        let current = existing.content;
+        const results: { replaced_count: number }[] = [];
+        editsList.forEach((edit, i) => {
+          const count = countOccurrences(current, edit.find);
+          if (count !== edit.expected_count) {
+            throw new Error(
+              single
+                ? (count === 0
+                    ? `find text not found in this note (expected ${edit.expected_count} occurrence${edit.expected_count === 1 ? '' : 's'})`
+                    : `find text occurs ${count} time${count === 1 ? '' : 's'} in this note, expected ${edit.expected_count} — ` +
+                      'narrow find or adjust expected_count')
+                : `edits[${i}]: "${truncateForError(edit.find)}" occurs ${count} time${count === 1 ? '' : 's'} ` +
+                  `(expected ${edit.expected_count}); note left untouched`
+            );
+          }
+          current = current.split(edit.find).join(edit.replace);
+          results.push({ replaced_count: count });
+        });
 
-        const next = existing.content.split(findText).join(replaceText);
-        if (next.length > MAX_NOTE_CONTENT_CHARS) {
+        if (current.length > MAX_NOTE_CONTENT_CHARS) {
           throw new Error(`Replacing would exceed the ${MAX_NOTE_CONTENT_CHARS}-character limit for a note`);
         }
 
         const updated = await client.query<{ id: string; title: string; updated_at: string }>(
           `update notes set content = $1, embedding_pending = true where id = $2
            returning id, title, updated_at`,
-          [next, found.id]
+          [current, found.id]
         );
-        return { note: updated.rows[0], title: existing.title, next, count };
+        return { note: updated.rows[0], title: existing.title, next: current, results };
       });
 
-      const { note, next, count } = result;
+      const { note, next, results } = result;
       indexNoteAsync(found.id, result.title, next);
+      const replaced_count = results.reduce((sum, r) => sum + r.replaced_count, 0);
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ ...note, replaced_count: count, content_length: next.length }),
+          text: JSON.stringify({ ...note, replaced_count, results, content_length: next.length }),
         }],
       };
     }
@@ -906,7 +978,9 @@ export function createMcpServer(): McpServer {
   // ── update_folder ────────────────────────────────────────────────────────
   server.tool(
     'update_folder',
-    'Rename a folder and/or move it under a different parent (set parent_id to null for top level). Provide at least one of name/parent_id.',
+    'Rename a folder and/or move it under a different parent (set parent_id to null for top level). ' +
+    'Provide at least one of name/parent_id. The response includes the resolved `path` so a rename or ' +
+    'move can be confirmed without a follow-up list_folders call.',
     {
       id:        z.string().uuid(),
       name:      z.string().min(1).max(255).optional(),
@@ -950,7 +1024,11 @@ export function createMcpServer(): McpServer {
         return rows[0] ?? null;
       });
       if (!data) throw new Error('Folder not found');
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] };
+      // The rename/move itself may have changed this folder's own path, or —
+      // for a reparent — its position in the tree, so the map is built fresh
+      // from the post-write state rather than reused from before the call.
+      const paths = await folderPathMap();
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ ...data, path: paths.get(data.id) ?? data.name }) }] };
     }
   );
 

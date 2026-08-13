@@ -671,6 +671,120 @@ describe('replace_in_note', () => {
     expect(err).toContain(`${MAX_NOTE_CONTENT_CHARS}-character limit`);
     expect(txClientQuery).toHaveBeenCalledTimes(1);
   });
+
+  it('accepts old_string/new_string as an alias for find/replace', async () => {
+    mockReplace('before\n\n- [ ] task\n\nafter');
+    const out = await call('replace_in_note', {
+      id: ID, old_string: '- [ ] task', new_string: '- [x] task',
+    }) as { replaced_count: number };
+    const body = txClientQuery.mock.calls[1][1][0] as string;
+    expect(body).toContain('- [x] task');
+    expect(out.replaced_count).toBe(1);
+  });
+
+  it('lets old_string pair with an empty new_string (deletion), same as find/replace', async () => {
+    mockReplace('before- [ ] task after');
+    const out = await call('replace_in_note', {
+      id: ID, old_string: '- [ ] task ', new_string: '',
+    }) as { replaced_count: number };
+    const body = txClientQuery.mock.calls[1][1][0] as string;
+    expect(body).toBe('beforeafter');
+    expect(out.replaced_count).toBe(1);
+  });
+
+  it('refuses when neither find nor old_string is given', async () => {
+    const err = await callExpectingError('replace_in_note', { id: ID, replace: 'y' });
+    expect(err).toContain('Provide find');
+  });
+
+  it('refuses when neither replace nor new_string is given', async () => {
+    const err = await callExpectingError('replace_in_note', { id: ID, find: 'x' });
+    expect(err).toContain('Provide replace');
+  });
+
+  describe('edits batch', () => {
+    it('applies edits in order — an earlier edit can create the text a later one needs', async () => {
+      mockReplace('before\n\nTODO\n\nafter');
+      const out = await call('replace_in_note', {
+        id: ID,
+        edits: [
+          { find: 'TODO', replace: 'DONE: step' },
+          { find: 'DONE: step', replace: 'DONE: step (verified)' },
+        ],
+      }) as { replaced_count: number; results: { replaced_count: number }[] };
+      const body = txClientQuery.mock.calls[1][1][0] as string;
+      expect(body).toContain('DONE: step (verified)');
+      expect(out.results).toEqual([{ replaced_count: 1 }, { replaced_count: 1 }]);
+      expect(out.replaced_count).toBe(2);
+      expect(txClientQuery).toHaveBeenCalledTimes(2); // one locked read, one write for the whole batch
+      expect(indexNoteAsync).toHaveBeenCalledOnce(); // not once per edit
+    });
+
+    it('accepts old_string/new_string aliases inside edits items too', async () => {
+      mockReplace('before\n\nTODO\n\nafter');
+      const out = await call('replace_in_note', {
+        id: ID, edits: [{ old_string: 'TODO', new_string: 'DONE' }],
+      }) as { replaced_count: number };
+      const body = txClientQuery.mock.calls[1][1][0] as string;
+      expect(body).toContain('DONE');
+      expect(out.replaced_count).toBe(1);
+    });
+
+    it('refuses the whole batch when a later edit does not match, note left untouched', async () => {
+      mockReplace('before\n\nTODO\n\nafter');
+      const err = await callExpectingError('replace_in_note', {
+        id: ID,
+        edits: [
+          { find: 'TODO', replace: 'DONE' },
+          { find: 'nonexistent text', replace: 'x' },
+        ],
+      });
+      expect(err).toContain('edits[1]');
+      expect(err).toContain('occurs 0 times');
+      expect(err).toContain('nonexistent text');
+      expect(txClientQuery).toHaveBeenCalledTimes(1); // locked read only, no update reached
+    });
+
+    it('names the failing step with its actual count when a find matches the wrong number of times', async () => {
+      mockReplace('- [ ] a\n- [ ] b');
+      const err = await callExpectingError('replace_in_note', {
+        id: ID,
+        edits: [{ find: '- [ ] ', replace: '- [x] ' }], // matches twice, expected_count defaults to 1
+      });
+      // A one-item edits array is still the common single-edit case — plain
+      // wording, no "edits[0]:" noise.
+      expect(err).not.toContain('edits[0]');
+      expect(err).toContain('occurs 2 times');
+    });
+
+    it('names the failing step for a real (multi-item) batch', async () => {
+      mockReplace('- [ ] a\n- [ ] b');
+      const err = await callExpectingError('replace_in_note', {
+        id: ID,
+        edits: [
+          { find: 'a', replace: 'A' },
+          { find: '- [ ] ', replace: '- [x] ' }, // matches twice at this point, expected_count defaults to 1
+        ],
+      });
+      expect(err).toContain('edits[1]');
+      expect(err).toContain('occurs 2 times');
+    });
+
+    it('refuses when edits is combined with singular find/replace', async () => {
+      const err = await callExpectingError('replace_in_note', {
+        id: ID, find: 'x', replace: 'y', edits: [{ find: 'a', replace: 'b' }],
+      });
+      expect(err).toContain('not both');
+      expect(queryOne).not.toHaveBeenCalled(); // rejected before any lookup
+    });
+
+    it('refuses when edits is combined with a bare expected_count', async () => {
+      const err = await callExpectingError('replace_in_note', {
+        id: ID, expected_count: 2, edits: [{ find: 'a', replace: 'b' }],
+      });
+      expect(err).toContain('not both');
+    });
+  });
 });
 
 describe('create_note', () => {
@@ -958,6 +1072,32 @@ describe('folders', () => {
       parent_id: '22222222-2222-4222-8222-222222222222',
     });
     expect(err).toContain('descendant');
+  });
+
+  it('update_folder returns the resolved path after a rename', async () => {
+    const id = '11111111-1111-4111-8111-111111111111';
+    txClientQuery.mockResolvedValueOnce({ rows: [{ id, name: 'Renamed', parent_id: 'p' }] });
+    query.mockResolvedValueOnce([
+      { id: 'p', name: 'Parent', parent_id: null },
+      { id, name: 'Renamed', parent_id: 'p' },
+    ]);
+    const out = await call('update_folder', { id, name: 'Renamed' }) as { path: string };
+    expect(out.path).toBe('Parent/Renamed');
+  });
+
+  it('update_folder returns the resolved path after a move to a new parent', async () => {
+    const id = '11111111-1111-4111-8111-111111111111';
+    const newParent = '22222222-2222-4222-8222-222222222222';
+    txClientQuery
+      .mockResolvedValueOnce({ rows: [] }) // advisory lock
+      .mockResolvedValueOnce({ rows: [] }) // cycle check: no cycle
+      .mockResolvedValueOnce({ rows: [{ id, name: 'Folder', parent_id: newParent }] }); // update
+    query.mockResolvedValueOnce([
+      { id: newParent, name: 'NewParent', parent_id: null },
+      { id, name: 'Folder', parent_id: newParent },
+    ]);
+    const out = await call('update_folder', { id, parent_id: newParent }) as { path: string };
+    expect(out.path).toBe('NewParent/Folder');
   });
 
   it('delete_folder trashes every note in the subtree, then deletes the folder, in one transaction', async () => {

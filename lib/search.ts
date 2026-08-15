@@ -100,15 +100,32 @@ const SUBSTRING_RELEVANCE = { title: 0.65, content: 0.5 };
 
 // Degenerate-semantic-set guard (semanticSearch): how far above the
 // per-model junk-gate floor the top hit must land before it's treated as
-// real signal rather than "the least-noisy noise". An absolute cosine
-// margin, not a per-model constant — a small buffer works the same way
-// regardless of where a given model's floor happens to sit, unlike the
-// floor itself (lib/embeddings.ts), which does need to move per model.
-const MIN_SIGNAL_MARGIN = 0.05;
+// real signal rather than "the least-noisy noise".
+//
+// A FRACTION of the floor's remaining headroom (1 - floor), not a flat
+// cosine number — found during pre-publication review: a flat margin is
+// itself an absolute cosine value, and models don't share a cosine scale
+// any more than they share a floor (that's the whole reason the floor
+// itself is per-model, lib/embeddings.ts). embeddinggemma's floor (0.30)
+// leaves 0.70 of headroom, so the old flat 0.05 was ~7% of it; nomic's
+// compressed range puts its floor at 0.65, leaving only 0.35 of headroom —
+// the same flat 0.05 there was ~14% of a MUCH smaller usable range, eating
+// disproportionately into the one model this margin exists to protect.
+// 0.07 reproduces the old, live-validated 0.05 almost exactly for
+// embeddinggemma (0.07 × 0.70 ≈ 0.049) while scaling down proportionally
+// for a compressed-range model (0.07 × 0.35 ≈ 0.025) instead of eating a
+// fixed slice regardless of how much range there is to eat from. Still
+// comfortably catches nomic's own measured degenerate gap (noise ~0.66 vs
+// floor 0.65, a 0.01 gap — well under 0.025).
+const MIN_SIGNAL_MARGIN_FRACTION = 0.07;
+
+function signalMargin(floor: number): number {
+  return MIN_SIGNAL_MARGIN_FRACTION * (1 - floor);
+}
 
 // What a caller actually needs to see to interpret an empty semantic/hybrid
 // result: getMinSimilarity() alone is necessary but not sufficient — a best
-// hit that clears the floor by less than MIN_SIGNAL_MARGIN still gets
+// hit that clears the floor by less than signalMargin(floor) still gets
 // discarded by the degenerate-set guard below, so a raw best_score just
 // above the floor can still come back empty. Measured live 2026-08-14: floor
 // 0.30, best_score 0.305 → empty results, but the envelope reported
@@ -117,7 +134,8 @@ const MIN_SIGNAL_MARGIN = 0.05;
 // actually applied. mcp-server.ts's threshold field uses this instead of
 // getMinSimilarity() directly for exactly that reason.
 export async function effectiveSemanticThreshold(): Promise<number> {
-  return (await getMinSimilarity()) + MIN_SIGNAL_MARGIN;
+  const floor = await getMinSimilarity();
+  return floor + signalMargin(floor);
 }
 
 const RRF_K = 60;
@@ -533,7 +551,26 @@ async function repairBrokenTableExcerpts(results: SearchResult[]): Promise<void>
 // require literal co-occurrence of words that were never meant as a single
 // phrase and come back empty. 3 chars is the same floor the наряд uses
 // elsewhere for "significant" — short enough to keep real content words
-// ("dns", "kmv") while dropping prepositions/particles in both languages.
+// ("dns", "kmv") while dropping prepositions/particles in RU/EN/DE, the
+// languages this vault actually configures (settings.fts_languages).
+//
+// Known scope limitation, flagged rather than silently left implicit
+// (pre-publication review): word length is language-dependent, and this
+// cutoff was originally a cascade-triggering heuristic only — since шаг 3b
+// it also PRE-FILTERS which words computeTextCoverage's real, language-
+// aware significance test (numnode() against the configured FTS languages)
+// ever gets to see, making a length-3 floor load-bearing in a way it wasn't
+// before. German compounds ("Rechnungsnummer") clear it easily; a CJK
+// vault, where content words routinely run 1-2 characters, would have
+// significant words silently dropped before the language-aware test ever
+// ran. Not fixed here: this vault's configured languages (russian,
+// english, and optionally german) are all space-delimited with multi-
+// character words, so the gap is real but doesn't fire on any language
+// this instance is actually configured for. A genuinely language-aware
+// tokenizer (leaning on Postgres's own parser rather than a fixed-length
+// JS regex split) is a bigger redesign than this review pass covers —
+// belongs in the roadmap as a known limitation for a CJK-configured vault,
+// not something to guess a fix for unmeasured.
 const MIN_SIGNIFICANT_WORD_LEN = 3;
 
 function significantWords(query: string): string[] {
@@ -811,7 +848,7 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
   // "nothing relevant reads as empty" preference the floor itself already
   // encodes (lib/embeddings.ts), just applied to the case a flat floor
   // can't catch on its own.
-  if (best > 0 && best - floor < MIN_SIGNAL_MARGIN) {
+  if (best > 0 && best - floor < signalMargin(floor)) {
     return [];
   }
 

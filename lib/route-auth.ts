@@ -8,21 +8,30 @@
 // caller could make the server pay for buffering a huge body just to get
 // rejected. These two routes authenticate themselves instead, using only
 // headers/cookies, before touching any part of the body — mirroring
-// proxy.ts's own logic (session cookie, or the master secret, or a
-// revocable OAuth token) and the response shapes it already returns, so
-// behavior is unchanged from the caller's point of view; only *where* the
-// check happens does.
+// proxy.ts's own logic (session cookie, or the master secret — nothing
+// else) and the response shapes it already returns, so behavior is
+// unchanged from the caller's point of view; only *where* the check
+// happens does.
 //
-// Unlike /api/mcp/route.ts's authorized(), which checks the rate-limit
-// bucket before the credential (a known bug slated for a later fix — see
-// that file), this checks the credential first: a valid session/secret/token
-// is never blocked by a bucket some other caller filled up. Rate limiting
-// only ever applies to the invalid-credential path, same as proxy.ts's
-// cookie fast-path already does.
+// Deliberately NOT accepting a revocable OAuth token (lib/tokens.ts) here,
+// even though verifyToken() is one import away: those tokens are scoped to
+// the MCP endpoint only (SECURITY.md, "Tokens authenticate only the MCP
+// endpoint — they cannot log into the UI, call the REST API..."), and no
+// MCP tool calls either of these two routes — accepting a token here would
+// silently widen its scope past what's documented, for zero functional
+// benefit. Found live during pre-publication review: an earlier version of
+// this file DID call verifyToken() here, contradicting both SECURITY.md and
+// this file's own "mirrors proxy.ts" claim above (proxy.ts itself never
+// calls verifyToken() — check its own auth function to confirm before
+// trusting this comment over the code).
+//
+// Checks the credential before the rate-limit bucket, same as proxy.ts and
+// /api/mcp/route.ts: a valid session/secret is never blocked by a bucket
+// some other caller filled up. Rate limiting only ever applies to the
+// invalid-credential path.
 import { NextRequest, NextResponse } from 'next/server';
 import { bearerToken, safeEqual } from './auth';
 import { verifySessionToken, SESSION_COOKIE_NAME } from './session';
-import { verifyToken } from './tokens';
 import { authLimitExceeded, recordAuthFailure } from './rate-limit';
 
 const BUCKET = 'bearer'; // same brute-force budget as proxy.ts and /api/mcp — same secret, same risk.
@@ -49,7 +58,7 @@ export async function requireAuth(req: NextRequest): Promise<NextResponse | null
   }
 
   const token = bearerToken(req);
-  if (safeEqual(token, secret) || await verifyToken(token)) {
+  if (safeEqual(token, secret)) {
     return null;
   }
 

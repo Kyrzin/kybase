@@ -1,6 +1,6 @@
 // lib/search.ts — text (FTS + substring fallback), semantic (chunk-based), and hybrid (RRF) search
 import { query as dbQuery, toVector } from './db';
-import { getEmbedding, getRelevanceAnchors, type RelevanceAnchors } from './embeddings';
+import { getEmbedding, getMinSimilarity } from './embeddings';
 import { escapeLike } from './sql';
 import { TABLE_ROW_RE, TABLE_SEPARATOR_RE, unpairedFenceIndex } from './markdown';
 
@@ -12,12 +12,13 @@ export type SearchResult = {
   excerpt: string;
   tags: string[];
   score: number;
-  // The one number an agent should act on: 0..1, normalized per arm against
-  // calibrated anchors (cosine → model-dependent floor/strong from
-  // lib/embeddings.ts; ts_rank → measured TS_RANK_ANCHORS; substring →
-  // fixed title/content levels). On hybrid results it is the MAX of the
+  // How this hit compares to the BEST hit in this same response — always
+  // exactly 1.0 for the top result, 0..1 for the rest. A ratio, not an
+  // absolute score: says nothing about quality on its own (a relevance-1.0
+  // hit can still be the best of a bad set), and is NOT comparable across
+  // different queries' results, only within one. `confidence` is the field
+  // to actually act on. On hybrid results this is the MAX of the
   // contributing arms — arms corroborate a hit, they don't add up.
-  // Comparable within one query's results; NOT across models or queries.
   relevance: number;
   confidence: Confidence;
   // Present only on hybrid results, and only for the pass(es) that actually
@@ -34,6 +35,15 @@ export type SearchResult = {
   // out on the other pass's rank contribution entirely (RRF's known
   // single-arm penalty), which this makes visible instead of implicit.
   matched_by?: ('text_score' | 'semantic_score')[];
+  // Which cascade level found this on the text side (textSearch only;
+  // absent on a pure-semantic hit). 'and' means the strict query itself
+  // matched — real corroboration. 'or'/'substring' mean the strict query
+  // found NOTHING and a looser pass filled in instead: recall, not
+  // confirmation. confidenceFor discounts non-'and' tiers accordingly —
+  // exposed here so that discount is checkable from outside, not just
+  // trusted (2026-08-14 measurement: an 'or' match was silently counting
+  // as full corroboration and inflating confidence).
+  text_tier?: 'and' | 'or' | 'substring';
   // Filled in by enrichResults (a single id = any($1) lookup, not part
   // of search_notes_fts/match_chunks — see there for why). Absent only if
   // the note was deleted in the gap between the search RPC and the lookup.
@@ -43,29 +53,45 @@ export type SearchResult = {
   content_length?: number;
 };
 
-/**
- * Linear normalization between two calibrated anchors: at `floor` (the
- * search threshold — barely admitted) relevance is 0, at `strong` (a
- * confident hit on the live battery) it is 1, clamped outside.
- */
-export function normalizeRelevance(value: number, anchors: RelevanceAnchors): number {
-  if (anchors.strong <= anchors.floor) return 0;
-  return Math.max(0, Math.min(1, (value - anchors.floor) / (anchors.strong - anchors.floor)));
+// confidence is the only field an agent should treat as a verdict — everyone
+// upstream (relevance) only says "how this compares to the best hit in its
+// own result set," which says nothing about absolute quality on its own.
+// `strong` means corroborated: both arms found the note AND it's at/near the
+// top of its own set. A single arm — no matter how close to the top of its
+// own ranking — tops out at `moderate`: one signal, unconfirmed. Replaces
+// the old flat relevance>=0.7/0.35 bands, which let a single-arm hit read as
+// `strong` just for being the best of a bad set (2026-08-14 measurement:
+// three notes tied at the same ts_rank all got `strong`).
+//
+// `corroboratingArms` is not the same as "how many of text/semantic
+// matched" — a text match found only via the OR/substring cascade doesn't
+// count (0 corroborating arms if that's the only thing that matched; still
+// excluded from the count even alongside a real semantic match). The
+// strict query found nothing, so there's nothing solid to corroborate with
+// — measured live: an OR-cascade match on a near-meaningless control query
+// (single common word) was reaching `moderate` on its own, and combined
+// with an unrelated semantic hit was reaching `strong`. Callers compute
+// this discount (textSearch for its own single-arm case, rrfMerge for the
+// merged case) — this function just enforces the resulting bands.
+export function confidenceFor(relevance: number, corroboratingArms: 0 | 1 | 2 = 1): Confidence {
+  if (corroboratingArms === 0) return 'weak';
+  if (relevance >= 0.9 && corroboratingArms === 2) return 'strong';
+  if ((relevance >= 0.9 && corroboratingArms === 1) || (relevance >= 0.7 && corroboratingArms === 2)) return 'moderate';
+  return 'weak';
 }
-
-export function confidenceFor(relevance: number): Confidence {
-  return relevance >= 0.7 ? 'strong' : relevance >= 0.35 ? 'moderate' : 'weak';
-}
-
-// Anchors for the FTS arm's ts_rank, which is unbounded and NOT comparable
-// to cosines. Measured on this vault's live queries: clear keyword hits rank
-// ~0.066–0.099, weak tail matches sit under ~0.02.
-const TS_RANK_ANCHORS: RelevanceAnchors = { floor: 0.01, strong: 0.09 };
 
 // The substring fallback has no rank at all — an exact-substring hit on a
 // title is a decent match for identifier-ish queries, one buried in content
 // is weaker. Fixed levels, deliberately capped below "strong".
 const SUBSTRING_RELEVANCE = { title: 0.65, content: 0.5 };
+
+// Degenerate-semantic-set guard (semanticSearch): how far above the
+// per-model junk-gate floor the top hit must land before it's treated as
+// real signal rather than "the least-noisy noise". An absolute cosine
+// margin, not a per-model constant — a small buffer works the same way
+// regardless of where a given model's floor happens to sit, unlike the
+// floor itself (lib/embeddings.ts), which does need to move per model.
+const MIN_SIGNAL_MARGIN = 0.05;
 
 const RRF_K = 60;
 
@@ -312,7 +338,10 @@ export type HybridSearchResult = Omit<SearchResult, 'score'> & { rrf_score: numb
  * matched with cosine 0.72" from "this only showed up in the text pass".
  */
 export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
-  const scoreMap = new Map<string, { result: SearchResult; rrfScore: number; relevance: number; extra: Partial<SearchResult> }>();
+  const scoreMap = new Map<string, {
+    result: SearchResult; rrfScore: number; relevance: number;
+    extra: Partial<SearchResult>; textTier: SearchResult['text_tier'];
+  }>();
 
   for (const { field, results } of lists) {
     results.forEach((item, rank) => {
@@ -326,27 +355,63 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
         // single-arm penalty halves).
         existing.relevance = Math.max(existing.relevance, item.relevance);
         existing.extra[field] = item.score;
+        if (field === 'text_score') existing.textTier = item.text_tier;
       } else {
-        scoreMap.set(item.id, { result: item, rrfScore, relevance: item.relevance, extra: { [field]: item.score } });
+        scoreMap.set(item.id, {
+          result: item, rrfScore, relevance: item.relevance,
+          extra: { [field]: item.score },
+          textTier: field === 'text_score' ? item.text_tier : undefined,
+        });
       }
     });
   }
 
   return [...scoreMap.values()]
-    .sort((a, b) => b.rrfScore - a.rrfScore)
-    .map(({ result, rrfScore, relevance, extra }) => {
+    .map(({ result, rrfScore, relevance, extra, textTier }) => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars -- drop `score`, forward everything else
       const { score: _score, ...rest } = result;
+      const matched_by = Object.keys(extra) as ('text_score' | 'semantic_score')[];
+      // A text arm only corroborates if the STRICT query found it — an
+      // 'or'/'substring' match means the strict pass came back empty, so
+      // even alongside a real semantic match that's still only one solid
+      // signal, not two (measured live: an unrelated resume matched a
+      // German query only via the OR cascade, and "both arms agree" was
+      // reading it as fully corroborated — see confidenceFor).
+      const textCorroborates = extra.text_score !== undefined && textTier === 'and';
+      const corroboratingArms = (extra.semantic_score !== undefined ? 1 : 0) + (textCorroborates ? 1 : 0);
       return {
         ...rest,
         ...extra,
         rrf_score: rrfScore,
         relevance,
-        confidence: confidenceFor(relevance),
-        matched_by: Object.keys(extra) as ('text_score' | 'semantic_score')[],
+        confidence: confidenceFor(relevance, corroboratingArms as 0 | 1 | 2),
+        matched_by,
+        text_tier: textTier,
+        corroboratingArms,
       };
-    });
+    })
+    // Sorting by rrf_score alone can rank a weak hit above a moderate one
+    // even with no tie at all — rrf_score only fuses rank position, it
+    // knows nothing about confidence (measured live, twice). The displayed
+    // order must never contradict the confidence label an agent is told to
+    // act on, so confidence tier is the primary key; within a tier, more
+    // corroborating arms first (not just how many fields are present —
+    // see corroboratingArms above), then relevance, then rrf_score as the
+    // final tiebreak for genuinely identical cases.
+    .sort((a, b) =>
+      CONFIDENCE_RANK[a.confidence] - CONFIDENCE_RANK[b.confidence] ||
+      b.corroboratingArms - a.corroboratingArms ||
+      b.relevance - a.relevance ||
+      b.rrf_score - a.rrf_score
+    )
+    // corroboratingArms was only needed to drive confidence/sort — not part
+    // of the public shape (matched_by + text_tier already expose the same
+    // information more precisely, per-arm rather than as one number).
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    .map(({ corroboratingArms: _corroboratingArms, ...rest }) => rest);
 }
+
+const CONFIDENCE_RANK: Record<Confidence, number> = { strong: 0, moderate: 1, weak: 2 };
 
 type FtsRow = { id: string; title: string; tags: string[]; rank: number; headline: string };
 type NoteRow = { id: string; title: string; content: string; tags: string[] };
@@ -414,11 +479,33 @@ async function repairBrokenTableExcerpts(results: SearchResult[]): Promise<void>
   }
 }
 
+// Words worth re-querying on individually — websearch_to_tsquery ANDs every
+// term in the original query, so a natural-language question (7+ words) can
+// require literal co-occurrence of words that were never meant as a single
+// phrase and come back empty. 3 chars is the same floor the наряд uses
+// elsewhere for "significant" — short enough to keep real content words
+// ("dns", "kmv") while dropping prepositions/particles in both languages.
+const MIN_SIGNIFICANT_WORD_LEN = 3;
+
+function significantWords(query: string): string[] {
+  return query.split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= MIN_SIGNIFICANT_WORD_LEN);
+}
+
 /**
  * Full-text search with ru+en morphology via the search_notes_fts RPC
- * (uses the bilingual GIN index from migration 001). Falls back to
- * substring matching when FTS finds nothing — partial words and code
- * fragments like "kmv" or "tsconfig" don't survive stemming.
+ * (uses the bilingual GIN index from migration 001). Three passes, each
+ * only run if the previous left too little to work with:
+ *
+ *  1. Strict — the query as-is (AND semantics via websearch_to_tsquery).
+ *  2. OR — if the strict pass came back short, re-run the same RPC (no new
+ *     SQL, no migration) with the query's significant words joined by the
+ *     literal word "or", which websearch_to_tsquery already parses as its
+ *     OR operator. Weaker by construction (matches on any one term, not
+ *     all of them) — appended after the strict rows, never reordered above
+ *     them, and deduplicated against what the strict pass already found.
+ *  3. substringSearch — only once both of the above are empty. Partial
+ *     words and code fragments like "kmv" or "tsconfig" don't survive
+ *     stemming at all.
  */
 export async function textSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
   const fetchLimit = overfetchLimit(limit, filters);
@@ -426,13 +513,42 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     'select * from search_notes_fts($1, $2)',
     [query, fetchLimit]
   );
-  if (rows.length === 0) return enrichResults(await substringSearch(query, limit, filters));
+
+  let orRows: FtsRow[] = [];
+  const words = significantWords(query);
+  // >2 words: with 1-2 words an OR pass is identical to (or looser than
+  // pointless versus) the strict AND pass already run.
+  if (rows.length < limit && words.length > 2) {
+    const seen = new Set(rows.map((r) => r.id));
+    const orAll = await dbQuery<FtsRow>(
+      'select * from search_notes_fts($1, $2)',
+      [words.join(' or '), fetchLimit]
+    );
+    orRows = orAll.filter((r) => !seen.has(r.id));
+  }
+
+  if (rows.length === 0 && orRows.length === 0) {
+    return enrichResults(await substringSearch(query, limit, filters));
+  }
 
   // n.rank is Postgres's actual ts_rank for this query — a genuine
   // relevance signal, unlike the positional score substringSearch falls
-  // back to below (there is no rank for a plain substring match).
-  const results = rows.map((n) => {
-    const relevance = normalizeRelevance(n.rank, TS_RANK_ANCHORS);
+  // back to below (there is no rank for a plain substring match). Scored
+  // relative to this query's own best rank, not a fixed anchor — same
+  // reasoning as semanticSearch's cosine (see there): ts_rank is a
+  // per-query, dimensionless value, there is no absolute number that means
+  // the same thing across two different queries. Both RPC calls already
+  // order by rank desc, so each list's own head is that list's best.
+  const best = Math.max(rows[0]?.rank ?? 0, orRows[0]?.rank ?? 0);
+  const toResult = (n: FtsRow, tier: 'and' | 'or') => {
+    const relevance = best > 0 ? n.rank / best : 0;
+    // Standalone (no semantic arm to corroborate with): an 'and' hit is one
+    // real signal (1 arm); an 'or' hit found nothing under the strict
+    // query, so it has zero corroborating arms — confidenceFor forces it
+    // to `weak` regardless of how high its own relevance looks (which can
+    // be misleadingly high: it's "best of the loosened set", not "best of
+    // a query that actually matched").
+    const confidence = confidenceFor(relevance, tier === 'and' ? 1 : 0);
     return {
       id:      n.id,
       title:   n.title,
@@ -440,9 +556,11 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
       tags:    n.tags,
       score:   n.rank,
       relevance,
-      confidence: confidenceFor(relevance),
+      confidence,
+      text_tier: tier,
     };
-  });
+  };
+  const results = [...rows.map((n) => toResult(n, 'and')), ...orRows.map((n) => toResult(n, 'or'))];
   const filtered = await applyFilters(results, limit, filters);
   await repairBrokenTableExcerpts(filtered);
   return enrichResults(filtered);
@@ -476,7 +594,10 @@ async function substringSearch(query: string, limit: number, filters?: SearchFil
       tags:    n.tags,
       score:   1 / (i + 1),
       relevance,
-      confidence: confidenceFor(relevance),
+      // The loosest tier — zero corroborating arms, same reasoning as an
+      // 'or' hit in textSearch: nothing solid behind it on its own.
+      confidence: confidenceFor(relevance, 0),
+      text_tier: 'substring' as const,
     };
   });
   return applyFilters(results, limit, filters);
@@ -487,33 +608,62 @@ async function substringSearch(query: string, limit: number, filters?: SearchFil
  * (see lib/indexing.ts), match_chunks returns the best chunk per note,
  * so the excerpt is the actually-relevant section, not the document head.
  *
- * Threshold behavior: the cosine floor (getMinSimilarity, model-dependent)
- * is applied INSIDE match_chunks at the CHUNK level — `where similarity >=
- * min_similarity` on each note's single best chunk (migration 002). So every
- * row returned here is at or above the floor, and `score` is that best
- * chunk's cosine. NOTE: in hybridSearch the FTS/text arm is NOT cosine-
- * filtered, so a hybrid result CAN sit below this floor (or have no
- * semantic_score at all) when it entered via the text pass — that's why the
- * combined output shows notes a pure-semantic pass would have dropped.
+ * Two separate jobs, deliberately not one absolute threshold doing both
+ * (2026-08-14 measurement — a single cosine floor can't be both a junk gate
+ * and a relevance judgment: lowering it to catch more true positives always
+ * let more noise in too, on this vault and by construction on anyone else's):
+ *
+ *  1. Recall — getMinSimilarity() is a low, permissive junk gate applied
+ *     INSIDE match_chunks at the CHUNK level (migration 002). Everything
+ *     back from the RPC is merely a *candidate*.
+ *  2. Relevance — among those candidates, keep only ones within 0.75x of
+ *     this query's own best hit, then score relevance = similarity / best.
+ *     A ratio, not a cosine — comparable across models and corpora, unlike
+ *     any fixed cosine number could be. Top hit is always exactly 1.0.
+ *
+ * NOTE: in hybridSearch the FTS/text arm is NOT cosine-filtered, so a
+ * hybrid result CAN have no semantic_score at all when it entered via the
+ * text pass only — that's why the combined output shows notes a pure-
+ * semantic pass would have dropped.
  */
 export async function semanticSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
-  const [embedding, anchors] = await Promise.all([
+  const [embedding, floor] = await Promise.all([
     getEmbedding(query, 'query'),
-    getRelevanceAnchors(),
+    getMinSimilarity(),
   ]);
 
   const fetchLimit = overfetchLimit(limit, filters);
-  const data = await dbQuery(
+  const data: Record<string, unknown>[] = await dbQuery(
     'select * from match_chunks($1::vector, $2, $3)',
-    [toVector(embedding), fetchLimit, anchors.floor]
+    [toVector(embedding), fetchLimit, floor]
   );
 
-  const results = data.map((n: Record<string, unknown>) => {
+  // match_chunks orders by similarity desc, so the first row is this
+  // query's best hit — the reference point relevance is measured against.
+  const best = (data[0]?.similarity as number | undefined) ?? 0;
+
+  // Degenerate set: the top hit barely cleared the floor at all. On a
+  // model whose noise and signal cosines sit close together (measured live
+  // on nomic-embed-text: noise ~0.66, signal ~0.68 — a ~0.02 gap), the
+  // floor alone can't keep noise out, and the 0.75x-of-best cutoff below
+  // makes it worse, not better: it would call this "best" result 1.0
+  // relevance and hand it out as if it meant something. If nothing cleared
+  // the floor by a real margin, there's no genuine signal to rank — same
+  // "nothing relevant reads as empty" preference the floor itself already
+  // encodes (lib/embeddings.ts), just applied to the case a flat floor
+  // can't catch on its own.
+  if (best > 0 && best - floor < MIN_SIGNAL_MARGIN) {
+    return [];
+  }
+
+  const candidates = best > 0 ? data.filter((n) => (n.similarity as number) >= 0.75 * best) : data;
+
+  const results = candidates.map((n) => {
     const heading = n.heading as string | null;
     // Drop the chunk's own `# Heading` line so it isn't repeated by the
     // `[heading]` context prefix below.
     const excerpt = makeExcerpt(stripLeadingHeading(n.chunk_content as string), query);
-    const relevance = normalizeRelevance(n.similarity as number, anchors);
+    const relevance = (n.similarity as number) / best;
     return {
       id:      n.id as string,
       title:   n.title as string,
@@ -521,7 +671,7 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
       tags:    n.tags as string[],
       score:   n.similarity as number,
       relevance,
-      confidence: confidenceFor(relevance),
+      confidence: confidenceFor(relevance, 1),
     };
   });
   return enrichResults(await applyFilters(results, limit, filters));

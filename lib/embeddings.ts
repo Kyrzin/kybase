@@ -3,58 +3,43 @@ import { getEmbeddingConfig, type EmbeddingConfig } from './settings';
 
 export type EmbedTask = 'query' | 'document';
 
-// Semantic-search cosine floor, per model — the query/document cosine scale
-// differs by embedding model, so this is model-dependent just like the task
-// prefixes above. Verified live on this RU/DE vault:
-//   - embeddinggemma: wide range, relevant ~0.37–0.64, noise <0.15 → 0.40
-//   - nomic-embed-text: compressed high band ~0.6–0.7 → 0.55
-//   - Google text-embedding-004: relevant ~0.62–0.74 → 0.55
-//   - OpenAI 3-small: unverified here, 0.45 as a conservative middle
-// A 2026-08-11 recalibration attempt lowered this to 0.35 (24-query RU
-// battery found correct top-1 hits as low as 0.22) but was reverted the same
-// day after live testing: a 0.35 floor let genuinely off-topic notes through
-// as "weak" hits on queries with no real match in the vault (e.g. cosine
-// 0.35 for a firewall-commands note on a VPN-router query) — the vault
-// owner prioritizes "nothing relevant" reading as empty over catching a few
-// more true positives at the cost of that noise. Keep at 0.40 unless
-// re-litigated with the owner.
-// Used by lib/search.ts semanticSearch (passed to the match_chunks RPC).
+// Semantic-search recall floor — a junk gate, not a relevance judgment.
+// Everything at or above this cosine is a *candidate*; how good a candidate
+// is gets decided relative to the best hit in its own result set
+// (lib/search.ts semanticSearch), not against this absolute number. That
+// split is deliberate: a single absolute cosine can't do both jobs at once
+// (2026-08-14 measurement — see "наряд на поиск 2026-08-14"). This is
+// still per-model, and still a real number pulled from measurement, not a
+// vault-tuned judgment threshold like the old 0.40/0.55 — the reason it
+// can't be one flat number for every model is architectural, not this
+// vault's content: embeddinggemma and nomic-embed-text distribute cosine
+// similarity completely differently regardless of what's being searched.
+//
+// Measured live 2026-08-14, same-text pairs on both models (noise = two
+// genuinely unrelated passages, signal = a real query against its actual
+// answer):
+//   embeddinggemma:   noise ~0.08–0.18, signal ~0.53–0.69 → wide gap, a
+//                      single flat gate works (0.30 sits in the middle).
+//   nomic-embed-text: noise ~0.50–0.66, signal ~0.68–0.72 → compressed to
+//                      a ~0.02–0.05 gap. A gate here can only sit just
+//                      below the observed signal floor; it will still let
+//                      some noise through on its own — see
+//                      MIN_SIGNAL_MARGIN in lib/search.ts for the second
+//                      layer that catches that (a "best" result that only
+//                      barely clears this floor isn't a confident one).
+//   Only 5 pairs each — enough to show the shapes are genuinely different,
+//   not enough to call these final. Re-run the battery
+//   (наряд-поиск-2026-08-14 методика) on any model change.
 function minSimilarityFor(cfg: EmbeddingConfig): number {
   if (cfg.provider === 'ollama') {
-    if ((cfg.ollamaModel ?? '').includes('nomic-embed-text')) return 0.55;
-    return 0.40; // embeddinggemma (default) and other local models
+    if ((cfg.ollamaModel ?? '').includes('nomic-embed-text')) return 0.65;
+    return 0.30; // embeddinggemma (default) and other local models
   }
   return cfg.provider === 'openai' ? 0.45 : 0.55;
 }
 
 export async function getMinSimilarity(): Promise<number> {
   return minSimilarityFor(await getEmbeddingConfig());
-}
-
-export type RelevanceAnchors = { floor: number; strong: number };
-
-// Anchors for normalizing a cosine into a 0..1 relevance (lib/search.ts):
-// `floor` is the model's search threshold above; `strong` is the cosine of a
-// confident hit, read off the same live battery runs the floors came from —
-//   - embeddinggemma: precise hits landed ~0.55–0.64 → strong 0.60
-//   - nomic-embed-text: its compressed band tops out ~0.76 → strong 0.75
-//   - Google text-embedding-004: clear hits ~0.73–0.78 → strong 0.75
-//   - OpenAI 3-small: unverified, 0.65 as a conservative middle
-// Lowered to 0.55 alongside the floor above on 2026-08-11, reverted the same
-// day for the same reason — see minSimilarityFor.
-// Like the floors, these are per-model calibration — re-derive both with the
-// battery (see the "методика оценки embedding-моделей" note) on model changes.
-function strongSimilarityFor(cfg: EmbeddingConfig): number {
-  if (cfg.provider === 'ollama') {
-    if ((cfg.ollamaModel ?? '').includes('nomic-embed-text')) return 0.75;
-    return 0.60; // embeddinggemma (default) and other local models
-  }
-  return cfg.provider === 'openai' ? 0.65 : 0.75;
-}
-
-export async function getRelevanceAnchors(): Promise<RelevanceAnchors> {
-  const cfg = await getEmbeddingConfig();
-  return { floor: minSimilarityFor(cfg), strong: strongSimilarityFor(cfg) };
 }
 
 export async function getEmbedding(text: string, task: EmbedTask = 'document'): Promise<number[]> {

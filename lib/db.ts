@@ -5,11 +5,22 @@ import { Pool } from 'pg';
 // Lazy: created on first query, so `next build` needs no DATABASE_URL.
 let pool: Pool | undefined;
 
+// Both were unset (0 = no timeout) — a runaway query or a transaction left
+// open by a crashed request would otherwise hold its connection forever,
+// eventually exhausting the pool. pg applies these via `SET` on each new
+// connection, so they don't require touching DATABASE_URL / query strings.
+const STATEMENT_TIMEOUT_MS = 30_000;
+const IDLE_IN_TRANSACTION_TIMEOUT_MS = 30_000;
+
 export function getPool(): Pool {
   if (!pool) {
     const connectionString = process.env.DATABASE_URL;
     if (!connectionString) throw new Error('DATABASE_URL env var is missing');
-    pool = new Pool({ connectionString });
+    pool = new Pool({
+      connectionString,
+      statement_timeout: STATEMENT_TIMEOUT_MS,
+      idle_in_transaction_session_timeout: IDLE_IN_TRANSACTION_TIMEOUT_MS,
+    });
   }
   return pool;
 }

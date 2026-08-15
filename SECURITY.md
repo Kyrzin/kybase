@@ -35,7 +35,10 @@ Consequences you should understand before deploying:
   OAuth tokens are looked up by sha256 hash, never stored raw.
 - Failed auth attempts are rate-limited on every endpoint that verifies the
   secret: 10/min per client IP plus a 30/min global bucket (spoofing
-  `X-Forwarded-For` doesn't help). Successes are never counted.
+  `X-Forwarded-For` doesn't help). The credential is always checked before
+  the bucket, so a valid secret or token is never blocked by failed attempts
+  from someone else — the limiter only ever applies once the credential has
+  already failed.
 - OAuth requires PKCE (S256 only); `redirect_uri` must be `https:` (or
   `http://localhost` for local MCP clients) and the consent page shows the
   redirect host and refuses to render in a frame.

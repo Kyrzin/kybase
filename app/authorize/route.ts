@@ -110,9 +110,16 @@ export async function POST(req: NextRequest) {
 
   const formParams = { client_id: clientId, redirect_uri: redirectUri, code_challenge: codeChallenge, code_challenge_method: codeChallengeMethod, state, response_type: responseType };
 
-  const retryAfter = authLimitExceeded(req, 'authorize');
-  if (retryAfter > 0) {
-    return renderForm(formParams, `Too many attempts. Try again in ${retryAfter}s.`);
+  // Credential checked before the bucket — a valid secret must never be
+  // blocked by a bucket some other caller filled up (see proxy.ts). The
+  // limiter only ever applies once the credential has already failed.
+  if (!secret || !safeEqual(submittedSecret, secret)) {
+    const retryAfter = authLimitExceeded(req, 'authorize');
+    if (retryAfter > 0) {
+      return renderForm(formParams, `Too many attempts. Try again in ${retryAfter}s.`);
+    }
+    recordAuthFailure(req, 'authorize');
+    return renderForm(formParams, 'Invalid API key. Please try again.');
   }
 
   const callbackUrl = parseRedirectUri(redirectUri);
@@ -127,11 +134,6 @@ export async function POST(req: NextRequest) {
       { error: 'invalid_request', error_description: 'PKCE with code_challenge_method=S256 is required' },
       { status: 400 }
     );
-  }
-
-  if (!secret || !safeEqual(submittedSecret, secret)) {
-    recordAuthFailure(req, 'authorize');
-    return renderForm(formParams, 'Invalid API key. Please try again.');
   }
 
   const code = crypto.randomBytes(32).toString('base64url');

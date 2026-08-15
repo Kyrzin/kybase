@@ -42,18 +42,22 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ token: string }> }
 ) {
-  // Tokens are 256-bit, but don't let anyone try to enumerate them anyway.
-  const retryAfter = authLimitExceeded(req, 'share');
-  if (retryAfter > 0) {
-    return new NextResponse('Too many requests', {
-      status: 429,
-      headers: { 'Retry-After': String(retryAfter), 'X-Robots-Tag': 'noindex' },
-    });
-  }
-
   const { token } = await params;
   const note = await getSharedNote(token);
+  // Credential (the token) checked before the bucket, same reasoning as
+  // proxy.ts: a valid token must never be blocked by a bucket some other
+  // caller filled up. The lookup itself is a single indexed query
+  // (idx_note_shares_token_hash, migration 015) — cheap enough to run
+  // unconditionally, same as safeEqual() is elsewhere. Tokens are 256-bit,
+  // but don't let anyone try to enumerate them anyway.
   if (!note) {
+    const retryAfter = authLimitExceeded(req, 'share');
+    if (retryAfter > 0) {
+      return new NextResponse('Too many requests', {
+        status: 429,
+        headers: { 'Retry-After': String(retryAfter), 'X-Robots-Tag': 'noindex' },
+      });
+    }
     recordAuthFailure(req, 'share');
     return notFound();
   }

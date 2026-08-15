@@ -1,7 +1,18 @@
 // lib/rate-limit.ts — in-memory failed-attempt limiter for auth endpoints.
-// Only failures count, so legitimate users with the right secret are never
-// locked out. Single-process by design (Next standalone server); a
-// horizontally scaled deploy needs a shared store (Redis) instead.
+// Only failures count, so a request never fills the bucket just by
+// succeeding. That alone doesn't guarantee a legitimate user is never
+// locked out, though: GLOBAL_LIMIT isn't IP-scoped, so if a caller checked
+// this bucket before verifying the credential, anyone who could reach the
+// port could fill it with garbage attempts and 429 the real secret holder.
+// Every caller checks the credential first and only consults the bucket on
+// the invalid path, to avoid exactly that — this is the actual invariant to
+// preserve in any new caller, not a specific file list (one drifted stale
+// here before: proxy.ts, app/api/mcp/route.ts, and lib/route-auth.ts were
+// correct, but app/authorize/route.ts, app/api/oauth/token/route.ts,
+// app/api/auth/check/route.ts, and app/share/[token]/route.ts all checked
+// the bucket first until this comment was fixed alongside them). Single-
+// process by design (Next standalone server); a horizontally scaled deploy
+// needs a shared store (Redis) instead.
 
 type Bucket = { count: number; resetAt: number };
 
@@ -46,7 +57,9 @@ export function clientIp(req: { headers: { get(name: string): string | null } })
 
 /**
  * Seconds until the client may try again (for a Retry-After header), or 0 if
- * the request is allowed. Check this before verifying the credential.
+ * the request is allowed. Check this only after the credential has already
+ * failed — checking it first lets the global bucket lock out a caller who
+ * would have presented a valid credential (see the file header comment).
  */
 export function authLimitExceeded(
   req: { headers: { get(name: string): string | null } },

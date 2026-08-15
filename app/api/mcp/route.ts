@@ -40,14 +40,20 @@ async function authorized(req: NextRequest): Promise<boolean> {
 }
 
 async function handle(req: NextRequest): Promise<Response> {
-  const retryAfter = authLimitExceeded(req, 'bearer');
-  if (retryAfter > 0) {
-    return NextResponse.json(
-      { error: 'Too many failed attempts' },
-      { status: 429, headers: { 'Retry-After': String(retryAfter) } }
-    );
-  }
+  // Credential checked before the bucket: GLOBAL_LIMIT isn't IP-scoped, so
+  // checking the bucket first let anyone who could reach this port lock the
+  // real secret/token holder out with a burst of garbage bearer tokens
+  // (measured: 35 bogus requests -> the valid secret itself gets 429). A
+  // valid credential must never be blocked by a bucket some other caller
+  // filled up; the limiter only ever applies to the invalid-credential path.
   if (!(await authorized(req))) {
+    const retryAfter = authLimitExceeded(req, 'bearer');
+    if (retryAfter > 0) {
+      return NextResponse.json(
+        { error: 'Too many failed attempts' },
+        { status: 429, headers: { 'Retry-After': String(retryAfter) } }
+      );
+    }
     recordAuthFailure(req, 'bearer');
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }

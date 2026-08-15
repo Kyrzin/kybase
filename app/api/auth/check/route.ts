@@ -7,14 +7,6 @@ import { createSessionToken, SESSION_COOKIE_NAME, SESSION_MAX_AGE_SECONDS } from
 import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
 
 export async function POST(req: NextRequest) {
-  const retryAfter = authLimitExceeded(req, 'auth-check');
-  if (retryAfter > 0) {
-    return NextResponse.json(
-      { error: 'Too many attempts, try again later' },
-      { status: 429, headers: { 'Retry-After': String(retryAfter) } }
-    );
-  }
-
   const body = await req.json().catch(() => ({}));
   const { secret } = body as { secret?: string };
 
@@ -22,7 +14,17 @@ export async function POST(req: NextRequest) {
   if (!expected) {
     return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
   }
+  // Credential checked before the bucket — a valid secret must never be
+  // blocked by a bucket some other caller filled up (see proxy.ts). The
+  // limiter only ever applies once the credential has already failed.
   if (!secret || !safeEqual(secret, expected)) {
+    const retryAfter = authLimitExceeded(req, 'auth-check');
+    if (retryAfter > 0) {
+      return NextResponse.json(
+        { error: 'Too many attempts, try again later' },
+        { status: 429, headers: { 'Retry-After': String(retryAfter) } }
+      );
+    }
     recordAuthFailure(req, 'auth-check');
     return NextResponse.json({ ok: false }, { status: 401 });
   }

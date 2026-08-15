@@ -38,6 +38,15 @@ export async function proxy(req: NextRequest) {
   }
 
   const token = bearerToken(req);
+  // Credential checked before the bucket: GLOBAL_LIMIT isn't IP-scoped, so
+  // checking the bucket first let anyone who could reach this port lock the
+  // real secret holder out with a burst of garbage tokens (measured: 35
+  // bogus requests -> the valid secret itself gets 429). A valid secret must
+  // never be blocked by a bucket some other caller filled up; the limiter
+  // only ever applies to the invalid-credential path below.
+  if (safeEqual(token, secret)) {
+    return NextResponse.next();
+  }
   // Any protected route verifies the same secret, so any of them could be
   // used for brute force — count failed bearer checks like login failures.
   // (If middleware runs in an isolated runtime its counters are separate
@@ -49,11 +58,8 @@ export async function proxy(req: NextRequest) {
       { status: 429, headers: { 'Retry-After': String(retryAfter) } }
     );
   }
-  if (!safeEqual(token, secret)) {
-    recordAuthFailure(req, 'bearer');
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  }
-  return NextResponse.next();
+  recordAuthFailure(req, 'bearer');
+  return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 }
 
 // Protect /api/* except /api/auth/* (the login endpoint), /api/mcp (handles

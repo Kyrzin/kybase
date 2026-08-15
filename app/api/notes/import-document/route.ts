@@ -11,6 +11,10 @@
 // needs an entirely different strategy for finding headings — font size for
 // PDF (it has no semantic structure to read), real <h1>-<h6>/Heading-styles
 // for EPUB/DOCX (they already carry it, nothing to guess).
+//
+// Excluded from proxy.ts's matcher and authenticates itself instead (see
+// lib/route-auth.ts) so an unauthenticated caller's body is never buffered
+// before the 401.
 import { NextRequest, NextResponse } from 'next/server';
 import { queryOne, isUniqueViolation, isInvalidTextRepresentation } from '@/lib/db';
 import { indexNoteAsync } from '@/lib/indexing';
@@ -18,15 +22,18 @@ import { importPdf } from '@/lib/pdf-import';
 import { importEpub } from '@/lib/epub-import';
 import { importDocx } from '@/lib/docx-import';
 import { MAX_NOTE_CONTENT_CHARS, stripNulBytes } from '@/lib/types';
+import { requireAuth } from '@/lib/route-auth';
+import { readRequestBodyCapped } from '@/lib/request-body';
 
 const NOTE_SELECT = 'id, title, content, folder_id, tags, embedding_pending, created_at, updated_at';
 
 // The heaviest real file this pipeline was tested against (a 738-page PDF
 // textbook with diagrams) was 60MB and converted in ~10s. 80MB leaves
 // headroom for a legitimately large scanned book without inviting a
-// multi-minute request — proxy.ts's proxyClientMaxBodySize (150MB,
-// next.config.ts) is the outer transport cap that already runs before this
-// handler sees the request; this is the app-level "is this reasonable" cap.
+// multi-minute request. This is the app-level "is this reasonable" cap,
+// enforced by streaming the body in and giving up as soon as it's exceeded
+// (readRequestBodyCapped) rather than trusting the attacker-controlled
+// Content-Length header.
 const MAX_FILE_BYTES = 80 * 1024 * 1024;
 
 type Format = 'pdf' | 'epub' | 'docx';
@@ -57,6 +64,9 @@ async function convert(format: Format, bytes: Buffer, filename: string): Promise
 }
 
 export async function POST(req: NextRequest) {
+  const authFailure = await requireAuth(req);
+  if (authFailure) return authFailure;
+
   const { searchParams } = new URL(req.url);
   const folderId = searchParams.get('folder_id');
   // URI-encoded client-side (components/Sidebar.tsx): raw header values must
@@ -67,16 +77,11 @@ export async function POST(req: NextRequest) {
   const format = formatFromFilename(filename);
   if (!format) return NextResponse.json({ error: 'Unsupported file type — use .pdf, .epub, or .docx' }, { status: 400 });
 
-  const declaredLength = Number(req.headers.get('content-length'));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_FILE_BYTES) {
+  const bytes = await readRequestBodyCapped(req, MAX_FILE_BYTES);
+  if (bytes === null) {
     return NextResponse.json({ error: `File too large (max ${MAX_FILE_BYTES / (1024 * 1024)}MB)` }, { status: 413 });
   }
-
-  const bytes = Buffer.from(await req.arrayBuffer());
   if (bytes.length === 0) return NextResponse.json({ error: 'Missing file' }, { status: 400 });
-  if (bytes.length > MAX_FILE_BYTES) {
-    return NextResponse.json({ error: `File too large (max ${MAX_FILE_BYTES / (1024 * 1024)}MB)` }, { status: 413 });
-  }
 
   let title: string;
   let content: string;

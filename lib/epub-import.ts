@@ -14,6 +14,7 @@
 // XML parser for four attributes isn't worth the dependency.
 import JSZip from 'jszip';
 import { htmlToMarkdown } from './html-to-markdown';
+import { readEntryCapped, MAX_UNZIPPED_BYTES } from './zip-safety';
 
 type ManifestEntry = { href: string; mediaType: string };
 
@@ -56,15 +57,33 @@ export function resolveEpubPath(opfPath: string, href: string): string {
 
 export type EpubResult = { title: string | null; content: string };
 
+const EPUB_TOO_LARGE = `This EPUB expands to more than ${Math.floor(MAX_UNZIPPED_BYTES / (1024 * 1024))}mb when decompressed — refusing to process it.`;
+
 export async function importEpub(buffer: Buffer): Promise<EpubResult> {
   const zip = await JSZip.loadAsync(buffer);
 
-  const containerXml = await zip.file('META-INF/container.xml')?.async('string');
+  // Every entry we pull out of this archive (container.xml, the OPF package
+  // doc, each spine chapter's HTML) is decompressed through readEntryCapped
+  // against a single running budget, so a zip bomb can't expand unbounded
+  // into memory no matter how many entries it's spread across.
+  let remaining = MAX_UNZIPPED_BYTES;
+  async function readCapped(path: string): Promise<string | null | undefined> {
+    const entry = zip.file(path);
+    if (!entry) return undefined; // entry doesn't exist — distinct from "too big"
+    const text = await readEntryCapped(entry, remaining);
+    if (text === null) return null; // budget exceeded
+    remaining -= Buffer.byteLength(text, 'utf8');
+    return text;
+  }
+
+  const containerXml = await readCapped('META-INF/container.xml');
+  if (containerXml === null) throw new Error(EPUB_TOO_LARGE);
   if (!containerXml) throw new Error('Not a valid EPUB: missing META-INF/container.xml');
   const opfPath = parseContainerRootfile(containerXml);
   if (!opfPath) throw new Error('Not a valid EPUB: container.xml has no rootfile');
 
-  const opfXml = await zip.file(opfPath)?.async('string');
+  const opfXml = await readCapped(opfPath);
+  if (opfXml === null) throw new Error(EPUB_TOO_LARGE);
   if (!opfXml) throw new Error(`Not a valid EPUB: missing package document at ${opfPath}`);
 
   const manifest = parseOpfManifest(opfXml);
@@ -76,7 +95,8 @@ export async function importEpub(buffer: Buffer): Promise<EpubResult> {
     const entry = manifest.get(idref);
     if (!entry || !/x?html/i.test(entry.mediaType)) continue;
     const fullPath = resolveEpubPath(opfPath, entry.href);
-    const html = await zip.file(fullPath)?.async('string');
+    const html = await readCapped(fullPath);
+    if (html === null) throw new Error(EPUB_TOO_LARGE);
     if (!html) continue;
     const md = htmlToMarkdown(html).trim();
     if (md) chapters.push(md);

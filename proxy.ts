@@ -1,8 +1,18 @@
-// proxy.ts — Bearer token auth for all /api/* except /api/auth and /api/mcp
+// proxy.ts — Bearer token auth for all /api/* except /api/auth, /api/mcp,
+// /api/import, and /api/notes/import-document
 // (renamed from middleware.ts per Next.js 16; file convention only, behavior
 // is unchanged — see node_modules/next/dist/docs/.../proxy.md)
 // /api/auth — handles its own validation (login endpoint)
 // /api/mcp  — handles its own auth internally (SSE needs no buffering interference)
+// /api/import, /api/notes/import-document — handle their own auth internally
+// (lib/route-auth.ts) purely so they're excluded from this matcher: while
+// proxy is active for a route, this Next version clones and buffers that
+// route's request body (up to proxyClientMaxBodySize, next.config.ts) before
+// proxy.ts's code ever runs — so even a request with a bad/missing Bearer
+// token pays for buffering its whole body before getting rejected. These two
+// routes accept large file uploads, so they can't be behind that buffering
+// and still authenticate cheaply; excluding them here and checking auth
+// themselves on headers alone (before reading the body) closes that gap.
 import { NextRequest, NextResponse } from 'next/server';
 import { bearerToken, safeEqual } from '@/lib/auth';
 import { verifySessionToken, SESSION_COOKIE_NAME } from '@/lib/session';
@@ -47,12 +57,14 @@ export async function proxy(req: NextRequest) {
 }
 
 // Protect /api/* except /api/auth/* (the login endpoint), /api/mcp (handles
-// its own auth), and the two public OAuth endpoints. /api/oauth/clients is
-// deliberately NOT excluded — listing/revoking tokens requires the master
-// secret, so a leaked OAuth token can't enumerate or revoke its peers.
-// /authorize is public by location (not under /api).
+// its own auth), /api/import and /api/notes/import-document (handle their
+// own auth — see the file header comment), and the two public OAuth
+// endpoints. /api/oauth/clients is deliberately NOT excluded —
+// listing/revoking tokens requires the master secret, so a leaked OAuth
+// token can't enumerate or revoke its peers. /authorize is public by
+// location (not under /api).
 // Every exclusion is anchored ($ or /): a bare prefix like `mcp` would also
 // exempt a future /api/mcp2 from auth.
 export const config = {
-  matcher: ['/api/((?!auth/|mcp$|mcp/|oauth/token$|oauth/discovery$).*)'],
+  matcher: ['/api/((?!auth/|mcp$|mcp/|oauth/token$|oauth/discovery$|import$|notes/import-document$).*)'],
 };

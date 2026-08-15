@@ -1,82 +1,29 @@
 // POST /api/import — restore/merge a vault from a zip of markdown files.
 // Directories become folders, frontmatter supplies title/tags (filename is
-// the fallback title). Bearer-protected by proxy.ts.
+// the fallback title). Excluded from proxy.ts's matcher and authenticates
+// itself instead (see lib/route-auth.ts) so an unauthenticated caller's body
+// is never buffered before the 401.
 //
 // Conflict policy via ?mode= : 'skip' (default) leaves existing notes
 // untouched, 'overwrite' replaces their content/tags. Titles are the
 // identity — matching is case-insensitive, same as wikilink resolution.
 import { NextRequest, NextResponse } from 'next/server';
 import JSZip from 'jszip';
-import type { Readable } from 'node:stream';
 import { query, queryOne } from '@/lib/db';
 import { parseFrontmatter } from '@/lib/export';
 import { reindexPendingAsync } from '@/lib/reindex';
 import { stripNulBytes } from '@/lib/types';
+import { requireAuth } from '@/lib/route-auth';
+import { readRequestBodyCapped } from '@/lib/request-body';
+import { readEntryCapped, MAX_UNZIPPED_BYTES } from '@/lib/zip-safety';
 
 export const dynamic = 'force-dynamic';
 
 const MAX_ZIP_BYTES = 100 * 1024 * 1024;
-// A zip bomb can expand far beyond the archive-size cap, so the decompressed
-// total is limited too. Counted as entries stream out — notes already written
-// when the cap trips stay imported (each note is written independently).
-const MAX_UNZIPPED_BYTES = 400 * 1024 * 1024;
 // A vault of legitimately thousands of tiny notes stays well under this; an
 // archive engineered as a huge pile of near-empty .md files (each cheap in
 // bytes, but each one a folder lookup plus a DB round trip) does not.
 const MAX_ENTRIES = 10_000;
-
-// Reads the request body, giving up once it exceeds `limit` bytes. Content-
-// Length is attacker-controlled (or absent under chunked encoding), so the
-// budget has to be counted on bytes as they actually arrive — buffering the
-// whole body first (the previous req.arrayBuffer() call did exactly that)
-// would let an oversized upload exhaust memory before MAX_ZIP_BYTES ever runs.
-async function readRequestBodyCapped(req: NextRequest, limit: number): Promise<Buffer | null> {
-  const reader = req.body?.getReader();
-  if (!reader) return Buffer.from(await req.arrayBuffer());
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.length;
-    if (size > limit) {
-      await reader.cancel().catch(() => {});
-      return null;
-    }
-    chunks.push(value);
-  }
-  return Buffer.concat(chunks);
-}
-
-// Reads one entry, giving up once it exceeds `limit` bytes. Sizes declared in
-// the zip directory are attacker-controlled, so the budget has to be counted
-// on bytes as they actually inflate — buffering the whole entry first would
-// let a single highly-compressed file exhaust memory before any check runs.
-function readEntryCapped(
-  entry: JSZip.JSZipObject,
-  limit: number
-): Promise<string | null> {
-  return new Promise((resolve, reject) => {
-    const stream = entry.nodeStream('nodebuffer') as Readable;
-    const chunks: Buffer[] = [];
-    let size = 0;
-
-    stream.on('data', (chunk: Buffer) => {
-      size += chunk.length;
-      if (size > limit) {
-        // pause() first: it is backpressure, not destroy(), that stops jszip
-        // pumping the inflater — without it the bomb keeps expanding unread.
-        stream.pause();
-        stream.destroy();
-        resolve(null);
-        return;
-      }
-      chunks.push(chunk);
-    });
-    stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    stream.on('error', reject);
-  });
-}
 
 async function ensureFolderPath(
   segments: string[],
@@ -114,6 +61,9 @@ async function ensureFolderPath(
 }
 
 export async function POST(req: NextRequest) {
+  const authFailure = await requireAuth(req);
+  if (authFailure) return authFailure;
+
   const mode = new URL(req.url).searchParams.get('mode') === 'overwrite' ? 'overwrite' : 'skip';
 
   const body = await readRequestBodyCapped(req, MAX_ZIP_BYTES);

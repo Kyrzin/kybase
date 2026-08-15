@@ -16,6 +16,7 @@
 lib/__itest__/
 vitest.config.ts
 vitest.integration.config.ts
+docs/search-baseline.md
 
 # next.js
 /.next/
@@ -46,9 +47,6 @@ docker-compose.override.yml
 # personal instructions/preferences — never shared upstream
 CLAUDE.local.md
 
-# local audit/analysis notes from ad-hoc agent runs — working documents,
-# not project docs; reference the author's own machine paths
-анализ.md
 
 # vercel
 .vercel

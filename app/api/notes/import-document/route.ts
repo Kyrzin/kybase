@@ -111,5 +111,11 @@ export async function POST(req: NextRequest) {
 
   indexNoteAsync(note.id, note.title, note.content);
 
+  if (note.content.length > 200_000) {
+    return NextResponse.json(
+      { ...note, warning: 'Full-text (keyword) search only covers the first 200,000 characters of this note; semantic search covers the full content.' },
+      { status: 201 }
+    );
+  }
   return NextResponse.json(note, { status: 201 });
 }

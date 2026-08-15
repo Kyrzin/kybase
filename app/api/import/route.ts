@@ -134,6 +134,12 @@ export async function POST(req: NextRequest) {
   const folderCache = new Map<string, string>();
   let imported = 0, updated = 0, skipped = 0, unzippedBytes = 0;
   const errors: string[] = [];
+  // Notes whose content exceeds the generated search_vector column's input
+  // bound (migration 014, 200k chars) — full-text (keyword) search only
+  // covers the truncated prefix for these; semantic/chunk search is
+  // unaffected. Collected rather than checked per-entry error handling so a
+  // long note that imports successfully still surfaces the caveat.
+  const warnings: string[] = [];
 
   for (const entry of entries) {
     try {
@@ -143,7 +149,7 @@ export async function POST(req: NextRequest) {
         // kick off the background pass the normal exit path would have run.
         if (imported + updated > 0) reindexPendingAsync();
         return NextResponse.json(
-          { error: 'Decompressed size limit exceeded', imported, updated, skipped, errors },
+          { error: 'Decompressed size limit exceeded', imported, updated, skipped, errors, warnings },
           { status: 413 }
         );
       }
@@ -157,6 +163,9 @@ export async function POST(req: NextRequest) {
       const filename = segments.pop() ?? '';
       const title = (fmTitle ?? filename.replace(/\.md$/i, '')).trim().slice(0, 500);
       if (!title) { skipped++; continue; }
+      if (content.length > 200_000) {
+        warnings.push(`${title}: full-text (keyword) search only covers the first 200,000 characters; semantic search covers the full content.`);
+      }
 
       // btrim both sides: titles created before write-time trimming existed
       // may carry invisible padding and must still match their export.
@@ -194,5 +203,5 @@ export async function POST(req: NextRequest) {
   // Embeddings happen in the background — text search works immediately.
   if (imported + updated > 0) reindexPendingAsync();
 
-  return NextResponse.json({ imported, updated, skipped, errors, total: entries.length });
+  return NextResponse.json({ imported, updated, skipped, errors, warnings, total: entries.length });
 }

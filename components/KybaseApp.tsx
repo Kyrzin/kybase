@@ -76,7 +76,7 @@ export default function KybaseApp() {
   const [toolbarEditingTitle, setToolbarEditingTitle] = useState(false);
 
   const [movingNote, setMovingNote]     = useState(false);
-  const [shareInfo, setShareInfo]       = useState<{ token: string; url: string } | null>(null);
+  const [shareInfo, setShareInfo]       = useState<{ id: string; url: string } | null>(null);
   const [shareCopied, setShareCopied]   = useState(false);
   const [linkPickerOpen, setLinkPickerOpen] = useState(false);
   const [linkInlineTrigger, setLinkInlineTrigger] = useState(false);
@@ -242,14 +242,15 @@ export default function KybaseApp() {
     const res = await apiFetch(`/api/notes/${activeNoteId}/share`, { method: 'POST', body: '{}' });
     if (!res.ok) return;
     const data = await res.json();
-    setShareInfo({ token: data.token, url: data.url });
+    setShareInfo({ id: data.id, url: data.url });
   };
 
   // The editor's share popover can revoke the link it just created.
-  const revokeShareLink = async (noteId: string, token: string) => {
-    const res = await apiFetch(`/api/notes/${noteId}/share/${token}`, { method: 'DELETE' });
+  // shareId is the share row's id (a uuid), not the secret token.
+  const revokeShareLink = async (noteId: string, shareId: string) => {
+    const res = await apiFetch(`/api/notes/${noteId}/share/${shareId}`, { method: 'DELETE' });
     if (res.ok || res.status === 404) {
-      setShareInfo(prev => (prev?.token === token ? null : prev));
+      setShareInfo(prev => (prev?.id === shareId ? null : prev));
     }
   };
 
@@ -474,7 +475,7 @@ export default function KybaseApp() {
                 {shareCopied ? '✓ Copied' : 'Copy link'}
               </button>
               <button
-                onClick={() => activeNoteId && revokeShareLink(activeNoteId, shareInfo.token)}
+                onClick={() => activeNoteId && revokeShareLink(activeNoteId, shareInfo.id)}
                 style={{ flex: 1, background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#f38ba8', padding: '10px 0', fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
               >
                 Revoke
@@ -496,7 +497,7 @@ export default function KybaseApp() {
           onClose={() => setSettingsOpen(false)}
           setNotes={setNotes}
           setFolders={setFolders}
-          onShareRevoked={token => setShareInfo(prev => (prev?.token === token ? null : prev))}
+          onShareRevoked={id => setShareInfo(prev => (prev?.id === id ? null : prev))}
         />
       )}
 

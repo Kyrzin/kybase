@@ -82,13 +82,13 @@ export async function setFtsLanguages(languages: string[]): Promise<void> {
 }
 
 // getEmbeddingConfig is on the hot path — every embed call (getEmbedding,
-// getMinSimilarity) reads it, and the OR-cascade (наряд-поиск step 3) can
+// getMinSimilarity) reads it, and the OR-cascade (search-relevance overhaul step 3) can
 // mean multiple search_notes_fts calls per request, each one re-deriving
 // the same 4 settings rows with zero chance they changed mid-request.
 // Short TTL rather than "forever until invalidated": a stale read is
 // bounded to a few seconds even if some future write path forgets to
 // clear the cache, instead of serving last session's provider config
-// indefinitely (наряд-поиск-2026-08-14 шаг 7 — measured cost, not
+// indefinitely (2026-08-14 search-relevance overhaul, step 7 — measured cost, not
 // hypothetical: unbounded before this).
 const EMBEDDING_CONFIG_CACHE_TTL_MS = 5_000;
 let cachedEmbeddingConfig: { value: EmbeddingConfig; expiresAt: number } | null = null;

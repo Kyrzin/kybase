@@ -15,7 +15,7 @@ import { MAX_NOTE_CONTENT_CHARS, stripNulBytes } from './types';
 
 
 // get_note(title=...) is the shortcut past search_notes, but real titles are long
-// and composite ("2026-07-24 — Kybase: Move-folder + UX-полировка сайдбара"), and
+// and composite ("2026-07-24 — Kybase: Move-folder + sidebar UX polish"), and
 // an agent almost never reproduces one verbatim from memory. Exact-only matching
 // made that shortcut a coin flip: title "Kybase" returned a bare "Note not found"
 // while seven notes started with "Kybase — ". An exact (case-insensitive) hit
@@ -849,7 +849,7 @@ export function createMcpServer(): McpServer {
   // doesn't reformat still sees structure. Trimmed debug fields (~40% per
   // measurement) outweigh indentation's own overhead (~25%), so the net
   // response is smaller as well as more readable
-  // (наряд-поиск-2026-08-14 шаг 8).
+  // (2026-08-14 search-relevance overhaul, step 8).
   function toDisplayResult(r: SearchResult | HybridSearchResult, explain: boolean): Record<string, unknown> {
     const hybrid = r as Partial<HybridSearchResult>;
     const out: Record<string, unknown> = {
@@ -938,7 +938,7 @@ export function createMcpServer(): McpServer {
       // relevance is only ever relative to the best hit IN THIS RESPONSE
       // (semanticSearch/rrfMerge), so an agent has no way to tell "a
       // confident 0.85 cosine" from "the least-bad of a weak field" without
-      // this number to compare against (наряд-поиск-2026-08-14 шаг 2).
+      // this number to compare against (2026-08-14 search-relevance overhaul, step 2).
       const [threshold, bestScore, pendingRows] = await Promise.all([
         effectiveSemanticThreshold(),
         bestSemanticScore(q),
@@ -987,8 +987,9 @@ export function createMcpServer(): McpServer {
     'list_tags',
     'List tags in use with the number of notes carrying each, most-used first, capped at `limit` ' +
     '(default 40). Call this before tagging a note and reuse an existing tag when one fits, rather ' +
-    'than coining a near-duplicate — the vault has no tag synonyms, so "workflow" and "воркфлоу" are ' +
-    'two separate tags that fragment the same concept. The default cuts off the one-off tail: a tag ' +
+    'than coining a near-duplicate (a translation, transliteration, or plural of an existing tag) — ' +
+    'the vault has no tag synonyms, so near-duplicates fragment the same concept into separate tags. ' +
+    'The default cuts off the one-off tail: a tag ' +
     'used once is not one worth reusing, so it is not shown unless you raise limit.',
     {
       limit: z.number().int().min(1).max(1000).default(40).describe('Max tags to return, most-used first'),

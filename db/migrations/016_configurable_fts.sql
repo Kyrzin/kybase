@@ -5,8 +5,8 @@
 -- 013 (still a stored, GIN-indexed column) — only writes get slower, and
 -- only by one extra settings lookup.
 --
--- Per "наряд на поиск 2026-08-14" шаг 5 / the roadmap's own framing
--- ("рамка: публичный AGPL-продукт"): hardcoding russian+english (migration
+-- Per the 2026-08-14 search-relevance overhaul, step 5 / the roadmap's own
+-- framing ("this is a public AGPL product"): hardcoding russian+english (migration
 -- 001/013) was itself a vault-specific constant. Default stays
 -- ['russian','english'] — same behavior as before for this vault — but
 -- it's now data (settings.fts_languages, comma-separated text), not code,
@@ -16,12 +16,12 @@
 -- 'simple' is always included on top of whatever's configured — it
 -- doesn't stem at all, so it catches identifiers and partial-word
 -- fragments ("kmv", "tsconfig") that every stemmer configuration drops,
--- taking load off the blind substring fallback (наряд-поиск step 3).
+-- taking load off the blind substring fallback (search-relevance overhaul step 3).
 --
 -- setweight: A = title, B = tags, C = markdown section headings
 -- (extracted by regex — headings still appear in the body too, at D;
 -- getting boosted twice is fine, not minimal but simple and correct),
--- D = body. This is what makes item #4 in the наряд's baseline
+-- D = body. This is what makes item #4 in the overhaul's baseline
 -- (`runbook` query, three notes tied on ts_rank) resolve correctly: a note
 -- with "Runbook" in its actual title now outranks one that only mentions
 -- it in a wikilink reference inside the body.
@@ -95,7 +95,7 @@ create index if not exists notes_search_vector_gin on notes using gin (search_ve
 -- variable-length, settings-driven list of tsquery configs with || needs a
 -- loop, which a plain SQL function can't express. Signature (id, title,
 -- tags, rank, headline) is unchanged, so lib/search.ts needs no changes at
--- all — the OR-cascade (наряд-поиск step 3) calls this same function and
+-- all — the OR-cascade (search-relevance overhaul step 3) calls this same function and
 -- picks up multi-language/simple matching automatically.
 create or replace function search_notes_fts(
   search_query text,

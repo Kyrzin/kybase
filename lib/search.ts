@@ -55,7 +55,7 @@ export type SearchResult = {
   // single incidental word match. Exposed as its own field, not folded
   // invisibly into relevance, because the alternative was already tried and
   // failed silently (the confidence label alone was correct; the number
-  // still lied — see наряд-поиск-2026-08-14 шаг 3b).
+  // still lied — see the 2026-08-14 search-relevance overhaul, step 3b).
   coverage?: number;
   // Filled in by enrichResults (a single id = any($1) lookup, not part
   // of search_notes_fts/match_chunks — see there for why). Absent only if
@@ -427,7 +427,7 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
       const { score: _score, ...rest } = result;
       const matched_by = Object.keys(extra) as ('text_score' | 'semantic_score')[];
       // A text arm corroborates if the STRICT query found it ('and') — or,
-      // since шаг 3b, if the OR cascade found it but genuinely contains
+      // since step 3b, if the OR cascade found it but genuinely contains
       // EVERY significant word of the query (coverage === 1): the strict
       // pass failing there isn't "recall filled in for a weak match", it's
       // websearch_to_tsquery's own AND-tsquery construction not firing for
@@ -490,8 +490,8 @@ type NoteRow = { id: string; title: string; content: string; tags: string[] };
  * ts_headline crops at word boundaries (MaxWords=45, migration 009), not
  * cell boundaries, so a genuinely broken snippet routinely has NO full
  * `|...|`-shaped line at all — the row's own opening pipe falls before the
- * crop, its closing one after. A real live case: `без префикса −0.004) |
- * полоса 0.60–0.68 ... |` starts and ends mid-cell, no line passes
+ * crop, its closing one after. A real live case: `without prefix −0.004) |
+ * range 0.60–0.68 ... |` starts and ends mid-cell, no line passes
  * TABLE_ROW_RE, and a check built on that regex misses it outright. Pipe
  * counting plus a substring separator check catches it anyway. Errs toward
  * over-flagging on purpose — a false positive costs one wasted point-fetch
@@ -549,14 +549,14 @@ async function repairBrokenTableExcerpts(results: SearchResult[]): Promise<void>
 // Words worth re-querying on individually — websearch_to_tsquery ANDs every
 // term in the original query, so a natural-language question (7+ words) can
 // require literal co-occurrence of words that were never meant as a single
-// phrase and come back empty. 3 chars is the same floor the наряд uses
+// phrase and come back empty. 3 chars is the same floor the overhaul uses
 // elsewhere for "significant" — short enough to keep real content words
 // ("dns", "kmv") while dropping prepositions/particles in RU/EN/DE, the
 // languages this vault actually configures (settings.fts_languages).
 //
 // Known scope limitation, flagged rather than silently left implicit
 // (pre-publication review): word length is language-dependent, and this
-// cutoff was originally a cascade-triggering heuristic only — since шаг 3b
+// cutoff was originally a cascade-triggering heuristic only — since step 3b
 // it also PRE-FILTERS which words computeTextCoverage's real, language-
 // aware significance test (numnode() against the configured FTS languages)
 // ever gets to see, making a length-3 floor load-bearing in a way it wasn't
@@ -578,7 +578,7 @@ function significantWords(query: string): string[] {
 }
 
 /**
- * Query-coverage discount (наряд-поиск-2026-08-14 шаг 3b): what fraction of
+ * Query-coverage discount (2026-08-14 search-relevance overhaul, step 3b): what fraction of
  * the query's significant lexemes are actually present in a given hit,
  * independent of ts_rank entirely. Needed because step 4's relative-to-best
  * normalization (rank / max(rank)) always hands the top hit of a result set
@@ -713,7 +713,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // lexemes against a vector that stored it as one dropped a correct,
   // exact-match AND hit from relevance 1.0 to 0.33. Two different
   // tokenizers must never be asked to agree on the same string; scoping the
-  // discount to the tier that's actually the naряд's failure mode (OR found
+  // discount to the tier that's actually the overhaul's failure mode (OR found
   // one word out of N) sidesteps the disagreement entirely instead of
   // trying to make the two tokenizers consistent.
   const coverageMap = await computeTextCoverage(words, orRows.map((n) => n.id));
@@ -724,7 +724,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     // coverage (the common case for an OR-cascade result: everything
     // matched on one word out of N) — the multiplier would divide by
     // itself and the top hit would land back at 1.0, silently undoing the
-    // whole point (наряд-поиск-2026-08-14 шаг 3b).
+    // whole point (2026-08-14 search-relevance overhaul, step 3b).
     const normalized = best > 0 ? n.rank / best : 0;
     const coverage = tier === 'and' ? 1 : (coverageMap?.get(n.id) ?? 1);
     const relevance = normalized * coverage;
@@ -752,7 +752,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     // SQL order (by raw rank, then 'and' rows before 'or' rows) no longer
     // guarantees this once coverage can push an 'or' hit's relevance above
     // an 'and' hit's, and a caller reading top-to-bottom must never see
-    // `weak` above `moderate` (наряд-поиск шаг 2a's invariant, restated for
+    // `weak` above `moderate` (the search-relevance overhaul step 2a's invariant, restated for
     // this arm's own output, not just rrfMerge's).
     .sort((a, b) => CONFIDENCE_RANK[a.confidence] - CONFIDENCE_RANK[b.confidence] || b.relevance - a.relevance);
   const filtered = await applyFilters(results, limit, filters);

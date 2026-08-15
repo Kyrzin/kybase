@@ -8,7 +8,7 @@ create table if not exists note_shares (
   token       text primary key,          -- crypto.randomBytes(32).toString('base64url')
   note_id     uuid not null references notes(id) on delete cascade,
   created_at  timestamptz not null default now(),
-  expires_at  timestamptz                -- null = бессрочно
+  expires_at  timestamptz                -- null = no expiry
 );
 
 create index if not exists idx_note_shares_note_id on note_shares (note_id);

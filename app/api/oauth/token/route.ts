@@ -7,9 +7,12 @@ import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
 
-export async function POST(req: NextRequest) {
-  // Both grants verify a guessable credential (code or client_secret) — keep
-  // brute force off the table.
+// Both grants verify a guessable credential (code or client_secret) — keep
+// brute force off the table. Credential checked before the bucket, same as
+// proxy.ts: called only from a failure branch below, after the credential
+// has already been shown invalid, never unconditionally up front — a valid
+// code/secret must never be blocked by a bucket some other caller filled up.
+function rateLimitedFailure(req: NextRequest, body: Record<string, string>, status: number): NextResponse {
   const retryAfter = authLimitExceeded(req, 'oauth-token');
   if (retryAfter > 0) {
     return NextResponse.json(
@@ -17,7 +20,11 @@ export async function POST(req: NextRequest) {
       { status: 429, headers: { 'Retry-After': String(retryAfter) } }
     );
   }
+  recordAuthFailure(req, 'oauth-token');
+  return NextResponse.json(body, { status });
+}
 
+export async function POST(req: NextRequest) {
   const secret = process.env.KYBASE_SECRET;
   if (!secret) return NextResponse.json({ error: 'server_error' }, { status: 500 });
 
@@ -40,16 +47,13 @@ export async function POST(req: NextRequest) {
 
     const entry = consumeCode(code);
     if (!entry) {
-      recordAuthFailure(req, 'oauth-token');
-      return NextResponse.json({ error: 'invalid_grant' }, { status: 400 });
+      return rateLimitedFailure(req, { error: 'invalid_grant' }, 400);
     }
     if (entry.redirectUri !== redirectUri) {
-      recordAuthFailure(req, 'oauth-token');
-      return NextResponse.json({ error: 'invalid_grant', error_description: 'redirect_uri mismatch' }, { status: 400 });
+      return rateLimitedFailure(req, { error: 'invalid_grant', error_description: 'redirect_uri mismatch' }, 400);
     }
     if (!verifyPkce(codeVerifier, entry.codeChallenge, entry.codeChallengeMethod)) {
-      recordAuthFailure(req, 'oauth-token');
-      return NextResponse.json({ error: 'invalid_grant', error_description: 'pkce verification failed' }, { status: 400 });
+      return rateLimitedFailure(req, { error: 'invalid_grant', error_description: 'pkce verification failed' }, 400);
     }
 
     // A real, revocable token — never the master secret (see lib/tokens.ts).
@@ -71,8 +75,7 @@ export async function POST(req: NextRequest) {
       }
     }
     if (!clientSecret || !safeEqual(clientSecret, secret)) {
-      recordAuthFailure(req, 'oauth-token');
-      return NextResponse.json({ error: 'invalid_client' }, { status: 401 });
+      return rateLimitedFailure(req, { error: 'invalid_client' }, 401);
     }
     const { token, expiresAt } = await issueToken(params.get('client_id') ?? 'client-credentials');
     return NextResponse.json({

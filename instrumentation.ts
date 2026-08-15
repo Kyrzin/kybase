@@ -2,6 +2,7 @@
 // requests (Next.js convention). Applies pending database migrations, then
 // picks up notes whose embedding never completed.
 const PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const REINDEX_INTERVAL_MS = 60 * 60 * 1000;
 
 export async function register() {
   if (process.env.NEXT_RUNTIME !== 'nodejs') return;
@@ -12,8 +13,13 @@ export async function register() {
   // down, crash mid-index) — without this it silently never enters semantic
   // search. Delayed so a cold Ollama container has time to come up; if it's
   // still down, failures log and the notes stay pending for the next start.
+  // Previously this only ran once at startup and after import, so a note
+  // whose embedding failed mid-uptime (e.g. Ollama restarted) stayed pending
+  // until the next server restart. An hourly sweep catches it without
+  // needing one.
   const { reindexPendingAsync } = await import('./lib/reindex');
   setTimeout(reindexPendingAsync, 15_000);
+  setInterval(reindexPendingAsync, REINDEX_INTERVAL_MS);
 
   // lib/trash.ts also purges expired trash opportunistically on every
   // delete, but that alone doesn't guarantee the "30 days" the Trash UI

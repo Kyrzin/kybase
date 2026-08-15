@@ -146,6 +146,27 @@ describe('getEmbedding - unknown provider', () => {
   });
 });
 
+describe('getMinSimilarity', () => {
+  // Per-model, not a single flat number — measured live 2026-08-14:
+  // embeddinggemma separates noise/signal cosines by a wide margin (a flat
+  // gate works), nomic-embed-text compresses them to within ~0.02-0.05 of
+  // each other (a gate tuned for embeddinggemma would let nomic's noise
+  // straight through). See lib/embeddings.ts for the actual measurements.
+  it('embeddinggemma (default local model) uses the wide-margin floor', async () => {
+    process.env.EMBEDDING_PROVIDER = 'ollama';
+    process.env.OLLAMA_MODEL = 'embeddinggemma';
+    const { getMinSimilarity } = await import('./embeddings');
+    expect(await getMinSimilarity()).toBe(0.30);
+  });
+
+  it('nomic-embed-text uses a higher floor for its compressed cosine range', async () => {
+    process.env.EMBEDDING_PROVIDER = 'ollama';
+    process.env.OLLAMA_MODEL = 'nomic-embed-text';
+    const { getMinSimilarity } = await import('./embeddings');
+    expect(await getMinSimilarity()).toBe(0.65);
+  });
+});
+
 describe('getEmbedConcurrency', () => {
   it('gives ollama a higher but still modest concurrency', async () => {
     process.env.EMBEDDING_PROVIDER = 'ollama';

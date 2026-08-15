@@ -27,17 +27,24 @@ vi.mock('@/lib/docx-import', () => ({ importDocx: (...a: unknown[]) => importDoc
 
 import { POST } from './route';
 
-function req(bytes: Uint8Array, opts: { filename?: string; folderId?: string } = {}): NextRequest {
+// The route now authenticates itself (lib/route-auth.ts) instead of relying
+// on proxy.ts, which never runs when a test calls the route handler
+// directly — every request built here needs a valid Bearer token.
+const TEST_SECRET = 'route-test-secret';
+
+function req(bytes: Uint8Array, opts: { filename?: string; folderId?: string; authorized?: boolean } = {}): NextRequest {
   const url = new URL('http://localhost/api/notes/import-document');
   if (opts.folderId) url.searchParams.set('folder_id', opts.folderId);
   const headers: Record<string, string> = { 'content-type': 'application/octet-stream' };
   if (opts.filename) headers['x-filename'] = opts.filename;
+  if (opts.authorized !== false) headers['authorization'] = `Bearer ${TEST_SECRET}`;
   return new NextRequest(url, { method: 'POST', body: new Blob([bytes as BlobPart]), headers });
 }
 
 const smallFile = () => new Uint8Array(100);
 
 beforeEach(() => {
+  process.env.KYBASE_SECRET = TEST_SECRET;
   queryOne.mockReset();
   isUniqueViolation.mockReset().mockReturnValue(false);
   isInvalidTextRepresentation.mockReset().mockReturnValue(false);
@@ -115,11 +122,21 @@ describe('POST /api/notes/import-document — title derivation', () => {
   });
 });
 
+describe('POST /api/notes/import-document — auth', () => {
+  it('rejects a request with no/wrong Bearer token before touching the file', async () => {
+    const res = await POST(req(smallFile(), { filename: 'book.pdf', authorized: false }));
+    expect(res.status).toBe(401);
+    expect(importPdf).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /api/notes/import-document — other HTTP concerns', () => {
-  it('rejects a body over the size cap via Content-Length before reading it', async () => {
-    const request = req(smallFile(), { filename: 'book.pdf' });
-    request.headers.set('content-length', String(90 * 1024 * 1024));
-    const res = await POST(request);
+  it('rejects a body over the size cap without ever buffering it fully', async () => {
+    // Content-Length is no longer trusted — the cap is enforced by counting
+    // bytes as they stream in (lib/request-body.ts), so this has to be a
+    // body that's actually over MAX_FILE_BYTES (80MB), not just a header.
+    const oversized = new Uint8Array(81 * 1024 * 1024);
+    const res = await POST(req(oversized, { filename: 'book.pdf' }));
     expect(res.status).toBe(413);
     expect(importPdf).not.toHaveBeenCalled();
   });

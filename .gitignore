@@ -10,8 +10,12 @@
 !.yarn/releases
 !.yarn/versions
 
-# testing
+# testing — kept locally only
 /coverage
+**/*.test.ts
+lib/__itest__/
+vitest.config.ts
+vitest.integration.config.ts
 
 # next.js
 /.next/

@@ -177,7 +177,7 @@ export function findHeaderFooterLines(pages: PdfPage[]): Set<string> {
 const HEADING_SIZE_RATIO = 1.15;
 // Headings are short by nature. This also rejects the real failure mode
 // found live: some books render individual emphasized terms mid-sentence
-// in a large display font ("the term код, or кодирование, ...") — those
+// in a large display font ("the term function, or recursion, ...") — those
 // share a heading-sized font but are never alone on their line once mixed
 // with the surrounding 11pt sentence, so they're already excluded by
 // `fontSize !== null` (mixed-size lines) before word count is even checked.
@@ -192,8 +192,8 @@ const MAX_HEADING_WORDS = 12;
 // every other heading check — same isolated-uniform-large-font shape as a
 // real heading, verified live on multiple books, different noise each time.
 // The one thing they don't have in common with real headings, in any
-// language: an actual multi-letter word. "1.1 Введение" and "1.1 Первая
-// программа" both clear this; "i", "J J J J J J J J", "4<0xFFFD>", "::::: 9.21034."
+// language: an actual multi-letter word. "1.1 Introduction" and "1.1 First
+// Program" both clear this; "i", "J J J J J J J J", "4<0xFFFD>", "::::: 9.21034."
 // don't, regardless of what book they came from.
 const MIN_SUBSTANTIAL_WORD_LETTERS = 3;
 const REPLACEMENT_CHAR = '�'; // U+FFFD — pdf.js's marker for a glyph with no Unicode mapping; corruption in any language.
@@ -290,7 +290,7 @@ export function pagesToMarkdown(pages: PdfPage[]): string {
       // "#" (a shell/Python comment marker, most often) is exactly the bug
       // this whole module exists to fix, just from the PDF-import side
       // instead of copy-paste — verified live: real book code comments
-      // ("# Инициализация массива...") landed at a paragraph's start often
+      // ("# Array initialization...") landed at a paragraph's start often
       // enough to matter. extractHeadings/chunkNote read `^#{1,6}\s` as a
       // real heading with no way to know it came from inside a code
       // listing; escaping it here is the same fix a human editor would

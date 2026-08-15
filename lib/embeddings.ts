@@ -8,7 +8,7 @@ export type EmbedTask = 'query' | 'document';
 // is gets decided relative to the best hit in its own result set
 // (lib/search.ts semanticSearch), not against this absolute number. That
 // split is deliberate: a single absolute cosine can't do both jobs at once
-// (2026-08-14 measurement — see "наряд на поиск 2026-08-14"). This is
+// (2026-08-14 measurement — see the 2026-08-14 search-relevance overhaul). This is
 // still per-model, and still a real number pulled from measurement, not a
 // vault-tuned judgment threshold like the old 0.40/0.55 — the reason it
 // can't be one flat number for every model is architectural, not this
@@ -29,7 +29,7 @@ export type EmbedTask = 'query' | 'document';
 //                      barely clears this floor isn't a confident one).
 //   Only 5 pairs each — enough to show the shapes are genuinely different,
 //   not enough to call these final. Re-run the battery
-//   (наряд-поиск-2026-08-14 методика) on any model change.
+//   (see the 2026-08-14 search-relevance overhaul methodology) on any model change.
 function minSimilarityFor(cfg: EmbeddingConfig): number {
   if (cfg.provider === 'ollama') {
     if ((cfg.ollamaModel ?? '').includes('nomic-embed-text')) return 0.65;

@@ -121,20 +121,35 @@ export async function POST(req: NextRequest) {
       // may carry invisible padding and must still match their export.
       // deleted_at is null: a title held only by a trashed note is free —
       // import creates a fresh live note rather than resurrecting the old one.
-      const existing = await queryOne<{ id: string }>(
-        'select id from notes where lower(btrim(title)) = lower(btrim($1)) and deleted_at is null', [title]
+      const existing = await queryOne<{ id: string; content: string; tags: string[]; folder_id: string | null }>(
+        'select id, content, tags, folder_id from notes where lower(btrim(title)) = lower(btrim($1)) and deleted_at is null', [title]
       );
+      if (existing && mode === 'skip') { skipped++; continue; }
+      // Resolved after the skip check above: a skipped note must not create
+      // folders as a side effect of a path it's about to abandon.
+      const folderId = await ensureFolderPath(segments, folderCache);
       if (existing) {
-        if (mode === 'skip') { skipped++; continue; }
+        // "Take the vault away and bring it back" (export, then re-import
+        // over itself) used to unconditionally set embedding_pending and
+        // drop folder_id/created_at on every matched note — a full-vault
+        // round trip meant a full re-embed even when nothing changed, and
+        // silently lost each note's folder placement and original creation
+        // date. Skip entirely when content/tags/folder already match; when
+        // they don't, carry folder_id and created_at through same as a
+        // fresh insert does.
+        const unchanged = existing.content === content
+          && existing.folder_id === folderId
+          && JSON.stringify(existing.tags) === JSON.stringify(tags);
+        if (unchanged) { skipped++; continue; }
         await query(
-          'update notes set content = $1, tags = $2, embedding_pending = true where id = $3',
-          [content, tags, existing.id]
+          `update notes set content = $1, tags = $2, folder_id = $3, embedding_pending = true,
+           created_at = coalesce($4::timestamptz, created_at) where id = $5`,
+          [content, tags, folderId, created ?? null, existing.id]
         );
         updated++;
         continue;
       }
 
-      const folderId = await ensureFolderPath(segments, folderCache);
       // created comes from frontmatter written by our own export (see
       // parseFrontmatter) — round-trips the real creation date instead of
       // stamping every re-imported note with "now". coalesce to the column's

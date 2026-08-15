@@ -23,6 +23,21 @@ export type PdfTextItem = { str: string; fontSize: number; x: number; y: number;
 export type PdfPage = { items: PdfTextItem[]; height: number };
 export type Line = { text: string; fontSize: number | null; y: number; wordCount: number };
 
+// Node is single-threaded — this whole module runs on the request handler's
+// own event loop turn, with no worker (see extractPdfPages below), so a
+// pathological PDF (huge page count, or pages pdfjs struggles to lay out)
+// stalls every other request this process is serving, including MCP calls
+// from other agents. Two independent guards, since either alone has a gap:
+// a 738-page real book (the largest verified live) is well under the page
+// cap but could still be slow on a loaded box; a small page count can still
+// hang on a single pathological page.
+const MAX_PDF_PAGES = 2_000;
+const PDF_PARSE_TIMEOUT_MS = 60_000;
+
+function timeout(ms: number, message: string): Promise<never> {
+  return new Promise((_, reject) => setTimeout(() => reject(new Error(message)), ms));
+}
+
 /**
  * Thin I/O wrapper around pdfjs-dist — not unit tested directly (needs a
  * real PDF), kept minimal so the actual conversion logic below (pure
@@ -31,12 +46,28 @@ export type Line = { text: string; fontSize: number | null; y: number; wordCount
  * parsing on the main thread by itself when nothing spawns a real Worker,
  * which is the case here (no browser, no separate worker file to point at).
  * Verified live against a 738-page real-world PDF (10s, no worker needed).
+ *
+ * The timeout races the whole extraction, not just the initial getDocument()
+ * call — pdfjs yields to the event loop between pages (each is its own
+ * await), so a race can actually preempt a slow multi-page document instead
+ * of only catching a slow initial parse.
  */
 export async function extractPdfPages(buffer: Buffer): Promise<PdfPage[]> {
+  return Promise.race([
+    extractPdfPagesUnbounded(buffer),
+    timeout(PDF_PARSE_TIMEOUT_MS, `PDF parsing exceeded ${PDF_PARSE_TIMEOUT_MS / 1000}s — file is too large or complex to convert`),
+  ]);
+}
+
+async function extractPdfPagesUnbounded(buffer: Buffer): Promise<PdfPage[]> {
   const doc = await getDocument({
     data: new Uint8Array(buffer),
     useSystemFonts: true,
   }).promise;
+
+  if (doc.numPages > MAX_PDF_PAGES) {
+    throw new Error(`PDF has ${doc.numPages} pages, over the ${MAX_PDF_PAGES}-page limit`);
+  }
 
   const pages: PdfPage[] = [];
   for (let i = 1; i <= doc.numPages; i++) {

@@ -827,6 +827,52 @@ export function createMcpServer(): McpServer {
     }
   );
 
+  // Rounding for display only — the underlying number is still full
+  // precision wherever code (not a human) consumes it. relevance/threshold/
+  // best_score are ratios/thresholds (2 decimals is already more precision
+  // than the numbers carry any real meaning at); raw scores (ts_rank,
+  // cosine, RRF) get 3, since they're compared against each other more than
+  // read on their own.
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const round3 = (n: number) => Math.round(n * 1000) / 1000;
+
+  // What actually made the old output unreadable wasn't lack of
+  // indentation on its own — real newlines inside a JSON string aren't
+  // achievable at all (RFC 8259 requires \n escaped), so a markdown table
+  // in an excerpt looks the same either way. It was ~41% of every response
+  // being debug numbers at 17 significant digits (relevance:
+  // 0.9488824385394478, two of which are ever meaningful) that a client
+  // showing the raw string — not every MCP client pretty-prints JSON
+  // itself — had no way to skip past. Fix: drop rrf_score/text_score/
+  // semantic_score/created_at from the default shape (still available via
+  // explain:true, for debugging the ranking itself), round what's left,
+  // and pretty-print with JSON.stringify(_, null, 2) so a client that
+  // doesn't reformat still sees structure. Trimmed debug fields (~40% per
+  // measurement) outweigh indentation's own overhead (~25%), so the net
+  // response is smaller as well as more readable
+  // (наряд-поиск-2026-08-14 шаг 8).
+  function toDisplayResult(r: SearchResult | HybridSearchResult, explain: boolean): Record<string, unknown> {
+    const hybrid = r as Partial<HybridSearchResult>;
+    const out: Record<string, unknown> = {
+      id: r.id,
+      title: r.title,
+      excerpt: r.excerpt,
+      tags: r.tags,
+      relevance: round2(r.relevance),
+      confidence: r.confidence,
+    };
+    if (hybrid.matched_by) out.matched_by = hybrid.matched_by;
+    if (r.text_tier) out.text_tier = r.text_tier;
+    if (r.content_length !== undefined) out.content_length = r.content_length;
+    if (explain) {
+      if (hybrid.text_score !== undefined) out.text_score = round3(hybrid.text_score);
+      if (hybrid.semantic_score !== undefined) out.semantic_score = round3(hybrid.semantic_score);
+      if (hybrid.rrf_score !== undefined) out.rrf_score = round3(hybrid.rrf_score);
+      if (r.created_at) out.created_at = r.created_at;
+    }
+    return out;
+  }
+
   // ── search_notes ─────────────────────────────────────────────────────────
   server.tool(
     'search_notes',
@@ -837,16 +883,21 @@ export function createMcpServer(): McpServer {
     'Each hit carries `relevance` (0..1, how close to the best hit in THIS response — always 1.0 ' +
     'for the top result, says nothing about absolute quality on its own) and `confidence` ' +
     '("strong"/"moderate"/"weak", the field to actually act on). `strong` means corroborated — both ' +
-    'text and semantic found it — and can be quoted directly. `moderate` means one signal only, even ' +
-    'if it is the best of its own result set: read the excerpt before relying on it. `weak` usually ' +
-    'means reformulate, EXCEPT: if a weak/moderate hit is the only or top-ranked result and its ' +
-    'excerpt already answers the question, read it before discarding it — a single-arm hit can still ' +
-    'be the right note. Not comparable across different queries\' results, only within one. ' +
+    'text and semantic found it, AND the text side matched the query as typed (not a loosened OR/' +
+    'substring fallback) — quote it directly. `moderate` means one real signal only (or a cascade-' +
+    'weakened text match plus semantic): read the excerpt before relying on it. `weak` usually means ' +
+    'reformulate, EXCEPT: if a weak/moderate hit is the only or top-ranked result and its excerpt ' +
+    'already answers the question, read it before discarding it. `text_tier` (when present) shows ' +
+    'which cascade level the text side matched at — "and" is a real query match, "or"/"substring" ' +
+    'mean the strict query found nothing and a looser pass filled in (recall, not confirmation — ' +
+    'never `strong` on its own). Not comparable across different queries\' results, only within one. ' +
     'Filters: folder_id, tag, created_after/before (when a note was made), updated_after/before ' +
     '(when it last changed) — these are NOT interchangeable. ' +
     'Every semantic/hybrid response includes threshold/best_score/pending_embeddings so you can ' +
     'tell "nothing relevant" from "just under threshold" from "embeddings not generated yet", even ' +
-    'when results came back non-empty.',
+    'when results came back non-empty. ' +
+    'Pass explain:true to also see each hit\'s raw text_score/semantic_score/rrf_score and created_at ' +
+    '— only useful for debugging the ranking itself, omitted by default to keep responses short.',
     {
       query:          z.string().min(1),
       type:           z.enum(['text', 'semantic', 'hybrid']).default('hybrid'),
@@ -857,8 +908,9 @@ export function createMcpServer(): McpServer {
       created_before: z.string().optional().describe('ISO timestamp — only notes created at or before this'),
       updated_after:  z.string().optional().describe('ISO timestamp — only notes updated at or after this'),
       updated_before: z.string().optional().describe('ISO timestamp — only notes updated at or before this'),
+      explain:        z.boolean().default(false).describe('Include raw per-arm scores and created_at for debugging ranking'),
     },
-    async ({ query: q, type, limit, folder_id, tag, created_after, created_before, updated_after, updated_before }) => {
+    async ({ query: q, type, limit, folder_id, tag, created_after, created_before, updated_after, updated_before, explain }) => {
       const filters = {
         folderId: folder_id, tag,
         createdAfter: created_after, createdBefore: created_before,
@@ -869,8 +921,10 @@ export function createMcpServer(): McpServer {
       else if (type === 'hybrid')   results = await hybridSearch(q, limit, filters);
       else                          results = await textSearch(q, limit, filters);
 
+      const displayResults = results.map((r) => toDisplayResult(r, explain));
+
       if (type === 'text') {
-        return { content: [{ type: 'text' as const, text: JSON.stringify(results) }] };
+        return { content: [{ type: 'text' as const, text: JSON.stringify(displayResults, null, 2) }] };
       }
 
       // best_score returned unconditionally, not just on an empty result —
@@ -887,11 +941,11 @@ export function createMcpServer(): McpServer {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
-            results,
-            threshold,
-            best_score: bestScore,
+            results: displayResults,
+            threshold: round2(threshold),
+            best_score: bestScore === null ? null : round3(bestScore),
             pending_embeddings: pendingRows[0]?.count ?? 0,
-          }),
+          }, null, 2),
         }],
       };
     }

@@ -343,6 +343,14 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
     extra: Partial<SearchResult>; textTier: SearchResult['text_tier'];
   }>();
 
+  // A single arm's own `results` can itself contain the same id twice —
+  // semanticSearch can now return up to 2 chunks per note (migration 017,
+  // match_chunks' distinct-on-note_id removed). That's handled here without
+  // special-casing: the first (best-scoring, match_chunks still orders by
+  // similarity desc) occurrence sets `result`/excerpt and is never
+  // overwritten by a later duplicate; a second matching chunk just adds a
+  // small extra rrfScore contribution (reasonable — two good passages is
+  // real corroboration) and can raise `relevance` via the max below.
   for (const { field, results } of lists) {
     results.forEach((item, rank) => {
       const rrfScore = 1 / (RRF_K + rank + 1);

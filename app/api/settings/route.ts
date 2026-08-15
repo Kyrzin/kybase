@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { setSetting, getEmbeddingConfig } from '@/lib/settings';
+import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages } from '@/lib/settings';
 import { z } from 'zod';
 
 const UpdateSettingsSchema = z.object({
@@ -8,6 +8,11 @@ const UpdateSettingsSchema = z.object({
   googleApiKey: z.string().min(1).optional(),
   openaiApiKey: z.string().min(1).optional(),
   ollamaModel:  z.string().min(1).optional(),
+  // migration 016 — notes_search_vector_trigger/search_notes_fts combine
+  // these (plus 'simple', always) instead of the old hardcoded ru+en pair.
+  // No per-language validation here — an unregistered Postgres text search
+  // config name is caught and skipped inside the trigger itself, not here.
+  ftsLanguages: z.array(z.string().min(1)).min(1).optional(),
 });
 
 // Auth is proxy.ts.ts (session cookie or master-secret bearer) — this
@@ -16,12 +21,13 @@ const UpdateSettingsSchema = z.object({
 // stopped sending it (see the session-cookie change): the browser started
 // getting 401s here even though proxy.ts had already let it through.
 export async function GET() {
-  const cfg = await getEmbeddingConfig();
+  const [cfg, ftsLanguages] = await Promise.all([getEmbeddingConfig(), getFtsLanguages()]);
   return NextResponse.json({
     provider: cfg.provider,
     ollamaModel: cfg.ollamaModel,
     hasGoogleKey: !!cfg.googleApiKey,
     hasOpenaiKey: !!cfg.openaiApiKey,
+    ftsLanguages,
   });
 }
 
@@ -40,10 +46,16 @@ export async function PUT(req: NextRequest) {
   if (body.googleApiKey) await setSetting('google_api_key',     body.googleApiKey);
   if (body.openaiApiKey) await setSetting('openai_api_key',     body.openaiApiKey);
   if (body.ollamaModel)  await setSetting('ollama_model',       body.ollamaModel);
+  if (body.ftsLanguages) await setFtsLanguages(body.ftsLanguages);
 
   // Mark all live notes for reindex when provider changes
   if (providerChanged) {
     await query('update notes set embedding_pending = true where deleted_at is null');
+  }
+  // A language list change needs every note's search_vector recomputed —
+  // same forced-recompute trick migration 016's own backfill uses.
+  if (body.ftsLanguages) {
+    await query('update notes set title = title where deleted_at is null');
   }
 
   return NextResponse.json({ ok: true, reindexTriggered: providerChanged });

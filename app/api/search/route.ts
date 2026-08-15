@@ -4,7 +4,7 @@ import { textSearch, semanticSearch, hybridSearch } from '@/lib/search';
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const q     = searchParams.get('q')?.trim();
-  const type  = (searchParams.get('type') ?? 'text') as 'text' | 'semantic' | 'hybrid';
+  const type  = (searchParams.get('type') ?? 'hybrid') as 'text' | 'semantic' | 'hybrid';
   const rawLimit = parseInt(searchParams.get('limit') ?? '10', 10);
   const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(rawLimit, 1), 50) : 10;
 

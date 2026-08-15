@@ -1,6 +1,7 @@
 // lib/search.ts — text (FTS + substring fallback), semantic (chunk-based), and hybrid (RRF) search
 import { query as dbQuery, toVector } from './db';
 import { getEmbedding, getMinSimilarity } from './embeddings';
+import { getFtsLanguages } from './settings';
 import { escapeLike } from './sql';
 import { TABLE_ROW_RE, TABLE_SEPARATOR_RE, unpairedFenceIndex } from './markdown';
 
@@ -44,6 +45,18 @@ export type SearchResult = {
   // trusted (2026-08-14 measurement: an 'or' match was silently counting
   // as full corroboration and inflating confidence).
   text_tier?: 'and' | 'or' | 'substring';
+  // textSearch only. Fraction of the query's significant lexemes actually
+  // present in this hit's search_vector (see computeTextCoverage) — a
+  // query/document ratio, not a corpus-tuned constant. Exists because
+  // relative-to-best normalization (step 4) hands the top result of an
+  // ALL-junk set relevance 1.0 with no way to tell "matched every word" from
+  // "matched one of five and nothing else came close" — measured live
+  // 2026-08-14: a 5-word nonsense query's top hit read `relevance: 1` on a
+  // single incidental word match. Exposed as its own field, not folded
+  // invisibly into relevance, because the alternative was already tried and
+  // failed silently (the confidence label alone was correct; the number
+  // still lied — see наряд-поиск-2026-08-14 шаг 3b).
+  coverage?: number;
   // Filled in by enrichResults (a single id = any($1) lookup, not part
   // of search_notes_fts/match_chunks — see there for why). Absent only if
   // the note was deleted in the gap between the search RPC and the lookup.
@@ -92,6 +105,20 @@ const SUBSTRING_RELEVANCE = { title: 0.65, content: 0.5 };
 // regardless of where a given model's floor happens to sit, unlike the
 // floor itself (lib/embeddings.ts), which does need to move per model.
 const MIN_SIGNAL_MARGIN = 0.05;
+
+// What a caller actually needs to see to interpret an empty semantic/hybrid
+// result: getMinSimilarity() alone is necessary but not sufficient — a best
+// hit that clears the floor by less than MIN_SIGNAL_MARGIN still gets
+// discarded by the degenerate-set guard below, so a raw best_score just
+// above the floor can still come back empty. Measured live 2026-08-14: floor
+// 0.30, best_score 0.305 → empty results, but the envelope reported
+// threshold: 0.3 — a caller had no way to tell "0.305 is still short" from
+// "the filter itself is broken", because the number shown wasn't the number
+// actually applied. mcp-server.ts's threshold field uses this instead of
+// getMinSimilarity() directly for exactly that reason.
+export async function effectiveSemanticThreshold(): Promise<number> {
+  return (await getMinSimilarity()) + MIN_SIGNAL_MARGIN;
+}
 
 const RRF_K = 60;
 
@@ -341,6 +368,7 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
   const scoreMap = new Map<string, {
     result: SearchResult; rrfScore: number; relevance: number;
     extra: Partial<SearchResult>; textTier: SearchResult['text_tier'];
+    textCoverage: number | undefined;
   }>();
 
   // A single arm's own `results` can itself contain the same id twice —
@@ -363,29 +391,42 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
         // single-arm penalty halves).
         existing.relevance = Math.max(existing.relevance, item.relevance);
         existing.extra[field] = item.score;
-        if (field === 'text_score') existing.textTier = item.text_tier;
+        if (field === 'text_score') { existing.textTier = item.text_tier; existing.textCoverage = item.coverage; }
       } else {
         scoreMap.set(item.id, {
           result: item, rrfScore, relevance: item.relevance,
           extra: { [field]: item.score },
           textTier: field === 'text_score' ? item.text_tier : undefined,
+          textCoverage: field === 'text_score' ? item.coverage : undefined,
         });
       }
     });
   }
 
   return [...scoreMap.values()]
-    .map(({ result, rrfScore, relevance, extra, textTier }) => {
+    .map(({ result, rrfScore, relevance, extra, textTier, textCoverage }) => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars -- drop `score`, forward everything else
       const { score: _score, ...rest } = result;
       const matched_by = Object.keys(extra) as ('text_score' | 'semantic_score')[];
-      // A text arm only corroborates if the STRICT query found it — an
-      // 'or'/'substring' match means the strict pass came back empty, so
-      // even alongside a real semantic match that's still only one solid
-      // signal, not two (measured live: an unrelated resume matched a
-      // German query only via the OR cascade, and "both arms agree" was
-      // reading it as fully corroborated — see confidenceFor).
-      const textCorroborates = extra.text_score !== undefined && textTier === 'and';
+      // A text arm corroborates if the STRICT query found it ('and') — or,
+      // since шаг 3b, if the OR cascade found it but genuinely contains
+      // EVERY significant word of the query (coverage === 1): the strict
+      // pass failing there isn't "recall filled in for a weak match", it's
+      // websearch_to_tsquery's own AND-tsquery construction not firing for
+      // some other reason (word order, cross-language stemming, the
+      // multi-config OR-combination search_notes_fts builds) even though
+      // the content is genuinely all there. Reviewed live on an external
+      // 28-note corpus (2026-08-14): requiring strict-AND-only made `strong`
+      // unreachable for 11/11 real queries against short, precise notes —
+      // natural-language queries routinely don't echo a note's exact
+      // wording verbatim, so the OR cascade fires even for a fully-correct
+      // match. Gated on EXACT full coverage (not "high enough") specifically
+      // to not reopen the two regressions this rule originally fixed
+      // (control-noise and an unrelated German-query resume both matched on
+      // ONE word out of several — coverage well under 1 in both cases, so
+      // neither would qualify here either).
+      const textCorroborates = extra.text_score !== undefined &&
+        (textTier === 'and' || (textTier === 'or' && textCoverage === 1));
       const corroboratingArms = (extra.semantic_score !== undefined ? 1 : 0) + (textCorroborates ? 1 : 0);
       return {
         ...rest,
@@ -500,6 +541,81 @@ function significantWords(query: string): string[] {
 }
 
 /**
+ * Query-coverage discount (наряд-поиск-2026-08-14 шаг 3b): what fraction of
+ * the query's significant lexemes are actually present in a given hit,
+ * independent of ts_rank entirely. Needed because step 4's relative-to-best
+ * normalization (rank / max(rank)) always hands the top hit of a result set
+ * relevance 1.0 — including a set where the "top hit" only matched one word
+ * out of five and nothing else came close (measured live: a 5-word nonsense
+ * query's best OR-cascade hit read `relevance: 1`).
+ *
+ * "Significant" is decided the same way Postgres itself decides it for
+ * ranking — a word counts only if at least one of the vault's configured
+ * FTS languages (settings.fts_languages, same list search_notes_fts reads)
+ * doesn't reduce it to nothing. 'simple' is deliberately excluded from that
+ * test: it has no stopword dictionary at all, so including it would make
+ * every word "significant" and erase the whole distinction. 'simple' IS
+ * included on the matching side below — a hit that only matched via an
+ * unstemmed identifier form shouldn't be penalized for it, matching
+ * search_notes_fts's own tsq construction.
+ *
+ * A ratio of query lexemes to document lexemes, not a cosine or ts_rank
+ * value — comparable across any corpus, language, or model, same reasoning
+ * as relevance itself (see semanticSearch/textSearch). No new vault-tuned
+ * constant.
+ *
+ * Fails open: if the coverage query itself errors (e.g. a stale/invalid
+ * language in settings.fts_languages the write-side trigger already
+ * tolerates but this ad hoc query doesn't), or nothing survives the
+ * significance test, callers get `null` and apply no discount rather than
+ * losing the search results entirely over a debug signal.
+ */
+async function computeTextCoverage(words: string[], ids: string[]): Promise<Map<string, number> | null> {
+  if (words.length === 0 || ids.length === 0) return null;
+  const uniqueWords = [...new Set(words)];
+
+  try {
+    const languages = await getFtsLanguages();
+    if (languages.length === 0) return null;
+
+    const sigRows = await dbQuery<{ word: string; significant: boolean }>(
+      `select w.word, bool_or(numnode(websearch_to_tsquery(l.lang::regconfig, w.word)) > 0) as significant
+       from unnest($1::text[]) as w(word)
+       cross join unnest($2::text[]) as l(lang)
+       group by w.word`,
+      [uniqueWords, languages]
+    );
+    const significantWordList = sigRows.filter((r) => r.significant).map((r) => r.word);
+    if (significantWordList.length === 0) return null;
+
+    const langExprs = languages.map((_, i) => `websearch_to_tsquery($${i + 2}::regconfig, wt.word)`);
+    const tsqExpr = [`websearch_to_tsquery('simple', wt.word)`, ...langExprs].join(' || ');
+    const idsParamIndex = languages.length + 2;
+    const rows = await dbQuery<{ id: string; matched: number; total: number }>(
+      `with word_tsq as (
+         select word, (${tsqExpr}) as tsq
+         from unnest($1::text[]) as wt(word)
+       )
+       select n.id,
+         count(*) filter (where n.search_vector @@ wt.tsq)::int as matched,
+         (select count(*) from word_tsq)::int as total
+       from notes n
+       cross join word_tsq wt
+       where n.id = any($${idsParamIndex}::uuid[])
+       group by n.id`,
+      [significantWordList, ...languages, ids]
+    );
+
+    const coverage = new Map<string, number>();
+    for (const r of rows) coverage.set(r.id, r.total > 0 ? r.matched / r.total : 1);
+    return coverage;
+  } catch (err) {
+    console.warn('[search] coverage computation failed, no discount applied:', err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/**
  * Full-text search with ru+en morphology via the search_notes_fts RPC
  * (uses the bilingual GIN index from migration 001). Three passes, each
  * only run if the previous left too little to work with:
@@ -548,8 +664,33 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // the same thing across two different queries. Both RPC calls already
   // order by rank desc, so each list's own head is that list's best.
   const best = Math.max(rows[0]?.rank ?? 0, orRows[0]?.rank ?? 0);
+  // Coverage only applies to the 'or' tier — an 'and' hit already matched
+  // EVERY term websearch_to_tsquery's own parser produced for the strict
+  // query, by construction (that's what AND semantics means), so it's
+  // fully covered regardless of what coverage would compute. Deliberately
+  // not "compute it anyway, it'll come out 1.0" — measured live 2026-08-14:
+  // a hostname query ("host1.example.cloud") is one lexeme to Postgres's
+  // own tokenizer (its dotted-host special case), but significantWords()
+  // (a plain JS regex split on non-letters) naively cut it into three —
+  // "host1"/"example"/"cloud" — and testing those as three separate
+  // lexemes against a vector that stored it as one dropped a correct,
+  // exact-match AND hit from relevance 1.0 to 0.33. Two different
+  // tokenizers must never be asked to agree on the same string; scoping the
+  // discount to the tier that's actually the naряд's failure mode (OR found
+  // one word out of N) sidesteps the disagreement entirely instead of
+  // trying to make the two tokenizers consistent.
+  const coverageMap = await computeTextCoverage(words, orRows.map((n) => n.id));
   const toResult = (n: FtsRow, tier: 'and' | 'or') => {
-    const relevance = best > 0 ? n.rank / best : 0;
+    // Order matters: coverage multiplies the ALREADY-normalized rank, never
+    // the other way around. Applying it before dividing by the set's max
+    // would cancel out whenever every hit in the set shares the same
+    // coverage (the common case for an OR-cascade result: everything
+    // matched on one word out of N) — the multiplier would divide by
+    // itself and the top hit would land back at 1.0, silently undoing the
+    // whole point (наряд-поиск-2026-08-14 шаг 3b).
+    const normalized = best > 0 ? n.rank / best : 0;
+    const coverage = tier === 'and' ? 1 : (coverageMap?.get(n.id) ?? 1);
+    const relevance = normalized * coverage;
     // Standalone (no semantic arm to corroborate with): an 'and' hit is one
     // real signal (1 arm); an 'or' hit found nothing under the strict
     // query, so it has zero corroborating arms — confidenceFor forces it
@@ -566,9 +707,17 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
       relevance,
       confidence,
       text_tier: tier,
+      coverage,
     };
   };
-  const results = [...rows.map((n) => toResult(n, 'and')), ...orRows.map((n) => toResult(n, 'or'))];
+  const results = [...rows.map((n) => toResult(n, 'and')), ...orRows.map((n) => toResult(n, 'or'))]
+    // confidence first, relevance only as the tiebreak within a tier — the
+    // SQL order (by raw rank, then 'and' rows before 'or' rows) no longer
+    // guarantees this once coverage can push an 'or' hit's relevance above
+    // an 'and' hit's, and a caller reading top-to-bottom must never see
+    // `weak` above `moderate` (наряд-поиск шаг 2a's invariant, restated for
+    // this arm's own output, not just rrfMerge's).
+    .sort((a, b) => CONFIDENCE_RANK[a.confidence] - CONFIDENCE_RANK[b.confidence] || b.relevance - a.relevance);
   const filtered = await applyFilters(results, limit, filters);
   await repairBrokenTableExcerpts(filtered);
   return enrichResults(filtered);
@@ -613,8 +762,10 @@ async function substringSearch(query: string, limit: number, filters?: SearchFil
 
 /**
  * Chunk-based semantic search: each note is indexed as per-section vectors
- * (see lib/indexing.ts), match_chunks returns the best chunk per note,
- * so the excerpt is the actually-relevant section, not the document head.
+ * (see lib/indexing.ts), match_chunks returns up to 2 chunks per note
+ * (migration 017), so the excerpt is the actually-relevant section, not the
+ * document head — and a note with two genuinely on-topic passages can
+ * surface both (deduplicated back to one result each below).
  *
  * Two separate jobs, deliberately not one absolute threshold doing both
  * (2026-08-14 measurement — a single cosine floor can't be both a junk gate
@@ -666,7 +817,26 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
 
   const candidates = best > 0 ? data.filter((n) => (n.similarity as number) >= 0.75 * best) : data;
 
-  const results = candidates.map((n) => {
+  // match_chunks can return up to 2 chunks per note (migration 017) — one
+  // note can genuinely occupy 2 slots of `candidates`. Good for corroborating
+  // that a large document has real on-topic content, bad for a caller-facing
+  // result list: a `limit: 3` call returning the same note twice leaves only
+  // 2 actual documents represented with no signal in the response shape that
+  // that's what happened (measured live 2026-08-14: a long natural-language
+  // query against a job-vacancy note returned it twice in
+  // 3 slots). Keep one entry per note — the first, since `data` is already
+  // ordered by similarity desc, so it's that note's best-matching chunk —
+  // the same "first occurrence wins" rule rrfMerge already applies across
+  // arms, applied here within a single arm's own list.
+  const seenNoteIds = new Set<string>();
+  const dedupedCandidates = candidates.filter((n) => {
+    const id = n.id as string;
+    if (seenNoteIds.has(id)) return false;
+    seenNoteIds.add(id);
+    return true;
+  });
+
+  const results = dedupedCandidates.map((n) => {
     const heading = n.heading as string | null;
     // Drop the chunk's own `# Heading` line so it isn't repeated by the
     // `[heading]` context prefix below.

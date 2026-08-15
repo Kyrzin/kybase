@@ -834,16 +834,19 @@ export function createMcpServer(): McpServer {
     'Hybrid is the right default; prefer type=text for exact identifiers, code fragments, or quoted ' +
     'phrases, where FTS beats meaning-matching. ' +
     'Returns short excerpts, not full notes — call get_note on the top 1-2 hits to read them. ' +
-    'Each hit carries `relevance` (0..1) and `confidence` ("strong"/"moderate"/"weak") — strong hits ' +
-    'can be quoted directly, weak usually means reformulate. Exception: if a weak hit is the only or ' +
-    'top-ranked result and its excerpt already answers the question, read it before discarding it — ' +
-    'the embedding model under-scores cross-lingual matches (a Russian query against English note ' +
-    'content) and long-form book-style notes, so "weak" there reflects the model\'s scale, not ' +
-    'necessarily wrong content. Comparable within one query\'s results only. ' +
+    'Each hit carries `relevance` (0..1, how close to the best hit in THIS response — always 1.0 ' +
+    'for the top result, says nothing about absolute quality on its own) and `confidence` ' +
+    '("strong"/"moderate"/"weak", the field to actually act on). `strong` means corroborated — both ' +
+    'text and semantic found it — and can be quoted directly. `moderate` means one signal only, even ' +
+    'if it is the best of its own result set: read the excerpt before relying on it. `weak` usually ' +
+    'means reformulate, EXCEPT: if a weak/moderate hit is the only or top-ranked result and its ' +
+    'excerpt already answers the question, read it before discarding it — a single-arm hit can still ' +
+    'be the right note. Not comparable across different queries\' results, only within one. ' +
     'Filters: folder_id, tag, created_after/before (when a note was made), updated_after/before ' +
     '(when it last changed) — these are NOT interchangeable. ' +
-    'An empty semantic/hybrid result includes threshold/best_score/pending_embeddings so you can ' +
-    'tell "nothing relevant" from "just under threshold" from "embeddings not generated yet".',
+    'Every semantic/hybrid response includes threshold/best_score/pending_embeddings so you can ' +
+    'tell "nothing relevant" from "just under threshold" from "embeddings not generated yet", even ' +
+    'when results came back non-empty.',
     {
       query:          z.string().min(1),
       type:           z.enum(['text', 'semantic', 'hybrid']).default('hybrid'),
@@ -866,10 +869,15 @@ export function createMcpServer(): McpServer {
       else if (type === 'hybrid')   results = await hybridSearch(q, limit, filters);
       else                          results = await textSearch(q, limit, filters);
 
-      if (results.length > 0 || type === 'text') {
+      if (type === 'text') {
         return { content: [{ type: 'text' as const, text: JSON.stringify(results) }] };
       }
 
+      // best_score returned unconditionally, not just on an empty result —
+      // relevance is only ever relative to the best hit IN THIS RESPONSE
+      // (semanticSearch/rrfMerge), so an agent has no way to tell "a
+      // confident 0.85 cosine" from "the least-bad of a weak field" without
+      // this number to compare against (наряд-поиск-2026-08-14 шаг 2).
       const [threshold, bestScore, pendingRows] = await Promise.all([
         getMinSimilarity(),
         bestSemanticScore(q),

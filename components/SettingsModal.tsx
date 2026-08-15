@@ -3,7 +3,7 @@
 // components/SettingsModal.tsx — the Settings dialog (Embeddings + Access
 // tabs), extracted from KybaseApp. Owns all settings-local state; the parent
 // passes apiFetch, refresh setters for import, and a share-revoke callback so
-// it can dismiss the editor's share popover if it shows a just-revoked token.
+// it can dismiss the editor's share popover if it shows a just-revoked share.
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import type { Note, Folder } from '@/lib/types';
@@ -28,7 +28,9 @@ async function readReindex(res: Response): Promise<{ text: string; failed: boole
 }
 
 type OAuthClient = { id: string; client_name: string | null; created_at: string; last_used_at: string; expires_at: string };
-type ShareItem = { token: string; note_id: string; note_title: string; created_at: string; expires_at: string | null };
+// token is null for a share created before the token-hashing migration —
+// its link can be revoked but not re-copied (see lib/shares.ts).
+type ShareItem = { id: string; token: string | null; note_id: string; note_title: string; created_at: string; expires_at: string | null };
 type TrashedNote = { id: string; title: string; folder_id: string | null; deleted_at: string };
 
 export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders, onShareRevoked }: {
@@ -36,7 +38,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   onClose: () => void;
   setNotes: React.Dispatch<React.SetStateAction<Note[]>>;
   setFolders: React.Dispatch<React.SetStateAction<Folder[]>>;
-  onShareRevoked: (token: string) => void;
+  onShareRevoked: (id: string) => void;
 }) {
   const router = useRouter();
   const [settingsProvider, setSettingsProvider] = useState<'ollama' | 'google' | 'openai'>('ollama');
@@ -81,11 +83,11 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
     }
   };
 
-  const revokeShareLink = async (noteId: string, token: string) => {
-    const res = await apiFetch(`/api/notes/${noteId}/share/${token}`, { method: 'DELETE' });
+  const revokeShareLink = async (noteId: string, shareId: string) => {
+    const res = await apiFetch(`/api/notes/${noteId}/share/${shareId}`, { method: 'DELETE' });
     if (res.ok || res.status === 404) {
-      setShares(prev => prev.filter(s => s.token !== token));
-      onShareRevoked(token);
+      setShares(prev => prev.filter(s => s.id !== shareId));
+      onShareRevoked(shareId);
     }
   };
 
@@ -386,7 +388,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
               ) : (
                 <div style={{ maxHeight: 190, overflowY: 'auto' }}>
                   {sortedShares.map(s => (
-                    <div key={s.token} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid #1e1e2e' }}>
+                    <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid #1e1e2e' }}>
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div title={s.note_title} style={{ fontSize: 13, color: '#cdd6f4', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {s.note_title}
@@ -396,14 +398,15 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
                         </div>
                       </div>
                       <button
-                        onClick={() => navigator.clipboard?.writeText(`${window.location.origin}/share/${s.token}`)}
-                        title="Copy link"
-                        style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
+                        disabled={!s.token}
+                        onClick={() => s.token && navigator.clipboard?.writeText(`${window.location.origin}/share/${s.token}`)}
+                        title={s.token ? 'Copy link' : 'Created before link re-copying was supported — revoke and recreate to get a copyable link'}
+                        style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: s.token ? '#cdd6f4' : '#6c7086', padding: '5px 10px', fontSize: 12, cursor: s.token ? 'pointer' : 'not-allowed', fontFamily: 'inherit', flexShrink: 0 }}
                       >
                         Copy
                       </button>
                       <button
-                        onClick={() => revokeShareLink(s.note_id, s.token)}
+                        onClick={() => revokeShareLink(s.note_id, s.id)}
                         title="Revoke link"
                         style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#f38ba8', padding: '5px 10px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0 }}
                       >

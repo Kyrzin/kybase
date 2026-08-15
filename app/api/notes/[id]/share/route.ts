@@ -27,6 +27,7 @@ export async function POST(
     const host  = req.headers.get('x-forwarded-host') ?? new URL(req.url).host;
     const proto = req.headers.get('x-forwarded-proto')?.split(',')[0] ?? 'https';
     return NextResponse.json({
+      id: share.id,
       token: share.token,
       url: `${proto}://${host}/share/${share.token}`,
       expires_at: share.expires_at,

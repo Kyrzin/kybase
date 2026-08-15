@@ -11,6 +11,7 @@
 import fs from 'fs';
 import path from 'path';
 import { getPool } from './db';
+import { checkSecretStrength } from './secret-strength';
 
 const MIGRATIONS_DIR = path.join(process.cwd(), 'db', 'migrations');
 
@@ -66,6 +67,16 @@ export async function runMigrations(): Promise<void> {
     );
     const { rows } = await client.query<{ filename: string }>('select filename from schema_migrations');
     const pending = pendingMigrations(files, new Set(rows.map(r => r.filename)));
+
+    // No migration ever recorded as applied = nothing to break yet, so a
+    // weak KYBASE_SECRET can be refused outright here rather than merely
+    // warned about — the split (lib/secret-strength.ts) exists specifically
+    // so an existing install's shorter secret doesn't turn into a crash
+    // loop on the next deploy.
+    const isNewInstall = rows.length === 0;
+    const secretCheck = checkSecretStrength(process.env.KYBASE_SECRET, isNewInstall);
+    if (secretCheck.verdict === 'reject') throw new Error(secretCheck.reason);
+    if (secretCheck.verdict === 'warn') console.warn(`[migrate] ${secretCheck.reason}`);
 
     for (const file of pending) {
       const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');

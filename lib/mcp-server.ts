@@ -5,8 +5,7 @@ import { z } from 'zod';
 import { query, queryOne, withTransaction, isUniqueViolation, FOLDER_REPARENT_LOCK_KEY } from './db';
 import { softDeleteNote, restoreNote, trashFolderNotes, TRASH_RETENTION_DAYS } from './trash';
 import { escapeLike } from './sql';
-import { textSearch, semanticSearch, hybridSearch, makeExcerpt, bestSemanticScore, type SearchResult, type HybridSearchResult } from './search';
-import { getMinSimilarity } from './embeddings';
+import { textSearch, semanticSearch, hybridSearch, makeExcerpt, bestSemanticScore, effectiveSemanticThreshold, type SearchResult, type HybridSearchResult } from './search';
 import { indexNoteAsync } from './indexing';
 import { extractAllWikilinks } from './wikilinks';
 import { buildGraph } from './graph-data';
@@ -863,6 +862,7 @@ export function createMcpServer(): McpServer {
     };
     if (hybrid.matched_by) out.matched_by = hybrid.matched_by;
     if (r.text_tier) out.text_tier = r.text_tier;
+    if (r.coverage !== undefined) out.coverage = round2(r.coverage);
     if (r.content_length !== undefined) out.content_length = r.content_length;
     if (explain) {
       if (hybrid.text_score !== undefined) out.text_score = round3(hybrid.text_score);
@@ -883,14 +883,21 @@ export function createMcpServer(): McpServer {
     'Each hit carries `relevance` (0..1, how close to the best hit in THIS response — always 1.0 ' +
     'for the top result, says nothing about absolute quality on its own) and `confidence` ' +
     '("strong"/"moderate"/"weak", the field to actually act on). `strong` means corroborated — both ' +
-    'text and semantic found it, AND the text side matched the query as typed (not a loosened OR/' +
-    'substring fallback) — quote it directly. `moderate` means one real signal only (or a cascade-' +
-    'weakened text match plus semantic): read the excerpt before relying on it. `weak` usually means ' +
+    'text and semantic found it, AND the text side is a real match: either the query as typed ' +
+    '("and"), or a loosened OR match that still contains EVERY significant word of the query ' +
+    '(coverage 1.0 — the strict pass just didn\'t fire, the content is genuinely all there). A ' +
+    'partial OR/substring match (coverage < 1) never counts — quote a `strong` hit directly. ' +
+    '`moderate` means one real signal only (or a partial cascade match plus semantic): read the ' +
+    'excerpt before relying on it. `weak` usually means ' +
     'reformulate, EXCEPT: if a weak/moderate hit is the only or top-ranked result and its excerpt ' +
     'already answers the question, read it before discarding it. `text_tier` (when present) shows ' +
     'which cascade level the text side matched at — "and" is a real query match, "or"/"substring" ' +
     'mean the strict query found nothing and a looser pass filled in (recall, not confirmation — ' +
-    'never `strong` on its own). Not comparable across different queries\' results, only within one. ' +
+    'never `strong` on its own). `coverage` (text hits only) is the fraction of the query\'s ' +
+    'significant words actually found in the hit — a long query whose top "or" hit only matched one ' +
+    'word out of five reads low coverage even at relevance 1.0 (relevance is only ever relative to ' +
+    'the best hit in this same response, coverage is not). ' +
+    'Not comparable across different queries\' results, only within one. ' +
     'Filters: folder_id, tag, created_after/before (when a note was made), updated_after/before ' +
     '(when it last changed) — these are NOT interchangeable. ' +
     'Every semantic/hybrid response includes threshold/best_score/pending_embeddings so you can ' +
@@ -933,7 +940,7 @@ export function createMcpServer(): McpServer {
       // confident 0.85 cosine" from "the least-bad of a weak field" without
       // this number to compare against (наряд-поиск-2026-08-14 шаг 2).
       const [threshold, bestScore, pendingRows] = await Promise.all([
-        getMinSimilarity(),
+        effectiveSemanticThreshold(),
         bestSemanticScore(q),
         query<{ count: number }>('select count(*)::int as count from notes where embedding_pending = true and deleted_at is null'),
       ]);

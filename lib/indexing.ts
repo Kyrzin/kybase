@@ -61,6 +61,22 @@ export async function indexNote(id: string, title: string, content: string): Pro
   const client = await getPool().connect();
   try {
     await client.query('begin');
+    // Serialize concurrent indexNote() calls for the SAME note. Two
+    // overlapping content changes to one note (e.g. two concurrent
+    // append_to_note calls) each schedule their own indexNoteAsync —
+    // without a lock here, their DELETE-then-INSERT sequences on
+    // note_chunks below can interleave: whichever commits second can
+    // collide with rows the first one just inserted, throwing
+    // note_chunks_note_id_chunk_index_key (measured live, pre-publication
+    // review — reproducible with two concurrent append_to_note calls on
+    // the same note; the failing call's error is caught and logged by
+    // indexNoteAsync, not surfaced anywhere a caller would see it, so the
+    // note's semantic index could silently end up reflecting only one of
+    // the two edits). xact-scoped, like FOLDER_REPARENT_LOCK_KEY — releases
+    // automatically on commit or rollback, and is a no-op wait (near-zero
+    // cost) for the overwhelmingly common case of no concurrent index for
+    // the same note.
+    await client.query('select pg_advisory_xact_lock(hashtext($1))', [id]);
     await client.query('delete from note_chunks where note_id = $1', [id]);
     for (const row of chunkRows) {
       await client.query(

@@ -21,6 +21,21 @@ export function getPool(): Pool {
       statement_timeout: STATEMENT_TIMEOUT_MS,
       idle_in_transaction_session_timeout: IDLE_IN_TRANSACTION_TIMEOUT_MS,
     });
+    // node-postgres's own documented gotcha: an idle client whose connection
+    // dies underneath it (Postgres restarted, a DBA/pg_terminate_backend
+    // killed the backend, a network blip) emits 'error' on the Pool as a
+    // plain EventEmitter event, not a rejected query promise anywhere. With
+    // no listener, Node's default EventEmitter behavior for an unhandled
+    // 'error' event is to throw — crashing the whole process on a transient
+    // connection issue that every other client in the pool would have
+    // survived. Found live during pre-publication review: surfaced as an
+    // uncaught "Connection terminated unexpectedly" exception while fixing
+    // an unrelated itest-teardown timing issue (lib/__itest__/db-harness.ts)
+    // — a latent gap that had simply never been exercised before, not
+    // something specific to the test harness.
+    pool.on('error', (err) => {
+      console.error('[db] idle client error (connection likely dropped by the server):', err instanceof Error ? err.message : err);
+    });
   }
   return pool;
 }

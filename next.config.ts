@@ -26,22 +26,6 @@ const CSP = [
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  experimental: {
-    // Since proxy.ts is active for every /api/* route it protects, Next
-    // clones and buffers each request body (for proxy.ts's own read) up to
-    // a 10MB default — silently, with no error, just a console warning — and
-    // hands the route handler that truncated buffer. /api/import declares a
-    // 100MB MAX_ZIP_BYTES that was never actually reachable: anything over
-    // 10MB was quietly cut to 10MB before readRequestBodyCapped ever ran,
-    // producing a "Not a valid zip archive" 400 with no hint of the real
-    // cause. Deliberately above MAX_ZIP_BYTES, not equal to it: if the two
-    // matched exactly, THIS cap would truncate an oversized upload first,
-    // so the app's own streaming check would just see an already-corrupted
-    // blob under its limit and fail with the same unhelpful "not a valid
-    // zip" instead of its clear 413 — the app-level check must be the one
-    // that actually fires for anything a real user could plausibly send.
-    proxyClientMaxBodySize: '150mb',
-  },
   async headers() {
     return [
       {

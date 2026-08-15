@@ -9,24 +9,31 @@ vi.mock('./db', () => ({
 
 const getEmbedding = vi.fn();
 const getMinSimilarity = vi.fn();
-const getRelevanceAnchors = vi.fn();
 vi.mock('./embeddings', () => ({
   getEmbedding: (...a: unknown[]) => getEmbedding(...a),
   getMinSimilarity: (...a: unknown[]) => getMinSimilarity(...a),
-  getRelevanceAnchors: (...a: unknown[]) => getRelevanceAnchors(...a),
 }));
 
-import { rrfMerge, makeExcerpt, tableHeaderAbove, stripLeadingHeading, textSearch, semanticSearch, hybridSearch, bestSemanticScore, normalizeRelevance, confidenceFor } from './search';
+const getFtsLanguages = vi.fn();
+vi.mock('./settings', () => ({
+  getFtsLanguages: (...a: unknown[]) => getFtsLanguages(...a),
+}));
+
+import { rrfMerge, makeExcerpt, tableHeaderAbove, stripLeadingHeading, textSearch, semanticSearch, hybridSearch, bestSemanticScore, confidenceFor, effectiveSemanticThreshold } from './search';
 
 beforeEach(() => {
   dbQuery.mockReset().mockResolvedValue([]);
   getEmbedding.mockReset().mockResolvedValue([0.1, 0.2]);
   getMinSimilarity.mockReset().mockResolvedValue(0.55);
-  getRelevanceAnchors.mockReset().mockResolvedValue({ floor: 0.55, strong: 0.75 });
+  getFtsLanguages.mockReset().mockResolvedValue(['russian', 'english']);
 });
 
-const make = (id: string, score = 0, relevance = 0.5) =>
-  ({ id, title: id, excerpt: '', tags: [] as string[], score, relevance, confidence: confidenceFor(relevance) });
+// text_tier: 'and' by default — most rrfMerge tests are exercising fusion
+// logic, not the cascade-tier discount, so they should represent a normal
+// strict text match unless a test overrides it (rrfMerge only reads this
+// off text_score-field items; harmless on semantic_score ones).
+const make = (id: string, score = 0, relevance = 0.5, textTier: 'and' | 'or' | 'substring' = 'and') =>
+  ({ id, title: id, excerpt: '', tags: [] as string[], score, relevance, confidence: confidenceFor(relevance), text_tier: textTier });
 const text     = (results: ReturnType<typeof make>[]) => ({ field: 'text_score' as const, results });
 const semantic = (results: ReturnType<typeof make>[]) => ({ field: 'semantic_score' as const, results });
 
@@ -88,6 +95,38 @@ describe('rrfMerge', () => {
   it('matched_by lists both passes for a note present in each', () => {
     const merged = rrfMerge([text([make('a', 0.9)]), semantic([make('a', 0.72)])]);
     expect(merged[0].matched_by).toEqual(['text_score', 'semantic_score']);
+  });
+
+  it('never sorts a weak hit above a moderate one, even on a tied rrf_score', () => {
+    // Rank-0-in-a-single-arm gives an identical rrf_score (1/61) regardless
+    // of which arm it came from — an easy, exact tie. Pre-fix, a plain
+    // rrfScore sort left ties in Map insertion order: since the text list
+    // is processed first below, the weak item would land first purely
+    // because it happened to be in the first list passed in, not because
+    // it deserved to outrank the moderate one (measured live, twice).
+    const weak = make('weak-text-only', 0.02, 0.5); // relevance 0.5, 1 arm -> weak
+    const moderate = make('moderate-semantic-only', 0.6, 0.95); // relevance 0.95, 1 arm -> moderate
+    const merged = rrfMerge([
+      { field: 'text_score', results: [weak] },
+      { field: 'semantic_score', results: [moderate] },
+    ]);
+    expect(merged[0].rrf_score).toBeCloseTo(merged[1].rrf_score, 10); // confirms this really is a tie
+    expect(merged[0].id).toBe('moderate-semantic-only');
+    expect(merged.map((r) => r.confidence)).toEqual(['moderate', 'weak']);
+  });
+
+  it('confidence ordering invariant: weak never above moderate, moderate never above strong', () => {
+    const strong = make('s', 0.09, 0.95); // will be re-scored strong only when both arms hit it below
+    const moderate = make('m', 0.05, 0.95);
+    const weak = make('w', 0.01, 0.4);
+    const merged = rrfMerge([
+      { field: 'text_score', results: [weak, moderate, strong] },
+      { field: 'semantic_score', results: [strong] }, // only 's' gets a second arm -> strong
+    ]);
+    const rank = { strong: 0, moderate: 1, weak: 2 };
+    for (let i = 1; i < merged.length; i++) {
+      expect(rank[merged[i - 1].confidence]).toBeLessThanOrEqual(rank[merged[i].confidence]);
+    }
   });
 });
 
@@ -507,7 +546,7 @@ describe('semanticSearch — filters', () => {
     dbQuery.mockResolvedValueOnce([{
       id: 'a', title: 'A',
       chunk_content: '## Диагностика\n\nnomic оказалась непригодна на русском',
-      heading: 'Диагностика', tags: [], similarity: 0.6,
+      heading: 'Диагностика', tags: [], similarity: 0.75, // well clear of the degenerate-set margin, irrelevant to what this test checks
     }]);
     const [r] = await semanticSearch('nomic русский', 5);
     expect(r.excerpt).toBe('[Диагностика] nomic оказалась непригодна на русском');
@@ -599,23 +638,24 @@ describe('bestSemanticScore', () => {
 });
 
 describe('relevance normalization', () => {
-  it('maps floor to 0, strong to 1, clamps outside', () => {
-    const a = { floor: 0.4, strong: 0.6 };
-    expect(normalizeRelevance(0.4, a)).toBe(0);
-    expect(normalizeRelevance(0.6, a)).toBe(1);
-    expect(normalizeRelevance(0.5, a)).toBeCloseTo(0.5, 5);
-    expect(normalizeRelevance(0.2, a)).toBe(0);
-    expect(normalizeRelevance(0.9, a)).toBe(1);
+  it('textSearch scores ts_rank relative to this query\'s own best rank, not a fixed anchor', async () => {
+    dbQuery
+      .mockResolvedValueOnce([
+        { id: 'a', title: 'A', tags: [], rank: 0.08, headline: 'hi' },
+        { id: 'b', title: 'B', tags: [], rank: 0.04, headline: 'hi' },
+      ])
+      .mockResolvedValueOnce([]); // enrichResults, no created_at rows needed for this assertion
+    const out = await textSearch('q', 5);
+    expect(out[0].relevance).toBe(1); // top hit is always exactly 1.0
+    expect(out[1].relevance).toBeCloseTo(0.04 / 0.08, 5);
   });
 
-  it('returns 0 for degenerate anchors instead of dividing by zero', () => {
-    expect(normalizeRelevance(0.5, { floor: 0.5, strong: 0.5 })).toBe(0);
-  });
-
-  it('confidence bands: >=0.7 strong, >=0.35 moderate, else weak', () => {
-    expect(confidenceFor(0.7)).toBe('strong');
-    expect(confidenceFor(0.5)).toBe('moderate');
-    expect(confidenceFor(0.34)).toBe('weak');
+  it('confidence needs BOTH a high relevance and both arms to reach strong', () => {
+    expect(confidenceFor(0.95, 2)).toBe('strong');
+    expect(confidenceFor(0.95, 1)).toBe('moderate'); // one arm, however close to its own top — never strong
+    expect(confidenceFor(0.75, 2)).toBe('moderate'); // both arms, but not near either one's own top
+    expect(confidenceFor(0.5, 2)).toBe('weak');
+    expect(confidenceFor(0.5, 1)).toBe('weak');
   });
 
   it('rrfMerge keeps the MAX relevance across arms, not a sum', () => {
@@ -637,18 +677,129 @@ describe('relevance normalization', () => {
     expect(solo.matched_by).toEqual(['text_score']);
   });
 
-  it('semanticSearch normalizes cosine against the model anchors', async () => {
+  // Both regressions below were measured live 2026-08-14 on a real vault
+  // after steps 1-3 shipped, before the cascade-tier discount existed.
+  it('regression: an OR-cascade-only text match never exceeds weak, however high its own relevance', () => {
+    // The control-noise case: strict AND found nothing, OR matched a single
+    // common word against unrelated notes, and the "best of that garbage"
+    // got relevance 1.0 with no semantic corroboration at all.
+    const merged = rrfMerge([
+      { field: 'text_score', results: [make('noise', 0.02, 1.0, 'or')] },
+    ]);
+    expect(merged[0].confidence).toBe('weak');
+  });
+
+  it('regression: an OR-cascade text match does not count as corroboration for strong, even with a real semantic hit', () => {
+    // The German-query case: strict AND on the text side found nothing, OR
+    // matched broadly, and an unrelated note's incidental semantic score
+    // combined with that OR match to read as "both arms agree" -> strong.
+    const merged = rrfMerge([
+      { field: 'text_score', results: [make('a', 0.03, 0.95, 'or')] },
+      { field: 'semantic_score', results: [make('a', 0.6, 0.95)] },
+    ]);
+    expect(merged[0].confidence).not.toBe('strong');
+    expect(merged[0].confidence).toBe('moderate'); // semantic alone still earns this
+  });
+
+  it('an OR-cascade text match DOES count as corroboration for strong when it has full coverage (шаг 3b refinement)', () => {
+    // External-corpus review (2026-08-14): requiring strict-AND-only made
+    // `strong` unreachable for 11/11 real queries on a short, precise
+    // 28-note corpus — natural-language queries routinely don't echo a
+    // note's exact wording, so the OR cascade fires even for a fully
+    // correct match. coverage 1.0 (every significant word present, just not
+    // via a valid strict tsquery) distinguishes that case from the
+    // regression above (there, coverage was well under 1 — one word out of
+    // several) without reopening it.
+    const orFullCoverage = { id: 'a', title: 'a', excerpt: '', tags: [] as string[], score: 0.03, relevance: 0.95, confidence: confidenceFor(0.95, 0), text_tier: 'or' as const, coverage: 1 };
+    const merged = rrfMerge([
+      { field: 'text_score', results: [orFullCoverage] },
+      { field: 'semantic_score', results: [make('a', 0.6, 0.95)] },
+    ]);
+    expect(merged[0].confidence).toBe('strong');
+  });
+
+  it('an OR-cascade text match with PARTIAL coverage still never reaches strong, even at high relevance', () => {
+    const orPartialCoverage = { id: 'a', title: 'a', excerpt: '', tags: [] as string[], score: 0.03, relevance: 0.95, confidence: confidenceFor(0.95, 0), text_tier: 'or' as const, coverage: 0.6 };
+    const merged = rrfMerge([
+      { field: 'text_score', results: [orPartialCoverage] },
+      { field: 'semantic_score', results: [make('a', 0.6, 0.95)] },
+    ]);
+    expect(merged[0].confidence).not.toBe('strong');
+    expect(merged[0].confidence).toBe('moderate');
+  });
+
+  it('a genuine AND-tier text match plus a real semantic match still reaches strong', () => {
+    // Confirms the fix didn't overcorrect — real two-arm agreement must
+    // still work exactly as steps 1-2 established.
+    const merged = rrfMerge([
+      { field: 'text_score', results: [make('a', 0.09, 0.95, 'and')] },
+      { field: 'semantic_score', results: [make('a', 0.6, 0.95)] },
+    ]);
+    expect(merged[0].confidence).toBe('strong');
+  });
+
+  it('textSearch: an OR-tier result is capped at weak standalone, not just inside hybrid', async () => {
+    // Rule applies whether or not this ever reaches rrfMerge — a type=text
+    // call on a near-empty query shouldn't read as moderate just because
+    // the loosened pass's best-of-a-bad-set relevance is high.
+    dbQuery
+      .mockResolvedValueOnce([]) // strict AND: nothing
+      .mockResolvedValueOnce([{ id: 'n', title: 'N', tags: [], rank: 0.02, headline: 'hi' }]) // OR pass
+      .mockResolvedValueOnce([]); // enrichResults
+    const [result] = await textSearch('какое то нерелевантное сообщение', 5);
+    expect(result.text_tier).toBe('or');
+    expect(result.confidence).toBe('weak');
+  });
+
+  it('semanticSearch scores relevance relative to this query\'s own best hit', async () => {
+    // 0.72 is within 0.75x of the best (0.8 * 0.75 = 0.6), so it survives
+    // the recall cutoff and gets a relative relevance — not an absolute one.
     dbQuery.mockResolvedValue([
-      { id: 'n1', title: 'N1', chunk_content: 'body', heading: null, tags: [], similarity: 0.75 },
-      { id: 'n2', title: 'N2', chunk_content: 'body', heading: null, tags: [], similarity: 0.55 },
+      { id: 'n1', title: 'N1', chunk_content: 'body', heading: null, tags: [], similarity: 0.8 },
+      { id: 'n2', title: 'N2', chunk_content: 'body', heading: null, tags: [], similarity: 0.72 },
     ]);
     const out = await semanticSearch('q', 5);
-    expect(out[0].relevance).toBe(1);
-    expect(out[0].confidence).toBe('strong');
-    expect(out[1].relevance).toBe(0);
-    expect(out[1].confidence).toBe('weak');
-    // the RPC still receives the floor as its cosine threshold
+    expect(out).toHaveLength(2);
+    expect(out[0].relevance).toBe(1); // top hit is always exactly 1.0
+    expect(out[1].relevance).toBeCloseTo(0.72 / 0.8, 5);
+    // single arm, standalone call — never strong regardless of relevance
+    expect(out[0].confidence).toBe('moderate');
+    // getMinSimilarity's floor is still the RPC's junk-gate threshold
     expect(dbQuery.mock.calls[0][1][2]).toBe(0.55);
+  });
+
+  it('drops candidates below 0.75x of this query\'s best hit — the recall cutoff, not a fixed cosine', async () => {
+    dbQuery.mockResolvedValue([
+      { id: 'n1', title: 'N1', chunk_content: 'body', heading: null, tags: [], similarity: 0.8 },
+      // 0.5 clears getMinSimilarity's junk gate (mocked at 0.55... actually
+      // match_chunks itself would have excluded anything under the floor;
+      // this row simulates one that cleared the floor but is still far from
+      // this query's own best hit) — 0.5 / 0.8 = 0.625, under the 0.75x cutoff.
+      { id: 'n2', title: 'N2', chunk_content: 'body', heading: null, tags: [], similarity: 0.5 },
+    ]);
+    const out = await semanticSearch('q', 5);
+    expect(out.map((r) => r.id)).toEqual(['n1']);
+  });
+
+  it('regression: a degenerate result set (best barely clears the floor) returns empty, not a false-confident top hit', async () => {
+    // Measured live on nomic-embed-text 2026-08-14: noise cosines ~0.66,
+    // signal cosines ~0.68 — a ~0.02 gap. getMinSimilarity's floor alone
+    // can't separate them; this is the second layer that catches it.
+    getMinSimilarity.mockResolvedValueOnce(0.65);
+    dbQuery.mockResolvedValueOnce([
+      { id: 'n1', title: 'N1', chunk_content: 'body', heading: null, tags: [], similarity: 0.66 }, // only 0.01 above the floor
+    ]);
+    const out = await semanticSearch('q', 5);
+    expect(out).toEqual([]);
+  });
+
+  it('a result set with real headroom above the floor is unaffected by the degenerate-set guard', async () => {
+    getMinSimilarity.mockResolvedValueOnce(0.30);
+    dbQuery.mockResolvedValueOnce([
+      { id: 'n1', title: 'N1', chunk_content: 'body', heading: null, tags: [], similarity: 0.53 }, // 0.23 above the floor
+    ]);
+    const out = await semanticSearch('q', 5);
+    expect(out.map((r) => r.id)).toEqual(['n1']);
   });
 
   it('substring fallback: title hits rate above content hits', async () => {
@@ -661,6 +812,194 @@ describe('relevance normalization', () => {
     const byId = Object.fromEntries(out.map(r => [r.id, r]));
     expect(byId['t'].relevance).toBe(0.65);
     expect(byId['c'].relevance).toBe(0.5);
-    expect(byId['t'].confidence).toBe('moderate');
+    // Single-arm, fixed-constant relevance well under 0.9 — confidence caps
+    // at weak, same as any other single-arm hit that isn't near its own top.
+    expect(byId['t'].confidence).toBe('weak');
+  });
+});
+
+describe('effectiveSemanticThreshold (наряд-поиск-2026-08-14 шаг 3b, anomaly item 2)', () => {
+  it('is the recall floor PLUS the degenerate-set margin, not the bare floor', async () => {
+    // Measured live 2026-08-14: floor 0.30, best_score 0.305 → empty
+    // results, but the envelope reported threshold: 0.3 — a caller had no
+    // way to tell "0.305 is still short" from "the filter is broken",
+    // because best_score (0.305) reads as clearing the reported threshold
+    // (0.3) while the actual applied cutoff says otherwise. The margin
+    // itself is 7% of the floor's remaining headroom (1 - floor), not a
+    // flat cosine value (pre-publication review: a flat margin eats a
+    // hugely different fraction of a compressed-range model's usable
+    // headroom than a wide-range one) — 0.3 + 0.07×0.7 = 0.349, not the
+    // old flat 0.35.
+    getMinSimilarity.mockResolvedValueOnce(0.3);
+    expect(await effectiveSemanticThreshold()).toBeCloseTo(0.349, 10);
+  });
+
+  it('the margin scales down for a model with a compressed range (high floor), not a fixed slice', async () => {
+    // nomic-embed-text's floor (0.65) leaves only 0.35 of headroom — the
+    // same flat 0.05 the old code used would have been ~14% of that, not
+    // ~7%. Confirms the fraction is genuinely relative, not a renamed
+    // constant that still happens to be flat.
+    getMinSimilarity.mockResolvedValueOnce(0.65);
+    expect(await effectiveSemanticThreshold()).toBeCloseTo(0.65 + 0.07 * 0.35, 10);
+  });
+});
+
+describe('textSearch — query coverage (наряд-поиск-2026-08-14 шаг 3b)', () => {
+  // Coverage queries: first call decides which of the query's words are
+  // "significant" (non-empty in at least one configured FTS language),
+  // second call counts how many of those significant words each candidate
+  // id actually contains. Both go through the same mocked dbQuery used for
+  // search_notes_fts, in call order.
+  const sig = (words: string[]) => words.map((word) => ({ word, significant: true }));
+  const counts = (rows: { id: string; matched: number; total: number }[]) => rows;
+
+  it('discounts an OR-cascade hit that matched one word out of three — order of operations: coverage multiplies AFTER rank normalization', async () => {
+    dbQuery
+      .mockResolvedValueOnce([]) // strict AND: nothing
+      .mockResolvedValueOnce([{ id: 'noise', title: 'Noise', tags: [], rank: 0.02, headline: 'hi' }]) // OR pass, single hit
+      .mockResolvedValueOnce(sig(['банан', 'рецепт', 'мороженого'])) // coverage: significance
+      .mockResolvedValueOnce(counts([{ id: 'noise', matched: 1, total: 3 }])) // coverage: match counts
+      .mockResolvedValueOnce([]); // enrichResults
+    const [result] = await textSearch('банан рецепт мороженого', 5);
+    expect(result.text_tier).toBe('or');
+    // Rank-normalized alone would be exactly 1.0 (sole OR hit) — coverage
+    // (1/3) must still show up multiplied on top, not cancelled out.
+    expect(result.coverage).toBeCloseTo(1 / 3, 5);
+    expect(result.relevance).toBeCloseTo(1 * (1 / 3), 5);
+    expect(result.confidence).toBe('weak'); // OR tier, 0 corroborating arms, regardless of the number
+  });
+
+  it('does not collapse two different-rank hits to the same relevance just because they share a coverage ratio', async () => {
+    // Regression guard for the exact bug flagged live: multiplying coverage
+    // in BEFORE dividing by the set's max rank would let a shared 0.2
+    // multiplier divide out of both sides and hand every hit relevance 1.0
+    // again. Applying it after must preserve the two hits' relative order.
+    dbQuery
+      .mockResolvedValueOnce([]) // strict AND: nothing
+      .mockResolvedValueOnce([
+        { id: 'a', title: 'A', tags: [], rank: 0.05, headline: 'hi' },
+        { id: 'b', title: 'B', tags: [], rank: 0.03, headline: 'hi' },
+      ]) // OR pass
+      .mockResolvedValueOnce(sig(['один', 'два', 'три', 'четыре', 'пять']))
+      .mockResolvedValueOnce(counts([
+        { id: 'a', matched: 1, total: 5 },
+        { id: 'b', matched: 1, total: 5 },
+      ]))
+      .mockResolvedValueOnce([]); // enrichResults
+    const out = await textSearch('один два три четыре пять', 5);
+    const byId = Object.fromEntries(out.map((r) => [r.id, r]));
+    expect(byId['a'].coverage).toBeCloseTo(0.2, 5);
+    expect(byId['b'].coverage).toBeCloseTo(0.2, 5);
+    // Rank-normalized first: a=0.05/0.05=1, b=0.03/0.05=0.6 — THEN ×0.2.
+    expect(byId['a'].relevance).toBeCloseTo(0.2, 5);
+    expect(byId['b'].relevance).toBeCloseTo(0.12, 5);
+    expect(byId['a'].relevance).toBeGreaterThan(byId['b'].relevance); // order preserved, not flattened to 1.0/1.0
+  });
+
+  it('leaves a genuine AND-tier full match at relevance 1.0 — single-word identifiers do not degrade', async () => {
+    // No coverage round trip at all here: coverage only ever applies to the
+    // 'or' tier (see textSearch), and a single word never triggers the OR
+    // pass in the first place (words.length > 2 gate) — 'and' tier hits are
+    // unconditionally coverage: 1, not computed and discovered to be 1.
+    dbQuery
+      .mockResolvedValueOnce([{ id: 'r', title: 'Runbook', tags: ['runbook'], rank: 0.5, headline: 'hi' }]) // strict AND
+      .mockResolvedValueOnce([]); // enrichResults
+    const [result] = await textSearch('runbook', 5);
+    expect(result.text_tier).toBe('and');
+    expect(result.coverage).toBe(1);
+    expect(result.relevance).toBe(1);
+    expect(dbQuery).toHaveBeenCalledTimes(2); // no coverage query fired for an AND-only, single-word result
+  });
+
+  it('an AND-tier hit is never coverage-discounted even when it coexists with an OR pass — dotted identifiers are one lexeme to Postgres, not to a naive JS split', async () => {
+    // Measured live 2026-08-14: "host1.example.cloud" is one lexeme to
+    // websearch_to_tsquery's own dotted-host tokenizer, but a plain JS
+    // regex split (significantWords) naively cuts it into three —
+    // "host1"/"example"/"cloud" — and testing those as three separate
+    // lexemes against a vector that stored the hostname as one dropped a
+    // correct, exact AND match from relevance 1.0 to 0.33. Two different
+    // tokenizers must never be asked to agree — scoping coverage to the OR
+    // tier sidesteps the disagreement instead of chasing consistency
+    // between them.
+    dbQuery
+      .mockResolvedValueOnce([{ id: 'host', title: 'srv1.example.com', tags: [], rank: 0.5, headline: 'hi' }]) // strict AND: exact hit
+      .mockResolvedValueOnce([{ id: 'noise', title: 'Noise', tags: [], rank: 0.01, headline: 'hi' }]) // OR pass also returns something
+      .mockResolvedValueOnce(sig(['one', 'two', 'three']))
+      .mockResolvedValueOnce(counts([{ id: 'noise', matched: 1, total: 3 }])) // coverage only ever looked up for the OR id
+      .mockResolvedValueOnce([]); // enrichResults
+    const out = await textSearch('srv1 one two three', 5);
+    const coverageParams = dbQuery.mock.calls[3][1] as unknown[]; // the match-count query's params
+    expect(coverageParams[coverageParams.length - 1]).toEqual(['noise']); // never 'host'
+    const host = out.find((r) => r.id === 'host')!;
+    expect(host.text_tier).toBe('and');
+    expect(host.coverage).toBe(1);
+    expect(host.relevance).toBe(1); // top of its own set, undiscounted
+  });
+
+  it('sorts by confidence first, relevance second — a high-coverage AND hit outranks a same-relevance OR hit', async () => {
+    // Both tiers can end up at the same numeric relevance after the
+    // discount; text_tier still decides corroboratingArms (and therefore
+    // confidence), and confidence must win the sort, not array order.
+    dbQuery
+      .mockResolvedValueOnce([{ id: 'strict', title: 'Strict', tags: [], rank: 0.048, headline: 'hi' }]) // strict AND
+      .mockResolvedValueOnce([{ id: 'loose', title: 'Loose', tags: [], rank: 0.05, headline: 'hi' }]) // OR pass, higher raw rank
+      .mockResolvedValueOnce(sig(['aaa', 'bbb', 'ccc']))
+      .mockResolvedValueOnce(counts([
+        { id: 'strict', matched: 3, total: 3 }, // full coverage
+        { id: 'loose', matched: 3, total: 3 },  // also full coverage, but OR tier
+      ]))
+      .mockResolvedValueOnce([]); // enrichResults
+    const out = await textSearch('aaa bbb ccc', 5);
+    // best = max(0.048, 0.05) = 0.05 → strict normalizes to 0.96 (moderate,
+    // 1 arm), loose normalizes to the full 1.0 but is forced to weak by its
+    // 0 corroborating arms (or tier). 'loose' has the higher raw rank, so
+    // without a confidence-first sort it would land first — it must not.
+    expect(out[0].id).toBe('strict');
+    expect(out[0].confidence).toBe('moderate');
+    expect(out[1].id).toBe('loose');
+    expect(out[1].confidence).toBe('weak');
+  });
+
+  it('fails open (no discount, no crash) if the coverage query itself errors', async () => {
+    dbQuery
+      .mockResolvedValueOnce([]) // strict AND: nothing
+      .mockResolvedValueOnce([{ id: 'n', title: 'N', tags: [], rank: 0.02, headline: 'hi' }]) // OR pass
+      .mockRejectedValueOnce(new Error('invalid regconfig: "klingon"')) // coverage: significance query throws
+      .mockResolvedValueOnce([]); // enrichResults
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const [result] = await textSearch('какой то запрос тут', 5);
+    expect(result.coverage).toBe(1); // no discount applied
+    expect(result.relevance).toBe(1); // unaffected — same as before 3b
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('coverage computation failed'), expect.anything());
+    warn.mockRestore();
+  });
+});
+
+describe('semanticSearch — chunk dedup (наряд-поиск-2026-08-14 шаг 6 side effect)', () => {
+  it('never returns the same note twice even when match_chunks returns 2 of its chunks', async () => {
+    // Measured live: "семейное предприятие..." returned the same note
+    // twice in a 3-slot result set (migration 017 lets match_chunks return
+    // up to 2 rows per note). Best-scoring chunk per note wins; the note
+    // still occupies exactly one result slot.
+    dbQuery.mockResolvedValueOnce([
+      { id: 'book', title: 'Book', chunk_content: 'chunk A — best', heading: null, tags: [], similarity: 0.9 },
+      { id: 'other', title: 'Other', chunk_content: 'chunk X', heading: null, tags: [], similarity: 0.85 },
+      { id: 'book', title: 'Book', chunk_content: 'chunk B — worse', heading: null, tags: [], similarity: 0.8 },
+    ]);
+    const out = await semanticSearch('q', 5);
+    expect(out.map((r) => r.id)).toEqual(['book', 'other']); // 'book' once, not twice
+    expect(out.find((r) => r.id === 'book')!.excerpt).toContain('chunk A');
+    expect(out.find((r) => r.id === 'book')!.excerpt).not.toContain('chunk B');
+  });
+
+  it('a duplicate chunk does not crowd out a genuinely different note within `limit`', async () => {
+    dbQuery.mockResolvedValueOnce([
+      { id: 'book', title: 'Book', chunk_content: 'chunk A', heading: null, tags: [], similarity: 0.9 },
+      { id: 'book', title: 'Book', chunk_content: 'chunk B', heading: null, tags: [], similarity: 0.88 },
+      { id: 'other', title: 'Other', chunk_content: 'chunk X', heading: null, tags: [], similarity: 0.8 },
+    ]);
+    const out = await semanticSearch('q', 2); // only 2 slots requested
+    expect(out).toHaveLength(2);
+    expect(out.map((r) => r.id)).toEqual(['book', 'other']); // both distinct notes, not book twice
   });
 });

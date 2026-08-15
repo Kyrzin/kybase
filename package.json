@@ -10,7 +10,8 @@
     "lint": "eslint",
     "reindex": "tsx scripts/reindex.ts",
     "reindex:all": "tsx scripts/reindex.ts --all",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:integration": "vitest run -c vitest.integration.config.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

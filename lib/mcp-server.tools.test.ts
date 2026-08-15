@@ -31,6 +31,11 @@ vi.mock('./search', async () => {
     hybridSearch: (...a: unknown[]) => hybridSearch(...a),
     bestSemanticScore: (...a: unknown[]) => bestSemanticScore(...a),
     makeExcerpt: actual.makeExcerpt,
+    // Real implementation (getMinSimilarity + MIN_SIGNAL_MARGIN) — it's a
+    // one-line composition of two things already independently mocked/
+    // tested (getMinSimilarity here, MIN_SIGNAL_MARGIN in search.test.ts),
+    // not worth its own fake here.
+    effectiveSemanticThreshold: actual.effectiveSemanticThreshold,
   };
 });
 
@@ -1030,9 +1035,59 @@ describe('search_notes', () => {
       results: unknown[]; threshold: number; best_score: number; pending_embeddings: number;
     };
     expect(out.results).toEqual([]);
-    expect(out.threshold).toBe(0.55);
+    // getMinSimilarity (0.55) + 7% of its remaining headroom (0.45) — the
+    // raw floor alone understates what a best_score actually needs to
+    // clear (наряд-поиск-2026-08-14, anomaly item 2: a best_score just
+    // above the bare floor could still come back empty via the
+    // degenerate-set guard, and the old threshold field didn't reflect
+    // that). Margin is a fraction of headroom, not a flat cosine value
+    // (pre-publication review) — 0.55 + 0.07×0.45 = 0.5815, rounds to 0.58.
+    expect(out.threshold).toBe(0.58);
     expect(out.best_score).toBe(0.31);
     expect(out.pending_embeddings).toBe(2);
+  });
+
+  it('rounds relevance and drops debug fields by default; JSON is indented so a non-parsing client still sees structure', async () => {
+    textSearch.mockResolvedValue([{
+      id: 'aaaaaaaa-1111-4111-8111-111111111111',
+      title: 'Runbook: MCP server',
+      excerpt: 'How to add a tool to an existing server.',
+      tags: ['runbook', 'mcp'],
+      score: 0.08,
+      relevance: 0.9488824385394478,
+      confidence: 'moderate',
+      text_tier: 'and',
+    }]);
+    const client = await connectClient();
+    const res = (await client.callTool({ name: 'search_notes', arguments: { query: 'q', type: 'text' } })) as ToolResult;
+    const raw = res.content[0].text;
+    expect(raw).toContain('\n  '); // pretty-printed, readable even without a parser
+    expect(raw).not.toMatch(/0\.9488824385394478/); // full-precision relevance not leaked
+
+    const [out] = JSON.parse(raw);
+    expect(out.relevance).toBe(0.95);
+    expect(out.text_tier).toBe('and');
+    expect(out).not.toHaveProperty('score'); // internal RRF-rank field, never part of the public shape
+  });
+
+  it('explain:true adds raw scores and created_at, rounded; omitted by default', async () => {
+    hybridSearch.mockResolvedValue([{
+      id: 'a', title: 'A', excerpt: 'x', tags: [],
+      relevance: 0.95, confidence: 'strong', text_tier: 'and',
+      matched_by: ['text_score', 'semantic_score'],
+      text_score: 0.09123456, semantic_score: 0.61234567, rrf_score: 0.03109932,
+      created_at: '2026-07-24T12:20:49.425Z',
+    }]);
+    const plain = await call('search_notes', { query: 'q', type: 'hybrid' }) as { results: Record<string, unknown>[] };
+    expect(plain.results[0]).not.toHaveProperty('rrf_score');
+    expect(plain.results[0]).not.toHaveProperty('created_at');
+
+    const explained = await call('search_notes', { query: 'q', type: 'hybrid', explain: true }) as { results: Record<string, unknown>[] };
+    const [r] = explained.results;
+    expect(r.text_score).toBe(0.091);
+    expect(r.semantic_score).toBe(0.612);
+    expect(r.rrf_score).toBe(0.031);
+    expect(r.created_at).toBe('2026-07-24T12:20:49.425Z');
   });
 });
 

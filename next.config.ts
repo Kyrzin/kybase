@@ -26,6 +26,9 @@ const CSP = [
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // Next sends X-Powered-By: Next.js by default — free stack fingerprinting
+  // for anyone probing the site, no request needed beyond the first one.
+  poweredByHeader: false,
   async headers() {
     return [
       {

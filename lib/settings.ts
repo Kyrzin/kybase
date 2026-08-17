@@ -54,8 +54,9 @@ export async function setSetting(key: string, value: string): Promise<void> {
   // Simplest correct invalidation: any settings write drops the whole
   // cache, not just the key that changed. setSetting isn't on a hot path
   // (a handful of calls per session, from the settings UI/API), unlike
-  // getEmbeddingConfig() below.
+  // getEmbeddingConfig()/getTagWeights() below.
   cachedEmbeddingConfig = null;
+  cachedTagWeights = null;
 }
 
 // Which text search configs notes_search_vector_trigger/search_notes_fts
@@ -79,6 +80,56 @@ export async function getFtsLanguages(): Promise<string[]> {
 // itself (it must not be able to break every note write on a typo).
 export async function setFtsLanguages(languages: string[]): Promise<void> {
   await setSetting('fts_languages', languages.map((s) => s.trim()).filter(Boolean).join(','));
+}
+
+export type TagWeights = Record<string, number>;
+
+// Mechanic lives in code (lib/search.ts multiplies a hit's raw score by
+// this before normalizing), vocabulary lives here — empty default, so an
+// install that never sets this behaves exactly as before (weight 1 for
+// every tag is a no-op on the multiply). No vault-specific tag name is
+// hardcoded anywhere: this vault's own canonical/ephemeral split, if the
+// owner wants it, is a value in this JSON blob, not a constant in the
+// product (per the roadmap's own framing on this file).
+// JSON, not comma-separated like fts_languages: this is a map, not a list.
+// Cached like getEmbeddingConfig — textSearch reads this on every call, and
+// an OR-cascade search can mean two search_notes_fts round trips per
+// request, each with zero chance the setting changed mid-request.
+const TAG_WEIGHTS_CACHE_TTL_MS = 5_000;
+let cachedTagWeights: { value: TagWeights; expiresAt: number } | null = null;
+
+export async function getTagWeights(): Promise<TagWeights> {
+  if (cachedTagWeights && Date.now() < cachedTagWeights.expiresAt) {
+    return cachedTagWeights.value;
+  }
+  const weights = await getTagWeightsUncached();
+  cachedTagWeights = { value: weights, expiresAt: Date.now() + TAG_WEIGHTS_CACHE_TTL_MS };
+  return weights;
+}
+
+async function getTagWeightsUncached(): Promise<TagWeights> {
+  const raw = await getSetting('tag_weights');
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+  const weights: TagWeights = {};
+  for (const [tag, value] of Object.entries(parsed as Record<string, unknown>)) {
+    // A weight has to stay positive and finite: 0 or negative flips a
+    // multiplicative score's sign/ordering rather than just nudging it,
+    // and a corrupted or hand-edited settings row must not be able to
+    // break every search silently — skip that one entry, keep the rest.
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) weights[tag] = value;
+  }
+  return weights;
+}
+
+export async function setTagWeights(weights: TagWeights): Promise<void> {
+  await setSetting('tag_weights', JSON.stringify(weights));
 }
 
 // getEmbeddingConfig is on the hot path — every embed call (getEmbedding,

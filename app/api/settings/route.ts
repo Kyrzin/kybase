@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages } from '@/lib/settings';
+import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages, getTagWeights, setTagWeights } from '@/lib/settings';
 import { z } from 'zod';
 
 const UpdateSettingsSchema = z.object({
@@ -13,6 +13,12 @@ const UpdateSettingsSchema = z.object({
   // No per-language validation here — an unregistered Postgres text search
   // config name is caught and skipped inside the trigger itself, not here.
   ftsLanguages: z.array(z.string().min(1)).min(1).optional(),
+  // Mechanic (lib/search.ts multiplies a hit's raw rank by this before
+  // normalizing) is in code; the tags and their weights are entirely this
+  // vault's own vocabulary — empty object clears it back to a no-op.
+  // getTagWeights() re-validates on read too (positive finite only), so a
+  // bad value here degrades to "that one entry ignored", not a broken search.
+  tagWeights: z.record(z.string(), z.number()).optional(),
 });
 
 // Auth is proxy.ts.ts (session cookie or master-secret bearer) — this
@@ -21,13 +27,14 @@ const UpdateSettingsSchema = z.object({
 // stopped sending it (see the session-cookie change): the browser started
 // getting 401s here even though proxy.ts had already let it through.
 export async function GET() {
-  const [cfg, ftsLanguages] = await Promise.all([getEmbeddingConfig(), getFtsLanguages()]);
+  const [cfg, ftsLanguages, tagWeights] = await Promise.all([getEmbeddingConfig(), getFtsLanguages(), getTagWeights()]);
   return NextResponse.json({
     provider: cfg.provider,
     ollamaModel: cfg.ollamaModel,
     hasGoogleKey: !!cfg.googleApiKey,
     hasOpenaiKey: !!cfg.openaiApiKey,
     ftsLanguages,
+    tagWeights,
   });
 }
 
@@ -47,6 +54,7 @@ export async function PUT(req: NextRequest) {
   if (body.openaiApiKey) await setSetting('openai_api_key',     body.openaiApiKey);
   if (body.ollamaModel)  await setSetting('ollama_model',       body.ollamaModel);
   if (body.ftsLanguages) await setFtsLanguages(body.ftsLanguages);
+  if (body.tagWeights)   await setTagWeights(body.tagWeights);
 
   // Mark all live notes for reindex when provider changes
   if (providerChanged) {

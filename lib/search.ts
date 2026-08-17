@@ -1,7 +1,7 @@
 // lib/search.ts — text (FTS + substring fallback), semantic (chunk-based), and hybrid (RRF) search
 import { query as dbQuery, toVector } from './db';
 import { getEmbedding, getMinSimilarity } from './embeddings';
-import { getFtsLanguages } from './settings';
+import { getFtsLanguages, getTagWeights, type TagWeights } from './settings';
 import { escapeLike } from './sql';
 import { TABLE_ROW_RE, TABLE_SEPARATOR_RE, unpairedFenceIndex } from './markdown';
 
@@ -671,12 +671,22 @@ async function computeTextCoverage(words: string[], ids: string[]): Promise<Map<
  *     words and code fragments like "kmv" or "tsconfig" don't survive
  *     stemming at all.
  */
+// Product of every matching tag's weight, 1 for a tag with no entry — an
+// empty settings map (the default) makes this 1 for everything, a true
+// no-op on the multiply below. Product, not max/average: independent
+// multiplicative signals compound naturally (two mildly-boosted tags lean
+// further up than one; a boosted and a demoted tag partially cancel)
+// without needing a rule for which tag "wins" when they conflict.
+function weightForTags(tags: string[], weights: TagWeights): number {
+  return tags.reduce((acc, t) => acc * (weights[t] ?? 1), 1);
+}
+
 export async function textSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
   const fetchLimit = overfetchLimit(limit, filters);
-  const rows = await dbQuery<FtsRow>(
-    'select * from search_notes_fts($1, $2)',
-    [query, fetchLimit]
-  );
+  const [rows, tagWeights] = await Promise.all([
+    dbQuery<FtsRow>('select * from search_notes_fts($1, $2)', [query, fetchLimit]),
+    getTagWeights(),
+  ]);
 
   let orRows: FtsRow[] = [];
   const words = significantWords(query);
@@ -703,7 +713,16 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // per-query, dimensionless value, there is no absolute number that means
   // the same thing across two different queries. Both RPC calls already
   // order by rank desc, so each list's own head is that list's best.
-  const best = Math.max(rows[0]?.rank ?? 0, orRows[0]?.rank ?? 0);
+  // Tag weight multiplies the raw rank, before normalization — never
+  // relevance itself. relevance's 0..1 range is what confidenceFor()'s
+  // thresholds are calibrated against; multiplying it post-hoc could push
+  // a hit above 1.0 or silently shift which confidence band it lands in.
+  // Multiplying the raw score instead keeps relevance exactly what it's
+  // always been ("how this compares to the best hit in this response") —
+  // weight just gets a say in which hit that is. At the default empty
+  // weights map this is `n.rank * 1` for every row, i.e. unchanged.
+  const weightedRank = (n: FtsRow) => n.rank * weightForTags(n.tags, tagWeights);
+  const best = Math.max(0, ...rows.map(weightedRank), ...orRows.map(weightedRank));
   // Coverage only applies to the 'or' tier — an 'and' hit already matched
   // EVERY term websearch_to_tsquery's own parser produced for the strict
   // query, by construction (that's what AND semantics means), so it's
@@ -728,7 +747,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     // matched on one word out of N) — the multiplier would divide by
     // itself and the top hit would land back at 1.0, silently undoing the
     // whole point (2026-08-14 search-relevance overhaul, step 3b).
-    const normalized = best > 0 ? n.rank / best : 0;
+    const normalized = best > 0 ? weightedRank(n) / best : 0;
     const coverage = tier === 'and' ? 1 : (coverageMap?.get(n.id) ?? 1);
     const relevance = normalized * coverage;
     // Standalone (no semantic arm to corroborate with): an 'and' hit is one

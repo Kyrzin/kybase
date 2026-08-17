@@ -15,6 +15,7 @@
 // also runs it on a daily interval so the retention window is a real
 // guarantee, not just a side effect of unrelated activity.
 import { query, queryOne } from './db';
+import { invalidateSemanticEdgesCache } from './semantic-edges';
 
 export const TRASH_RETENTION_DAYS = 30;
 
@@ -23,6 +24,7 @@ export async function softDeleteNote(id: string): Promise<boolean> {
     'update notes set deleted_at = now() where id = $1 and deleted_at is null returning id',
     [id]
   );
+  invalidateSemanticEdgesCache();
   await purgeExpiredTrash();
   return !!row;
 }
@@ -32,6 +34,7 @@ export async function restoreNote(id: string): Promise<boolean> {
     'update notes set deleted_at = null where id = $1 and deleted_at is not null returning id',
     [id]
   );
+  invalidateSemanticEdgesCache();
   return !!row;
 }
 
@@ -99,5 +102,6 @@ export async function trashFolderNotes(
      returning id`,
     [folderId]
   );
+  invalidateSemanticEdgesCache();
   return rows.length;
 }

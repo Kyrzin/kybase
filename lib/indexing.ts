@@ -4,6 +4,7 @@
 import { getPool, toVector } from './db';
 import { getEmbedding, getEmbedConcurrency } from './embeddings';
 import { chunkNote } from './chunking';
+import { invalidateSemanticEdgesCache } from './semantic-edges';
 
 // The whole-note embedding sees only the head of very long notes — the
 // chunks cover the rest. The provider's context window depends on server
@@ -90,6 +91,7 @@ export async function indexNote(id: string, title: string, content: string): Pro
       [toVector(noteEmbedding), id]
     );
     await client.query('commit');
+    invalidateSemanticEdgesCache(); // this note's embedding just changed
   } catch (err) {
     await client.query('rollback');
     throw err;

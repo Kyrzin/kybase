@@ -352,7 +352,9 @@ export function createMcpServer(): McpServer {
     'content_truncated and content_total_length in the response, and pass next_offset back as ' +
     '`offset` to fetch the rest. Every response carries `headings` — the H1–H3 outline with ' +
     'character offsets, so a truncated note still shows what is in the part you did not get. ' +
-    'Jump there with that offset, or name it in `section` to get that heading and its body alone. ' +
+    'Jump there with that offset, or name it in `section` to get that heading and its body alone — ' +
+    'with `section`, `headings` narrows to that section\'s own subheadings too (offsets re-based to ' +
+    'the section\'s own start, matching offset/limit\'s meaning in that mode), not the whole note\'s. ' +
     'Pass `resolve_links: true` to also resolve [[wikilinks]] inside it one level deep — use when ' +
     'you need a note\'s linked context without extra round-trips. Each linked note comes back as ' +
     'id/title/folder_path only by default; pass include_content:true for the full text of each ' +
@@ -435,6 +437,7 @@ export function createMcpServer(): McpServer {
       // only way to know what sits in the part that did not come back.
       const headings = extractHeadings(data.content);
       let body = data;
+      let responseHeadings = headings;
       if (section !== undefined) {
         const range = sectionRange(headings, data.content.length, section);
         if (!range) {
@@ -443,9 +446,19 @@ export function createMcpServer(): McpServer {
         }
         // offset/limit now page within the section, not the whole note.
         body = { ...data, content: data.content.slice(range.start, range.end) };
+        // The caller already named the section they want — the rest of the
+        // note's outline is dead weight here, and could outweigh the section
+        // body itself (measured live 2026-08-17: ~967 content chars vs
+        // ~2500 headings chars on one real note). Scope to headings that
+        // fall within the section, re-based to the section's own start so
+        // they stay usable as the next `offset` — offset/limit above already
+        // switched to that same section-local coordinate system.
+        responseHeadings = headings
+          .filter(h => h.offset >= range.start && h.offset < range.end)
+          .map(h => ({ ...h, offset: h.offset - range.start }));
       }
       const windowed = withFolderPath(windowContent(body, offset, limit), paths);
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ ...windowed, headings, ...linkFields }) }] };
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ ...windowed, headings: responseHeadings, ...linkFields }) }] };
     }
   );
 
@@ -992,7 +1005,14 @@ export function createMcpServer(): McpServer {
       const displayResults = results.map((r) => toDisplayResult(r, explain));
 
       if (type === 'text') {
-        return { content: [{ type: 'text' as const, text: JSON.stringify(displayResults, null, 2) }] };
+        // Always {results: [...]}, same top-level shape as hybrid/semantic
+        // below — a caller no longer needs a type-keyed branch just to read
+        // the hit list (found live 2026-08-17, independently by both an
+        // external audit and an independent-agent test). text has no
+        // threshold/best_score/pending_embeddings of its own (those are
+        // semantic-search concepts — cosine floor, embedding backlog), so it
+        // just omits them rather than sending meaningless zeros.
+        return { content: [{ type: 'text' as const, text: JSON.stringify({ results: displayResults }, null, 2) }] };
       }
 
       // best_score returned unconditionally, not just on an empty result —
@@ -1264,8 +1284,9 @@ export function createMcpServer(): McpServer {
     'get_graph',
     'Get the knowledge graph: note nodes, directed edges from [[wikilinks]], and undirected ' +
     'semantic_edges (embedding cosine similarity) between related notes that may lack explicit links. ' +
-    'Nodes are `{i, id, t}` (t = title); edges and semantic_edges reference nodes by `i`, not id — ' +
-    '`["edges"][0] = [2, 5]` means nodes[2] links to nodes[5], and a semantic_edges triple\'s third ' +
+    'Nodes are `{id, t}` (t = title); edges and semantic_edges reference nodes by their position in ' +
+    'the `nodes` array (not id) — `["edges"][0] = [2, 5]` means nodes[2] links to nodes[5], and a ' +
+    'semantic_edges triple\'s third ' +
     'number is the cosine score. `unresolved_links` lists [[wikilink]] targets in this scope that ' +
     'match no note title — dangling links, not edges (no node index, since there is no node to point ' +
     'at); rename the target or fix the link text to resolve one. Unfiltered, this returns the ENTIRE ' +

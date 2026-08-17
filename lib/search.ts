@@ -196,8 +196,11 @@ async function filteredNoteIds(filters: SearchFilters): Promise<Set<string>> {
   if (filters.tag)           { params.push([filters.tag]);         conds.push(`tags @> $${params.length}`); }
   if (filters.createdAfter)  { params.push(filters.createdAfter);  conds.push(`created_at >= $${params.length}`); }
   if (filters.createdBefore) { params.push(filters.createdBefore); conds.push(`created_at <= $${params.length}`); }
-  if (filters.updatedAfter)  { params.push(filters.updatedAfter);  conds.push(`updated_at >= $${params.length}`); }
-  if (filters.updatedBefore) { params.push(filters.updatedBefore); conds.push(`updated_at <= $${params.length}`); }
+  // content_updated_at, not updated_at — same reasoning as list_notes
+  // (migration 020): a rename elsewhere rewriting a [[link]] inside this
+  // note must not make it match an "updated recently" filter.
+  if (filters.updatedAfter)  { params.push(filters.updatedAfter);  conds.push(`content_updated_at >= $${params.length}`); }
+  if (filters.updatedBefore) { params.push(filters.updatedBefore); conds.push(`content_updated_at <= $${params.length}`); }
   const rows = await dbQuery<{ id: string }>(
     `select id from notes where ${conds.join(' and ')}`,
     params

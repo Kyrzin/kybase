@@ -66,8 +66,11 @@ export async function listShares(): Promise<ShareListItem[]> {
  */
 export async function getSharedNote(token: string): Promise<SharedNote | null> {
   if (!token) return null;
+  // content_updated_at, not updated_at: a rename elsewhere rewriting a
+  // [[link]] inside this note must not make an anonymous viewer see a
+  // fresh "last updated" that nobody actually earned (migration 020).
   return queryOne<SharedNote>(
-    `select n.title, n.content, n.updated_at
+    `select n.title, n.content, n.content_updated_at as updated_at
      from note_shares s join notes n on n.id = s.note_id
      where s.token_hash = $1 and (s.expires_at is null or s.expires_at > now()) and n.deleted_at is null`,
     [hashToken(token)]

@@ -124,7 +124,15 @@ function withFolderPath<T extends { folder_id: string | null }>(
  * Span of a section: its heading line through everything beneath it, ending
  * at the next heading of the same or higher rank. Matches on heading text or
  * slug, case-insensitively, so a caller can pass back either what it read in
- * `headings` or the anchor half of a [[Title#Section]] link.
+ * `headings` or the anchor half of a [[Title#Section]] link. Exact match
+ * wins; failing that, widens to unique prefix then unique substring on the
+ * text (same exact→prefix→substring cascade findNoteByTitle applies to note
+ * titles, and for the same reason: a heading copied verbatim from `headings`
+ * can carry inline markdown — `*emphasis*`, a trailing qualifier — that a
+ * caller's best-effort retyping drops). Several candidates at a stage is
+ * treated the same as none: resolving to the wrong section silently is worse
+ * than the "not found" error the caller already raises, listing every
+ * heading to choose from.
  */
 export function sectionRange(
   headings: Heading[],
@@ -137,7 +145,16 @@ export function sectionRange(
   // reports a section that plainly exists as missing.
   const norm = (s: string) => s.normalize('NFC').trim().toLowerCase();
   const wanted = norm(section);
-  const i = headings.findIndex(h => norm(h.text) === wanted || norm(h.slug) === wanted);
+  let i = headings.findIndex(h => norm(h.text) === wanted || norm(h.slug) === wanted);
+  if (i === -1) {
+    for (const matches of [
+      wanted ? headings.filter(h => norm(h.text).startsWith(wanted)) : [],
+      wanted ? headings.filter(h => norm(h.text).includes(wanted)) : [],
+    ]) {
+      if (matches.length > 1) return null;
+      if (matches.length === 1) { i = headings.indexOf(matches[0]); break; }
+    }
+  }
   if (i === -1) return null;
   const next = headings.slice(i + 1).find(h => h.level <= headings[i].level);
   return { start: headings[i].offset, end: next ? next.offset : total };
@@ -267,21 +284,22 @@ export function createMcpServer(): McpServer {
     'List notes, sorted by recency (newest first). Optional filters: folder_id, tag, ' +
     'created_after/created_before, updated_after/updated_before, limit (max 200). ' +
     'created_after answers "what is new" — a note\'s creation date never changes after it is ' +
-    'made. updated_after answers "what changed since I was last here" — it moves on every real ' +
-    'edit. They are NOT interchangeable: a note edited today but created months ago matches ' +
-    'updated_after, not created_after. sort picks which of the two dates drives the ordering ' +
-    '(default "updated", unchanged from before this field existed). Each note carries ' +
-    'content_length (characters in the full note) so you can tell a long note from a short one ' +
-    'before spending a get_note call on it. Pass trashed:true to see soft-deleted notes instead ' +
-    '(recoverable with restore_note until they age out of the trash) — other filters are ignored ' +
-    'in that mode.',
+    'made. updated_after answers "what changed since I was last here" — it moves only when this ' +
+    'note\'s own title/content/folder/tags were actually edited, NOT when renaming some other note ' +
+    'rewrote a [[link]] to it in passing (that still touches updated_at, returned separately, but ' +
+    'not this filter/sort). They are NOT interchangeable: a note edited today but created months ' +
+    'ago matches updated_after, not created_after. sort picks which of the two dates drives the ' +
+    'ordering (default "updated"). Each note carries content_length (characters in the full note) ' +
+    'so you can tell a long note from a short one before spending a get_note call on it. Pass ' +
+    'trashed:true to see soft-deleted notes instead (recoverable with restore_note until they age ' +
+    'out of the trash) — other filters are ignored in that mode.',
     {
       folder_id: z.string().uuid().optional().describe('Filter by folder UUID'),
       tag:       z.string().optional().describe('Filter by tag'),
       created_after:  z.string().optional().describe('ISO timestamp — only notes created at or after this'),
       created_before: z.string().optional().describe('ISO timestamp — only notes created at or before this'),
-      updated_after:  z.string().optional().describe('ISO timestamp — only notes updated at or after this'),
-      updated_before: z.string().optional().describe('ISO timestamp — only notes updated at or before this'),
+      updated_after:  z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or after this'),
+      updated_before: z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or before this'),
       sort:      z.enum(['created', 'updated']).default('updated').describe('Which date drives the ordering'),
       limit:     z.number().int().min(1).max(200).default(20),
       trashed:   z.boolean().default(false).describe('List soft-deleted notes instead of live ones'),
@@ -301,15 +319,19 @@ export function createMcpServer(): McpServer {
       if (tag)       { params.push([tag]);     conds.push(`tags @> $${params.length}`); }
       if (created_after)  { params.push(created_after);  conds.push(`created_at >= $${params.length}`); }
       if (created_before) { params.push(created_before); conds.push(`created_at <= $${params.length}`); }
-      if (updated_after)  { params.push(updated_after);  conds.push(`updated_at >= $${params.length}`); }
-      if (updated_before) { params.push(updated_before); conds.push(`updated_at <= $${params.length}`); }
+      // content_updated_at, not updated_at: a rename elsewhere rewriting a
+      // [[link]] inside this note still moves updated_at (expected_updated_at's
+      // guard needs that), but must not make this note look freshly edited —
+      // see migration 020.
+      if (updated_after)  { params.push(updated_after);  conds.push(`content_updated_at >= $${params.length}`); }
+      if (updated_before) { params.push(updated_before); conds.push(`content_updated_at <= $${params.length}`); }
       params.push(limit);
       // sort is a fixed 2-value enum from zod, not user-supplied text — safe
       // to interpolate as a column name.
-      const orderCol = sort === 'created' ? 'created_at' : 'updated_at';
+      const orderCol = sort === 'created' ? 'created_at' : 'content_updated_at';
       const [data, paths] = await Promise.all([
-        query<{ id: string; title: string; folder_id: string | null; tags: string[]; created_at: string; updated_at: string; content_length: number }>(
-          `select id, title, folder_id, tags, created_at, updated_at, length(content) as content_length from notes
+        query<{ id: string; title: string; folder_id: string | null; tags: string[]; created_at: string; updated_at: string; content_updated_at: string; content_length: number }>(
+          `select id, title, folder_id, tags, created_at, updated_at, content_updated_at, length(content) as content_length from notes
            where ${conds.join(' and ')}
            order by ${orderCol} desc limit $${params.length}`,
           params
@@ -335,7 +357,11 @@ export function createMcpServer(): McpServer {
     'you need a note\'s linked context without extra round-trips. Each linked note comes back as ' +
     'id/title/folder_path only by default; pass include_content:true for the full text of each ' +
     `(expensive if the note links to many others), capped at ${LINKED_NOTE_CONTENT_LIMIT} chars — call ` +
-    'get_note on a specific id for its full text. Unresolved links (targets not found) are listed ' +
+    'get_note on a specific id for its full text. `updated_at` moves on any stored change, including ' +
+    'another note\'s rename rewriting a [[link]] to this one — pass it back as expected_updated_at ' +
+    'on a write. `content_updated_at` only moves when THIS note\'s own title/content/folder/tags ' +
+    'were actually edited — that\'s the one that answers "did anyone really touch this". Unresolved ' +
+    'links (targets not found) are listed ' +
     'separately.',
     {
       id:      z.string().uuid().optional(),
@@ -352,7 +378,7 @@ export function createMcpServer(): McpServer {
     },
     async ({ id, title, section, offset, limit, resolve_links, include_content }) => {
       if (!id && !title) throw new Error('Provide either id or title');
-      const cols = 'id, title, content, folder_id, tags, created_at, updated_at';
+      const cols = 'id, title, content, folder_id, tags, created_at, updated_at, content_updated_at';
       // findNoteByTitle escapes %/_ at every stage, so wildcards in a real
       // title can't widen the match beyond the step being attempted.
       const [data, paths] = await Promise.all([
@@ -368,7 +394,13 @@ export function createMcpServer(): McpServer {
       // what comes back as `content` without narrowing which links count.
       let linkFields: { linked_notes: Record<string, unknown>[]; unresolved_links: string[] } | null = null;
       if (resolve_links) {
-        const linkTargets = extractAllWikilinks(data.content);
+        // Titles-only, no content — cheap even on a large vault — so a link
+        // target that is itself a literal title containing '#' or '|' (e.g.
+        // "closed CodeQL #3") resolves as that title instead of being cut at
+        // the character, see extractWikilinkTarget's comment.
+        const allTitles = await query<{ title: string }>('select title from notes where deleted_at is null');
+        const knownTitles = new Set(allTitles.map((n) => n.title.toLowerCase()));
+        const linkTargets = extractAllWikilinks(data.content, knownTitles);
         const resolved: Record<string, unknown>[] = [];
         const missing: string[] = [];
         // [[Guide]] and [[guide]] are one note — titles are unique
@@ -865,8 +897,18 @@ export function createMcpServer(): McpServer {
     if (r.coverage !== undefined) out.coverage = round2(r.coverage);
     if (r.content_length !== undefined) out.content_length = r.content_length;
     if (explain) {
+      // Hybrid results carry text_score/semantic_score directly (rrfMerge
+      // sets them per contributing arm). A plain (non-hybrid) result has no
+      // such split — its own `score` field IS that one arm's raw number
+      // (ts_rank for type:"text", cosine for type:"semantic") — so surface
+      // it under the same name the hybrid shape uses, keyed off text_tier
+      // (set only by the text arm) to know which. Without this, explain:true
+      // on type:"text"/"semantic" showed nothing to debug ranking with at all.
+      const plain = r as Partial<SearchResult>;
       if (hybrid.text_score !== undefined) out.text_score = round3(hybrid.text_score);
+      else if (plain.score !== undefined && plain.text_tier !== undefined) out.text_score = round3(plain.score);
       if (hybrid.semantic_score !== undefined) out.semantic_score = round3(hybrid.semantic_score);
+      else if (plain.score !== undefined && plain.text_tier === undefined) out.semantic_score = round3(plain.score);
       if (hybrid.rrf_score !== undefined) out.rrf_score = round3(hybrid.rrf_score);
       if (r.created_at) out.created_at = r.created_at;
     }
@@ -899,7 +941,8 @@ export function createMcpServer(): McpServer {
     'the best hit in this same response, coverage is not). ' +
     'Not comparable across different queries\' results, only within one. ' +
     'Filters: folder_id, tag, created_after/before (when a note was made), updated_after/before ' +
-    '(when it last changed) — these are NOT interchangeable. ' +
+    '(when its own content/title/folder/tags last actually changed — a rename elsewhere rewriting ' +
+    'a [[link]] to this note does not count) — these are NOT interchangeable. ' +
     'Every semantic/hybrid response includes threshold/best_score/pending_embeddings so you can ' +
     'tell "nothing relevant" from "just under threshold" from "embeddings not generated yet", even ' +
     'when results came back non-empty. ' +
@@ -913,8 +956,8 @@ export function createMcpServer(): McpServer {
       tag:            z.string().optional().describe('Restrict to notes with this tag'),
       created_after:  z.string().optional().describe('ISO timestamp — only notes created at or after this'),
       created_before: z.string().optional().describe('ISO timestamp — only notes created at or before this'),
-      updated_after:  z.string().optional().describe('ISO timestamp — only notes updated at or after this'),
-      updated_before: z.string().optional().describe('ISO timestamp — only notes updated at or before this'),
+      updated_after:  z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or after this'),
+      updated_before: z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or before this'),
       explain:        z.boolean().default(false).describe('Include raw per-arm scores and created_at for debugging ranking'),
     },
     async ({ query: q, type, limit, folder_id, tag, created_after, created_before, updated_after, updated_before, explain }) => {
@@ -1136,26 +1179,43 @@ export function createMcpServer(): McpServer {
     'Get notes that link to the given note via [[Title]] wikilinks. By default returns id/title/' +
     'folder_path plus a short snippet around the link occurrence, not full content — pass ' +
     'include_content:true for the full text of each (expensive if many notes link here; prefer the ' +
-    'default and call get_note on specific ids instead). Paginated like get_note.',
+    'default and call get_note on specific ids instead). Paginated like get_note. Takes id or title, ' +
+    'like get_note — title resolves the same forgiving way (exact, then prefix, then substring).',
     {
-      title:           z.string().min(1),
+      id:              z.string().uuid().optional(),
+      title:           z.string().optional(),
       include_content: z.boolean().default(false),
       limit:           z.number().int().min(1).max(200).default(50),
       offset:          z.number().int().min(0).default(0),
     },
-    async ({ title, include_content, limit, offset }) => {
+    async ({ id, title, include_content, limit, offset }) => {
+      if (!id && !title) throw new Error('Provide either id or title');
+      // Backlinks are found by matching [[Title]] text in other notes'
+      // content, so both paths need one lookup first to know the note's
+      // real title — findNoteByTitle gives a partial/fuzzy title the same
+      // exact->prefix->substring forgiveness get_note already has (and
+      // throws its own "matches N notes"/"not found" error on the way).
+      const resolvedTitle = id
+        ? (await queryOne<{ title: string }>('select title from notes where id = $1 and deleted_at is null', [id]))?.title
+        : (await findNoteByTitle<{ title: string }>(title!, 'title')).title;
+      if (!resolvedTitle) throw new Error('Note not found');
+
       const [data, paths] = await Promise.all([
         query<{ id: string; title: string; content: string; folder_id: string | null }>(
           'select id, title, content, folder_id from notes where content ilike $1 and deleted_at is null',
-          [`%[[${escapeLike(title)}%`]
+          [`%[[${escapeLike(resolvedTitle)}%`]
         ),
         folderPathMap(),
       ]);
 
-      // Precise filter: ilike is approximate, extractAllWikilinks is exact
+      // Precise filter: ilike is approximate, extractAllWikilinks is exact.
+      // Pass the title itself as the known-titles set so a link written as
+      // the literal title "closed CodeQL #3" isn't cut at the '#' before
+      // the comparison — see extractWikilinkTarget's comment.
+      const knownTitles = new Set([resolvedTitle.toLowerCase()]);
       const backlinks = data.filter((n) =>
-        extractAllWikilinks(n.content).some(
-          (t) => t.toLowerCase() === title.toLowerCase()
+        extractAllWikilinks(n.content, knownTitles).some(
+          (t) => t.toLowerCase() === resolvedTitle.toLowerCase()
         )
       );
 
@@ -1165,7 +1225,7 @@ export function createMcpServer(): McpServer {
         const base = withFolderPath({ id: n.id, title: n.title, folder_id: n.folder_id }, paths);
         return include_content
           ? { ...base, content: n.content }
-          : { ...base, snippet: makeExcerpt(n.content, `[[${title}`, 200) };
+          : { ...base, snippet: makeExcerpt(n.content, `[[${resolvedTitle}`, 200) };
       });
 
       return {
@@ -1188,11 +1248,13 @@ export function createMcpServer(): McpServer {
     'semantic_edges (embedding cosine similarity) between related notes that may lack explicit links. ' +
     'Nodes are `{i, id, t}` (t = title); edges and semantic_edges reference nodes by `i`, not id — ' +
     '`["edges"][0] = [2, 5]` means nodes[2] links to nodes[5], and a semantic_edges triple\'s third ' +
-    'number is the cosine score. Unfiltered, this returns the ENTIRE vault in one response — fine for ' +
-    'small vaults, but it will stop fitting in context as the vault grows. Scope it with folder_id (a ' +
-    'subtree) or root_title+depth (the neighborhood around one note) when you only need part of the ' +
-    'graph. Node titles in the result are valid [[wikilink]] targets — but only within whatever scope ' +
-    'you asked for.',
+    'number is the cosine score. `unresolved_links` lists [[wikilink]] targets in this scope that ' +
+    'match no note title — dangling links, not edges (no node index, since there is no node to point ' +
+    'at); rename the target or fix the link text to resolve one. Unfiltered, this returns the ENTIRE ' +
+    'vault in one response — fine for small vaults, but it will stop fitting in context as the vault ' +
+    'grows. Scope it with folder_id (a subtree) or root_title+depth (the neighborhood around one note) ' +
+    'when you only need part of the graph. Node titles in the result are valid [[wikilink]] targets — ' +
+    'but only within whatever scope you asked for.',
     {
       folder_id:        z.string().uuid().optional()
         .describe('Restrict to notes in this folder and its descendant folders'),

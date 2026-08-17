@@ -188,7 +188,7 @@ export default function KybaseApp() {
     const nodesList: GraphData['nodes'] = visibleNotes.map(n => ({ id: n.id, title: n.title, type: 'note', folderId: n.folder_id }));
     // Explicit [[wikilink]] edges via the shared kernel (same directed,
     // case-insensitive, self-skipping resolution the server graph uses).
-    const edgesList: GraphData['edges'] = buildWikilinkEdges(visibleNotes);
+    const edgesList: GraphData['edges'] = buildWikilinkEdges(visibleNotes).edges;
     // Merge semantic edges: only between visible notes, and never on a pair
     // that already has an explicit wikilink — solid beats dashed.
     const ids = new Set(nodesList.map(n => n.id));

@@ -11,7 +11,7 @@ import { buildWikilinkEdges, dedupeEdges, type GraphNode, type GraphEdge } from 
 const SEMANTIC_THRESHOLD = 0.75;
 const SEMANTIC_MAX_NEIGHBORS = 5;
 
-export type Graph = { nodes: GraphNode[]; edges: GraphEdge[]; semantic_edges: SemanticEdge[] };
+export type Graph = { nodes: GraphNode[]; edges: GraphEdge[]; semantic_edges: SemanticEdge[]; unresolved_links: string[] };
 
 export type BuildGraphOptions = {
   /** Restrict to notes inside this folder and its descendant folders. */
@@ -80,9 +80,11 @@ export async function buildGraph(opts: BuildGraphOptions = {}): Promise<Graph> {
   }
 
   let nodes = notes.map((n) => ({ id: n.id, title: n.title }));
+  const built = buildWikilinkEdges(notes);
   // Dedupe to one edge per (from, to) pair — the server graph has always been
   // unique-per-pair (it built edges from unique wikilink targets per note).
-  let edges = dedupeEdges(buildWikilinkEdges(notes));
+  let edges = dedupeEdges(built.edges);
+  let unresolved = built.unresolved;
 
   if (rootTitle) {
     const root = resolveRootTitle(notes, rootTitle, folderId);
@@ -108,6 +110,7 @@ export async function buildGraph(opts: BuildGraphOptions = {}): Promise<Graph> {
     }
     nodes = nodes.filter((n) => keep.has(n.id));
     edges = edges.filter((e) => keep.has(e.from) && keep.has(e.to));
+    unresolved = unresolved.filter((u) => keep.has(u.from));
   }
 
   // Second edge source — must never take down the wikilink graph if it fails.
@@ -124,5 +127,5 @@ export async function buildGraph(opts: BuildGraphOptions = {}): Promise<Graph> {
     }
   }
 
-  return { nodes, edges, semantic_edges };
+  return { nodes, edges, semantic_edges, unresolved_links: [...new Set(unresolved.map((u) => u.target))] };
 }

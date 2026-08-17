@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages, getTagWeights, setTagWeights } from '@/lib/settings';
+import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages, getTagWeights, setTagWeights, getFolderWeights, setFolderWeights } from '@/lib/settings';
 import { z } from 'zod';
 
 const UpdateSettingsSchema = z.object({
@@ -19,6 +19,12 @@ const UpdateSettingsSchema = z.object({
   // getTagWeights() re-validates on read too (positive finite only), so a
   // bad value here degrades to "that one entry ignored", not a broken search.
   tagWeights: z.record(z.string(), z.number()).optional(),
+  // Same mechanic, keyed by folder_id (uuid) instead of tag name — migration
+  // 021 adds folder_id to search_notes_fts for exactly this multiply.
+  // getFolderWeights() re-validates on read too; a folder_id that doesn't
+  // exist (typo, later-deleted folder) just never matches anything, same as
+  // an unknown tag name.
+  folderWeights: z.record(z.string(), z.number()).optional(),
 });
 
 // Auth is proxy.ts.ts (session cookie or master-secret bearer) — this
@@ -27,7 +33,9 @@ const UpdateSettingsSchema = z.object({
 // stopped sending it (see the session-cookie change): the browser started
 // getting 401s here even though proxy.ts had already let it through.
 export async function GET() {
-  const [cfg, ftsLanguages, tagWeights] = await Promise.all([getEmbeddingConfig(), getFtsLanguages(), getTagWeights()]);
+  const [cfg, ftsLanguages, tagWeights, folderWeights] = await Promise.all([
+    getEmbeddingConfig(), getFtsLanguages(), getTagWeights(), getFolderWeights(),
+  ]);
   return NextResponse.json({
     provider: cfg.provider,
     ollamaModel: cfg.ollamaModel,
@@ -35,6 +43,7 @@ export async function GET() {
     hasOpenaiKey: !!cfg.openaiApiKey,
     ftsLanguages,
     tagWeights,
+    folderWeights,
   });
 }
 
@@ -53,8 +62,9 @@ export async function PUT(req: NextRequest) {
   if (body.googleApiKey) await setSetting('google_api_key',     body.googleApiKey);
   if (body.openaiApiKey) await setSetting('openai_api_key',     body.openaiApiKey);
   if (body.ollamaModel)  await setSetting('ollama_model',       body.ollamaModel);
-  if (body.ftsLanguages) await setFtsLanguages(body.ftsLanguages);
-  if (body.tagWeights)   await setTagWeights(body.tagWeights);
+  if (body.ftsLanguages)  await setFtsLanguages(body.ftsLanguages);
+  if (body.tagWeights)    await setTagWeights(body.tagWeights);
+  if (body.folderWeights) await setFolderWeights(body.folderWeights);
 
   // Mark all live notes for reindex when provider changes
   if (providerChanged) {

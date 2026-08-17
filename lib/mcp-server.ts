@@ -580,7 +580,25 @@ export function createMcpServer(): McpServer {
           const changed =
             (title   !== undefined && title   !== locked.title) ||
             (content !== undefined && content !== locked.content);
-          const finalSets = changed ? [...sets, 'embedding_pending = true'] : sets;
+          let finalSets = changed ? [...sets, 'embedding_pending = true'] : sets;
+
+          // A rename rewrites [[wikilinks]] to this note everywhere ELSE
+          // (update_wikilinks below), but never touched this note's own
+          // body — the visible `# Old Title` heading silently fell out of
+          // sync with the new title (found live 2026-08-17). Only fix it
+          // when nobody explicitly rewrote content AND the body's very
+          // first line is an exact, unambiguous `# <old title>` — the
+          // vault's own convention (see the knowledge-base conventions
+          // note, rule #3) — never guess at a heading that doesn't match.
+          let fixedContent: string | undefined;
+          if (title !== undefined && title !== locked.title && content === undefined) {
+            const firstLine = locked.content.split('\n', 1)[0];
+            if (firstLine === `# ${locked.title}`) {
+              fixedContent = `# ${title}` + locked.content.slice(firstLine.length);
+              params.push(fixedContent);
+              finalSets = [...finalSets, `content = $${params.length}`];
+            }
+          }
 
           const { rows } = await client.query<{ id: string; title: string; folder_id: string | null; tags: string[]; updated_at: string; content_length: number }>(
             `update notes set ${finalSets.join(', ')}
@@ -592,7 +610,7 @@ export function createMcpServer(): McpServer {
           if (title && title !== locked.title && note) {
             await client.query('select update_wikilinks($1, $2)', [locked.title, title]);
           }
-          return { note, changed, newTitle: title ?? locked.title, newContent: content ?? locked.content };
+          return { note, changed, newTitle: title ?? locked.title, newContent: fixedContent ?? content ?? locked.content };
         });
       } catch (err) {
         if (isUniqueViolation(err)) throw new Error(`A note titled "${title}" already exists — update it or pick another title`);

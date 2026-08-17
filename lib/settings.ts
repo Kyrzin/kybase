@@ -54,9 +54,10 @@ export async function setSetting(key: string, value: string): Promise<void> {
   // Simplest correct invalidation: any settings write drops the whole
   // cache, not just the key that changed. setSetting isn't on a hot path
   // (a handful of calls per session, from the settings UI/API), unlike
-  // getEmbeddingConfig()/getTagWeights() below.
+  // getEmbeddingConfig()/getTagWeights()/getFolderWeights() below.
   cachedEmbeddingConfig = null;
   cachedTagWeights = null;
+  cachedFolderWeights = null;
 }
 
 // Which text search configs notes_search_vector_trigger/search_notes_fts
@@ -130,6 +131,47 @@ async function getTagWeightsUncached(): Promise<TagWeights> {
 
 export async function setTagWeights(weights: TagWeights): Promise<void> {
   await setSetting('tag_weights', JSON.stringify(weights));
+}
+
+export type FolderWeights = Record<string, number>;
+
+// Same shape and reasoning as TagWeights above, keyed by folder_id (a
+// folder's id is stable across renames; its name isn't, and two sibling
+// folders can share a name under different parents — migration 010). Text
+// search only, same as tag weights (migration 021's own comment): weighting
+// semantic search risks corrupting semanticSearch's best/signalMargin
+// absolute noise-floor check.
+const FOLDER_WEIGHTS_CACHE_TTL_MS = 5_000;
+let cachedFolderWeights: { value: FolderWeights; expiresAt: number } | null = null;
+
+export async function getFolderWeights(): Promise<FolderWeights> {
+  if (cachedFolderWeights && Date.now() < cachedFolderWeights.expiresAt) {
+    return cachedFolderWeights.value;
+  }
+  const weights = await getFolderWeightsUncached();
+  cachedFolderWeights = { value: weights, expiresAt: Date.now() + FOLDER_WEIGHTS_CACHE_TTL_MS };
+  return weights;
+}
+
+async function getFolderWeightsUncached(): Promise<FolderWeights> {
+  const raw = await getSetting('folder_weights');
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+  const weights: FolderWeights = {};
+  for (const [folderId, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) weights[folderId] = value;
+  }
+  return weights;
+}
+
+export async function setFolderWeights(weights: FolderWeights): Promise<void> {
+  await setSetting('folder_weights', JSON.stringify(weights));
 }
 
 // getEmbeddingConfig is on the hot path — every embed call (getEmbedding,

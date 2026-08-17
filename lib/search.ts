@@ -1,7 +1,7 @@
 // lib/search.ts — text (FTS + substring fallback), semantic (chunk-based), and hybrid (RRF) search
 import { query as dbQuery, toVector } from './db';
 import { getEmbedding, getMinSimilarity } from './embeddings';
-import { getFtsLanguages, getTagWeights, type TagWeights } from './settings';
+import { getFtsLanguages, getTagWeights, type TagWeights, getFolderWeights, type FolderWeights } from './settings';
 import { escapeLike } from './sql';
 import { TABLE_ROW_RE, TABLE_SEPARATOR_RE, unpairedFenceIndex } from './markdown';
 
@@ -174,8 +174,10 @@ export type SearchFilters = {
   updatedBefore?: string;
 };
 
-// search_notes_fts / match_chunks don't carry folder_id or updated_at, and
-// giving them extra params would mean a migration for what's a rarely-used,
+// match_chunks doesn't carry folder_id or updated_at at all, and
+// search_notes_fts's folder_id (migration 021) exists only for the weight
+// multiply below, not for filtering — giving either RPC an exact-match
+// filter param would mean a second migration for what's a rarely-used,
 // small-vault filter. Instead: resolve the filter to an id set once, overfetch
 // candidates from the existing RPCs, then keep only ids in the set. Cheap and
 // exact as long as the vault is a few hundred notes, not exact at huge scale
@@ -483,7 +485,7 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
 
 const CONFIDENCE_RANK: Record<Confidence, number> = { strong: 0, moderate: 1, weak: 2 };
 
-type FtsRow = { id: string; title: string; tags: string[]; rank: number; headline: string };
+type FtsRow = { id: string; title: string; tags: string[]; folder_id: string | null; rank: number; headline: string };
 type NoteRow = { id: string; title: string; content: string; tags: string[] };
 
 /**
@@ -681,11 +683,21 @@ function weightForTags(tags: string[], weights: TagWeights): number {
   return tags.reduce((acc, t) => acc * (weights[t] ?? 1), 1);
 }
 
+// Exact folder_id match only, same as SearchFilters.folderId's own semantics
+// (filteredNoteIds above) — no subtree recursion. A vault that wants a
+// whole book tree downweighted sets the weight on each folder in it; adding
+// recursion would need walking the folders table for every search call for
+// a case the roadmap didn't ask for.
+function weightForFolder(folderId: string | null | undefined, weights: FolderWeights): number {
+  return folderId ? (weights[folderId] ?? 1) : 1;
+}
+
 export async function textSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
   const fetchLimit = overfetchLimit(limit, filters);
-  const [rows, tagWeights] = await Promise.all([
+  const [rows, tagWeights, folderWeights] = await Promise.all([
     dbQuery<FtsRow>('select * from search_notes_fts($1, $2)', [query, fetchLimit]),
     getTagWeights(),
+    getFolderWeights(),
   ]);
 
   let orRows: FtsRow[] = [];
@@ -713,15 +725,15 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // per-query, dimensionless value, there is no absolute number that means
   // the same thing across two different queries. Both RPC calls already
   // order by rank desc, so each list's own head is that list's best.
-  // Tag weight multiplies the raw rank, before normalization — never
-  // relevance itself. relevance's 0..1 range is what confidenceFor()'s
+  // Tag and folder weight both multiply the raw rank, before normalization —
+  // never relevance itself. relevance's 0..1 range is what confidenceFor()'s
   // thresholds are calibrated against; multiplying it post-hoc could push
   // a hit above 1.0 or silently shift which confidence band it lands in.
   // Multiplying the raw score instead keeps relevance exactly what it's
   // always been ("how this compares to the best hit in this response") —
   // weight just gets a say in which hit that is. At the default empty
-  // weights map this is `n.rank * 1` for every row, i.e. unchanged.
-  const weightedRank = (n: FtsRow) => n.rank * weightForTags(n.tags, tagWeights);
+  // weights maps this is `n.rank * 1 * 1` for every row, i.e. unchanged.
+  const weightedRank = (n: FtsRow) => n.rank * weightForTags(n.tags, tagWeights) * weightForFolder(n.folder_id, folderWeights);
   const best = Math.max(0, ...rows.map(weightedRank), ...orRows.map(weightedRank));
   // Coverage only applies to the 'or' tier — an 'and' hit already matched
   // EVERY term websearch_to_tsquery's own parser produced for the strict

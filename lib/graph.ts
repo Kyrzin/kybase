@@ -1,32 +1,47 @@
 // lib/graph.ts — pure knowledge-graph helpers, safe to import from both the
 // server (API route, MCP tool) and the client (no DB import, so no `pg` in
 // the browser bundle). The DB-backed graph builder lives in lib/graph-data.ts.
+import { extractWikilinkTarget } from './wikilinks';
 
 export type GraphNode = { id: string; title: string };
 export type GraphEdge = { from: string; to: string };
 
 const WIKILINK_RE = /\[\[([^\]]+)\]\]/g;
 
+/** A [[wikilink]] whose target matches no note title in the given set. */
+export type UnresolvedLink = { from: string; target: string };
+
 /**
  * One directed edge per [[wikilink]] occurrence: titles resolve
  * case-insensitively, self-links are skipped. Repeated links to the same
  * target produce repeated edges — this matches the client graph, which
  * counts each occurrence. The server dedupes with dedupeEdges (below); do
- * the same if you need one edge per pair.
+ * the same if you need one edge per pair. `unresolved` carries every target
+ * that matched no known title, one entry per occurrence — dedupe by
+ * `target` for a "which links are broken" list, or keep `from` to also know
+ * which note carries it. Per-occurrence (not extractAllWikilinks, which
+ * dedupes within a note) so the repeated-link count above still holds.
  */
 export function buildWikilinkEdges(
   notes: { id: string; title: string; content: string }[]
-): GraphEdge[] {
+): { edges: GraphEdge[]; unresolved: UnresolvedLink[] } {
   const titleToId = new Map(notes.map(n => [n.title.toLowerCase(), n.id]));
+  const knownTitles = new Set(titleToId.keys());
   const edges: GraphEdge[] = [];
+  const unresolved: UnresolvedLink[] = [];
   for (const note of notes) {
     for (const m of note.content.matchAll(WIKILINK_RE)) {
-      const target = m[1].split(/[|#]/)[0].trim().toLowerCase();
-      const targetId = titleToId.get(target);
-      if (targetId && targetId !== note.id) edges.push({ from: note.id, to: targetId });
+      // The full title set is already in hand here, so this can prefer an
+      // exact "Title#3"-as-literal-title match over splitting at '#' — see
+      // extractWikilinkTarget's own comment for why that matters.
+      const target = extractWikilinkTarget(m[1], knownTitles);
+      if (!target) continue; // same-note anchor [[#Section]], no title to resolve
+      const targetId = titleToId.get(target.toLowerCase());
+      if (!targetId) { unresolved.push({ from: note.id, target }); continue; }
+      if (targetId !== note.id) edges.push({ from: note.id, to: targetId });
     }
   }
-  return edges;
+  return { edges, unresolved };
 }
 
 /** Collapse repeated (from, to) pairs to one edge, keeping first-seen order. */
@@ -46,6 +61,7 @@ export type IndexedGraph = {
   nodes: { i: number; id: string; t: string }[];
   edges: [number, number][];
   semantic_edges: [number, number, number][];
+  unresolved_links: string[];
 };
 
 /**
@@ -65,6 +81,7 @@ export function indexedForm(graph: {
   nodes: GraphNode[];
   edges: GraphEdge[];
   semantic_edges: (GraphEdge & { score: number })[];
+  unresolved_links?: string[];
 }): IndexedGraph {
   const indexById = new Map(graph.nodes.map((n, i) => [n.id, i]));
   const toIndexPair = (e: GraphEdge): [number, number] | null => {
@@ -81,5 +98,6 @@ export function indexedForm(graph: {
         return pair ? ([pair[0], pair[1], e.score] as [number, number, number]) : null;
       })
       .filter((t): t is [number, number, number] => t !== null),
+    unresolved_links: graph.unresolved_links ?? [],
   };
 }

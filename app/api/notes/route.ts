@@ -25,10 +25,16 @@ export async function GET(req: NextRequest) {
   if (offset > 0) { params.push(offset); paging += ` offset $${params.length}`; }
 
   try {
+    // content_updated_at only for the ORDER BY — a rename elsewhere
+    // rewriting a [[link]] to a note must not float it to the top of the
+    // sidebar. updated_at itself stays untouched in NOTE_SELECT: the
+    // browser editor's optimistic-concurrency guard (expected_updated_at)
+    // still needs the broad "did anything about this note's storable
+    // state change" signal (migration 020).
     const data = await query(
       `select ${NOTE_SELECT} from notes
        where ${conds.join(' and ')}
-       order by updated_at desc${paging}`,
+       order by content_updated_at desc${paging}`,
       params
     );
     return NextResponse.json(data);

@@ -630,8 +630,11 @@ async function computeTextCoverage(words: string[], ids: string[]): Promise<Map<
     const significantWordList = sigRows.filter((r) => r.significant).map((r) => r.word);
     if (significantWordList.length === 0) return null;
 
-    const langExprs = languages.map((_, i) => `websearch_to_tsquery($${i + 2}::regconfig, wt.word)`);
-    const tsqExpr = [`websearch_to_tsquery('simple', wt.word)`, ...langExprs].join(' || ');
+    // unaccent() to match how search_vector itself is built (migration 022)
+    // — a word here that still carries its accent would never match a
+    // vector whose source text was unaccented before tokenizing.
+    const langExprs = languages.map((_, i) => `websearch_to_tsquery($${i + 2}::regconfig, unaccent(wt.word))`);
+    const tsqExpr = [`websearch_to_tsquery('simple', unaccent(wt.word))`, ...langExprs].join(' || ');
     const idsParamIndex = languages.length + 2;
     const rows = await dbQuery<{ id: string; matched: number; total: number }>(
       `with word_tsq as (

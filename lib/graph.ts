@@ -58,7 +58,7 @@ export function dedupeEdges(edges: GraphEdge[]): GraphEdge[] {
 }
 
 export type IndexedGraph = {
-  nodes: { i: number; id: string; t: string }[];
+  nodes: { id: string; t: string }[];
   edges: [number, number][];
   semantic_edges: [number, number, number][];
   unresolved_links: string[];
@@ -76,6 +76,11 @@ export type IndexedGraph = {
  * An edge whose endpoint isn't in `nodes` (shouldn't happen — buildGraph
  * only ever edges within its own node set) is dropped rather than emitted
  * with a dangling index a consumer can't resolve.
+ *
+ * A node's own array position IS the index edges reference — an `i` field
+ * repeating that position inside each node object added ~1000 chars (~6% of
+ * a live get_graph response) for a value a consumer never needs to read
+ * (found live 2026-08-17, roadmap "мелочи" item).
  */
 export function indexedForm(graph: {
   nodes: GraphNode[];
@@ -90,7 +95,7 @@ export function indexedForm(graph: {
     return from !== undefined && to !== undefined ? [from, to] : null;
   };
   return {
-    nodes: graph.nodes.map((n, i) => ({ i, id: n.id, t: n.title })),
+    nodes: graph.nodes.map((n) => ({ id: n.id, t: n.title })),
     edges: graph.edges.map(toIndexPair).filter((p): p is [number, number] => p !== null),
     semantic_edges: graph.semantic_edges
       .map((e) => {

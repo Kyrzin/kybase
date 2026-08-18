@@ -8,24 +8,18 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import type { Note, Folder } from '@/lib/types';
 
-// Reindex reports per-note failures. A note whose embedding failed drops out
-// of semantic search with nothing on screen to say so, so both a refused
-// request and a partial run have to reach the status line — reading counts
-// off an error body would render "Reindexed 0 notes." as success.
-type ReindexResponse = { reindexed?: number; total?: number; errors?: string[]; error?: string };
-async function readReindex(res: Response): Promise<{ text: string; failed: boolean }> {
-  const body: ReindexResponse = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    return { text: `Reindex failed: ${body.error ?? `HTTP ${res.status}`}`, failed: true };
-  }
-  const done = body.reindexed ?? 0;
-  const failed = body.errors?.length ?? 0;
-  if (failed === 0) return { text: `Done. Reindexed ${done} notes.`, failed: false };
-  return {
-    text: `Reindexed ${done} of ${body.total ?? done + failed}. ${failed} failed — see server logs.`,
-    failed: true,
-  };
-}
+// Reindex now runs in the background (see /api/admin/reindex) so a long
+// batch survives a slow browser/proxy — the modal polls this shape for
+// live progress and, on failure, exactly which note and why.
+type ReindexError = { id: string; title: string; message: string };
+type ReindexProgress = {
+  running: boolean;
+  done: number;
+  total: number;
+  errors: ReindexError[];
+  stoppedEarly?: string;
+  cancelled?: boolean;
+};
 
 type OAuthClient = { id: string; client_name: string | null; created_at: string; last_used_at: string; expires_at: string };
 // token is null for a share created before the token-hashing migration —
@@ -49,6 +43,8 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   const [settingsStatus, setSettingsStatus]   = useState<string | null>(null);
   const [settingsFailed, setSettingsFailed]   = useState(false);
   const [reindexRunning, setReindexRunning]   = useState(false);
+  const [reindexProgress, setReindexProgress] = useState<ReindexProgress | null>(null);
+  const [stopping, setStopping]               = useState(false);
   const [importRunning, setImportRunning]     = useState(false);
   const [settingsTab, setSettingsTab]         = useState<'embeddings' | 'access'>('embeddings');
   const [oauthClients, setOauthClients]       = useState<OAuthClient[]>([]);
@@ -126,6 +122,58 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
     return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
   });
 
+  // Starts a reindex (or attaches to one already running, e.g. the hourly
+  // sweep) and polls it until done, updating the progress bar and error
+  // list as results come in.
+  const runReindex = async (mode: 'pending' | 'all') => {
+    setReindexRunning(true);
+    setSettingsFailed(false);
+    setReindexProgress(null);
+    setStopping(false);
+    setSettingsStatus(mode === 'all' ? 'Reindexing all notes…' : 'Reindexing…');
+    try {
+      const startRes = await apiFetch(`/api/admin/reindex${mode === 'all' ? '?mode=all' : ''}`, { method: 'POST' });
+      if (!startRes.ok && startRes.status !== 409) {
+        const body = await startRes.json().catch(() => ({}));
+        setSettingsFailed(true);
+        setSettingsStatus(`Reindex failed: ${body.error ?? `HTTP ${startRes.status}`}`);
+        return;
+      }
+      if (startRes.status === 409) setSettingsStatus('A reindex is already running — watching progress…');
+
+      let final: ReindexProgress | null = null;
+      for (;;) {
+        const p: ReindexProgress = await (await apiFetch('/api/admin/reindex')).json();
+        setReindexProgress(p);
+        if (!p.running) { final = p; break; }
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      const failed = final.errors.length;
+      setSettingsFailed(!final.cancelled && (failed > 0 || !!final.stoppedEarly));
+      setSettingsStatus(
+        final.cancelled ? `Stopped. Reindexed ${final.done} of ${final.total} before stopping.`
+        : final.stoppedEarly ? final.stoppedEarly
+        : failed === 0 ? `Done. Reindexed ${final.done} notes.`
+        : `Reindexed ${final.done - failed} of ${final.total}, ${failed} failed — see below.`
+      );
+    } catch {
+      setSettingsFailed(true);
+      setSettingsStatus('Reindex failed.');
+    } finally {
+      setReindexRunning(false);
+      setStopping(false);
+    }
+  };
+
+  const stopReindex = async () => {
+    setStopping(true);
+    try {
+      await apiFetch('/api/admin/reindex', { method: 'DELETE' });
+    } catch {
+      setStopping(false);
+    }
+  };
+
   const saveSettings = async () => {
     setSettingsSaving(true);
     setSettingsStatus(null);
@@ -135,17 +183,12 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
       if (settingsOpenaiKey) body.openaiApiKey = settingsOpenaiKey;
       const res = await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
       const data = await res.json();
-      if (data.reindexTriggered) {
-        setSettingsStatus('Saved. Reindexing…');
-        setReindexRunning(true);
-        const summary = await readReindex(await apiFetch('/api/admin/reindex', { method: 'POST' }));
-        setSettingsStatus(summary.text);
-        setSettingsFailed(summary.failed);
-        setReindexRunning(false);
-      } else {
-        setSettingsFailed(false);
-        setSettingsStatus('Settings saved.');
-      }
+      setSettingsFailed(false);
+      setSettingsStatus(
+        data.reindexTriggered
+          ? `Saved. ${data.pendingCount ?? 0} notes marked for reindex — click "Reindex" below to run it.`
+          : 'Settings saved.'
+      );
     } catch {
       setSettingsFailed(true);
       setSettingsStatus('Failed to save.');
@@ -259,64 +302,74 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
             )}
 
             <div style={{ fontSize: 11, color: '#6c7086', background: '#11111b', borderRadius: 6, padding: '8px 10px', marginBottom: 16 }}>
-              Switching the provider automatically re-indexes all notes. &quot;Reindex&quot; below only
-              catches notes that were never embedded — after an update that changes how embeddings
-              themselves are computed, use &quot;Reindex all&quot; to recompute every note.
+              Switching the provider marks every note for reindexing but doesn&apos;t run it —
+              click &quot;Reindex&quot; below when ready. &quot;Reindex&quot; only catches notes that
+              were never embedded; after an update that changes how embeddings themselves are
+              computed, use &quot;Reindex all&quot; to recompute every note.
             </div>
 
             {settingsStatus && (
-              <div style={{ fontSize: 12, color: reindexRunning ? '#f9e2af' : settingsFailed ? '#f38ba8' : '#a6e3a1', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ fontSize: 12, color: reindexRunning ? '#f9e2af' : settingsFailed ? '#f38ba8' : '#a6e3a1', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
                 {reindexRunning && <div style={{ width: 10, height: 10, border: '2px solid #313244', borderTopColor: '#f9e2af', borderRadius: '50%', animation: 'spin 0.6s linear infinite', flexShrink: 0 }} />}
                 {settingsStatus}
               </div>
             )}
 
+            {reindexRunning && reindexProgress && reindexProgress.total > 0 && (
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ height: 6, background: '#11111b', borderRadius: 3, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', width: `${Math.round((reindexProgress.done / reindexProgress.total) * 100)}%`, background: '#89b4fa', transition: 'width 0.3s' }} />
+                </div>
+                <div style={{ fontSize: 11, color: '#6c7086', marginTop: 4 }}>
+                  {reindexProgress.done} / {reindexProgress.total} ({Math.round((reindexProgress.done / reindexProgress.total) * 100)}%)
+                </div>
+              </div>
+            )}
+
+            {reindexProgress && reindexProgress.errors.length > 0 && (
+              <div style={{ maxHeight: 140, overflowY: 'auto', marginBottom: 12, background: '#11111b', borderRadius: 6, padding: '6px 8px' }}>
+                {reindexProgress.errors.map((e, i) => (
+                  <div key={`${e.id}-${i}`} style={{ fontSize: 11, padding: '4px 0', borderBottom: i < reindexProgress.errors.length - 1 ? '1px solid #1e1e2e' : 'none' }}>
+                    <div style={{ color: '#cdd6f4', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.title || e.id}</div>
+                    <div style={{ color: '#f38ba8' }}>{e.message}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div style={{ display: 'flex', gap: 8 }}>
-              <button
-                onClick={async () => {
-                  setReindexRunning(true);
-                  setSettingsFailed(false);
-                  setSettingsStatus('Reindexing…');
-                  try {
-                    const summary = await readReindex(await apiFetch('/api/admin/reindex', { method: 'POST' }));
-                    setSettingsStatus(summary.text);
-                    setSettingsFailed(summary.failed);
-                  } catch {
-                    setSettingsFailed(true);
-                    setSettingsStatus('Reindex failed.');
-                  } finally {
-                    setReindexRunning(false);
-                  }
-                }}
-                disabled={reindexRunning || settingsSaving}
-                title="Only re-embeds notes that were never embedded"
-                style={{ flex: 1, background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '9px 0', fontSize: 13, fontWeight: 600, cursor: reindexRunning || settingsSaving ? 'not-allowed' : 'pointer', opacity: reindexRunning || settingsSaving ? 0.7 : 1, fontFamily: 'inherit' }}
-              >
-                {reindexRunning ? 'Indexing…' : 'Reindex'}
-              </button>
-              <button
-                onClick={async () => {
-                  if (!window.confirm('Recompute embeddings for every note? This can take a while on a large vault.')) return;
-                  setReindexRunning(true);
-                  setSettingsFailed(false);
-                  setSettingsStatus('Reindexing all notes…');
-                  try {
-                    const summary = await readReindex(await apiFetch('/api/admin/reindex?mode=all', { method: 'POST' }));
-                    setSettingsStatus(summary.text);
-                    setSettingsFailed(summary.failed);
-                  } catch {
-                    setSettingsFailed(true);
-                    setSettingsStatus('Reindex failed.');
-                  } finally {
-                    setReindexRunning(false);
-                  }
-                }}
-                disabled={reindexRunning || settingsSaving}
-                title="Recompute every note's embedding, even already-indexed ones"
-                style={{ flex: 1, background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '9px 0', fontSize: 13, fontWeight: 600, cursor: reindexRunning || settingsSaving ? 'not-allowed' : 'pointer', opacity: reindexRunning || settingsSaving ? 0.7 : 1, fontFamily: 'inherit' }}
-              >
-                Reindex all
-              </button>
+              {reindexRunning ? (
+                <button
+                  onClick={stopReindex}
+                  disabled={stopping}
+                  title="Stop after the note currently being embedded — the rest stay queued for the next run"
+                  style={{ flex: 2, background: '#313244', border: '1px solid #f38ba8', borderRadius: 6, color: '#f38ba8', padding: '9px 0', fontSize: 13, fontWeight: 600, cursor: stopping ? 'not-allowed' : 'pointer', opacity: stopping ? 0.7 : 1, fontFamily: 'inherit' }}
+                >
+                  {stopping ? 'Stopping…' : 'Stop'}
+                </button>
+              ) : (
+                <>
+                  <button
+                    onClick={() => runReindex('pending')}
+                    disabled={settingsSaving}
+                    title="Only re-embeds notes that were never embedded"
+                    style={{ flex: 1, background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '9px 0', fontSize: 13, fontWeight: 600, cursor: settingsSaving ? 'not-allowed' : 'pointer', opacity: settingsSaving ? 0.7 : 1, fontFamily: 'inherit' }}
+                  >
+                    Reindex
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (!window.confirm('Recompute embeddings for every note? This can take a while on a large vault.')) return;
+                      runReindex('all');
+                    }}
+                    disabled={settingsSaving}
+                    title="Recompute every note's embedding, even already-indexed ones"
+                    style={{ flex: 1, background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '9px 0', fontSize: 13, fontWeight: 600, cursor: settingsSaving ? 'not-allowed' : 'pointer', opacity: settingsSaving ? 0.7 : 1, fontFamily: 'inherit' }}
+                  >
+                    Reindex all
+                  </button>
+                </>
+              )}
               <button
                 onClick={saveSettings}
                 disabled={settingsSaving || reindexRunning}

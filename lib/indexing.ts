@@ -2,7 +2,7 @@
 // whole-note embedding + per-chunk embeddings. Used by the notes API,
 // the MCP server, the admin reindex endpoint, and scripts/reindex.ts.
 import { getPool, toVector } from './db';
-import { getEmbedding, getEmbedConcurrency } from './embeddings';
+import { getEmbedding, getEmbedConcurrency, EmbedCancelledError } from './embeddings';
 import { chunkNote } from './chunking';
 import { invalidateSemanticEdgesCache } from './semantic-edges';
 
@@ -20,11 +20,11 @@ function isContextOverflow(err: unknown): boolean {
   return err instanceof Error && /context length|maximum context|too (long|large)|token/i.test(err.message);
 }
 
-async function embedNoteHead(title: string, content: string): Promise<number[]> {
+async function embedNoteHead(title: string, content: string, isCancelled?: () => boolean): Promise<number[]> {
   const full = `${title}\n\n${content}`;
   for (let budget = NOTE_EMBED_MAX_CHARS; ; budget = Math.floor(budget / 2)) {
     try {
-      return await getEmbedding(full.slice(0, budget), 'document');
+      return await getEmbedding(full.slice(0, budget), 'document', isCancelled);
     } catch (err) {
       if (budget <= NOTE_EMBED_MIN_CHARS || !isContextOverflow(err)) throw err;
     }
@@ -36,17 +36,18 @@ async function embedNoteHead(title: string, content: string): Promise<number[]> 
  * All embeddings are computed before any rows are touched, so a provider
  * failure leaves the previous index intact (embedding_pending stays true).
  */
-export async function indexNote(id: string, title: string, content: string): Promise<void> {
-  const noteEmbedding = await embedNoteHead(title, content);
+export async function indexNote(id: string, title: string, content: string, isCancelled?: () => boolean): Promise<void> {
+  const noteEmbedding = await embedNoteHead(title, content, isCancelled);
 
   const { chunks: chunkConcurrency } = await getEmbedConcurrency();
   const chunks = chunkNote(content);
   const chunkRows = [];
   for (let i = 0; i < chunks.length; i += chunkConcurrency) {
+    if (isCancelled?.()) throw new EmbedCancelledError();
     const batch = chunks.slice(i, i + chunkConcurrency);
     const embedded = await Promise.all(batch.map(async (chunk) => {
       const context = chunk.heading ? `${title} › ${chunk.heading}` : title;
-      const embedding = await getEmbedding(`${context}\n\n${chunk.content}`, 'document');
+      const embedding = await getEmbedding(`${context}\n\n${chunk.content}`, 'document', isCancelled);
       return {
         note_id:     id,
         chunk_index: chunk.index,

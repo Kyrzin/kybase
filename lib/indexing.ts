@@ -2,7 +2,7 @@
 // whole-note embedding + per-chunk embeddings. Used by the notes API,
 // the MCP server, the admin reindex endpoint, and scripts/reindex.ts.
 import { getPool, toVector } from './db';
-import { getEmbedding, getEmbedConcurrency, EmbedCancelledError } from './embeddings';
+import { getEmbedding, getEmbedConcurrency, EmbedCancelledError, isQuotaExhausted } from './embeddings';
 import { chunkNote } from './chunking';
 import { invalidateSemanticEdgesCache } from './semantic-edges';
 
@@ -16,6 +16,14 @@ import { invalidateSemanticEdgesCache } from './semantic-edges';
 const NOTE_EMBED_MAX_CHARS = 8000;
 const NOTE_EMBED_MIN_CHARS = 1000;
 
+// Deliberately loose (`token` alone matches plenty), because the providers
+// word this differently and a missed overflow means a long note silently
+// absent from semantic search. The looseness is safe ONLY because
+// isQuotaExhausted is consulted first below — Google's 429 bodies name
+// token-based quota metrics, so this test matches them too, and without
+// that guard a rate-limited note would walk down the halve-the-budget path
+// spending four extra requests per note mid-quota-storm, then store a
+// truncated embedding on whichever attempt happened to get through.
 function isContextOverflow(err: unknown): boolean {
   return err instanceof Error && /context length|maximum context|too (long|large)|token/i.test(err.message);
 }
@@ -26,6 +34,8 @@ async function embedNoteHead(title: string, content: string, isCancelled?: () =>
     try {
       return await getEmbedding(full.slice(0, budget), 'document', isCancelled);
     } catch (err) {
+      // Order matters: a quota refusal says nothing about this note's size.
+      if (isQuotaExhausted(err)) throw err;
       if (budget <= NOTE_EMBED_MIN_CHARS || !isContextOverflow(err)) throw err;
     }
   }

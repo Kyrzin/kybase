@@ -92,6 +92,27 @@ export async function withTransaction<T>(
  */
 export const FOLDER_REPARENT_LOCK_KEY = 0x666f6c64; // 'fold'
 
+/**
+ * Advisory-lock key admitting one bulk reindex at a time (lib/reindex.ts).
+ * Three callers can otherwise overlap on the same notes — the Settings
+ * buttons, a second click after the page was reloaded mid-run, and the
+ * hourly sweep in instrumentation.ts — each paying the provider's metered
+ * quota for work another one is already doing.
+ *
+ * Session-scoped (`pg_try_advisory_lock` on a dedicated client, released in
+ * a finally), not xact-scoped like the key above: a bulk run is hundreds of
+ * provider round trips long, far too much to hold a transaction open for.
+ * Chosen over an in-process flag because that flag dies with the process —
+ * a container restart mid-run would let the next caller start a second run
+ * over the same notes with no memory of the first.
+ *
+ * Shares the single-key advisory space with the hashtext() per-note keys in
+ * lib/indexing.ts (as FOLDER_REPARENT_LOCK_KEY already does): a collision is
+ * possible in principle and costs one spurious "already running", never a
+ * lost update.
+ */
+export const REINDEX_LOCK_KEY = 0x7265696e; // 'rein'
+
 /** True when the error is a Postgres unique-constraint violation. */
 export function isUniqueViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: string }).code === '23505';

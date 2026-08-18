@@ -1,9 +1,9 @@
 // lib/reindex.ts — shared "embed everything that's pending" loop, used by
 // POST /api/admin/reindex, the hourly sweep (instrumentation.ts), and the
 // background pass fired after an import.
-import { query } from './db';
+import { query, getPool, REINDEX_LOCK_KEY } from './db';
 import { indexNote } from './indexing';
-import { getEmbedConcurrency, EmbedCancelledError } from './embeddings';
+import { getEmbedConcurrency, EmbedCancelledError, isQuotaExhausted } from './embeddings';
 
 export type ReindexError = { id: string; title: string; message: string };
 export type ReindexProgress = {
@@ -26,12 +26,16 @@ export function getReindexProgress(): ReindexProgress | null {
   return progress;
 }
 
-// A run of consecutive full-retry failures almost always means the
-// provider's quota is exhausted for the window (RPM, or the whole day) —
-// not that these particular notes are bad. Grinding through the rest of a
-// 100+ note batch at 5 retries each just burns time and quota that'll be
-// needed once it resets; the hourly sweep (instrumentation.ts) picks up
-// whatever's left.
+// A run of consecutive QUOTA failures means the provider's ceiling for the
+// window (RPM, or the whole day) is reached — not that these particular
+// notes are bad. Grinding through the rest of a 100+ note batch at 5
+// retries each just burns time and quota that'll be needed once it resets;
+// the hourly sweep (instrumentation.ts) picks up whatever's left.
+//
+// Only quota refusals count, and any other failure resets the streak: five
+// genuinely broken notes in a row (bad input, a DB hiccup) say nothing
+// about the provider, and stopping the run on them — while reporting
+// "likely a quota limit" — would be both wrong and misleading.
 const CONSECUTIVE_FAILURE_LIMIT = 5;
 
 async function reindexRows(current: ReindexProgress, rows: { id: string; title: string; content: string }[]): Promise<void> {
@@ -48,7 +52,13 @@ async function reindexRows(current: ReindexProgress, rows: { id: string; title: 
         return { ok: true as const };
       } catch (err) {
         if (err instanceof EmbedCancelledError) return { ok: 'cancelled' as const };
-        return { ok: false as const, id: note.id, title: note.title, message: err instanceof Error ? err.message : 'unknown error' };
+        return {
+          ok: false as const,
+          id: note.id,
+          title: note.title,
+          message: err instanceof Error ? err.message : 'unknown error',
+          quota: isQuotaExhausted(err),
+        };
       }
     }));
 
@@ -58,7 +68,7 @@ async function reindexRows(current: ReindexProgress, rows: { id: string; title: 
       if (r.ok) {
         consecutiveFailures = 0;
       } else {
-        consecutiveFailures++;
+        consecutiveFailures = r.quota ? consecutiveFailures + 1 : 0;
         current.errors.push({ id: r.id, title: r.title, message: r.message });
       }
     }
@@ -66,20 +76,60 @@ async function reindexRows(current: ReindexProgress, rows: { id: string; title: 
     if (isCancelled()) return;
 
     if (consecutiveFailures >= CONSECUTIVE_FAILURE_LIMIT) {
-      current.stoppedEarly = `Stopped after ${consecutiveFailures} notes failed in a row (likely a quota limit) — ${rows.length - current.done} notes left pending for the next sweep.`;
+      current.stoppedEarly = `Stopped after ${consecutiveFailures} notes hit the provider's quota in a row — ${rows.length - current.done} notes left pending for the next sweep.`;
       return;
     }
   }
 }
 
 async function run(current: ReindexProgress, mode: 'pending' | 'all'): Promise<void> {
-  const rows = mode === 'all'
-    ? await query<{ id: string; title: string; content: string }>(
-        'select id, title, content from notes where deleted_at is null order by created_at')
-    : await query<{ id: string; title: string; content: string }>(
-        'select id, title, content from notes where embedding_pending = true and deleted_at is null');
+  // "all" flags every note first, then runs the same pending query. Without
+  // this the two modes disagree about what "unfinished" means: "all" picked
+  // its rows straight from notes and never touched embedding_pending, so an
+  // interrupted run — Stop, the quota breaker, or a container restart — left
+  // the notes it never reached NOT pending, the hourly sweep skipped them,
+  // and they kept their stale embeddings forever while the UI said they were
+  // "left pending for the next sweep". One UPDATE makes that sentence true
+  // and makes every interruption resumable, in both modes, for free.
+  if (mode === 'all') {
+    await query('update notes set embedding_pending = true where deleted_at is null');
+  }
+  const rows = await query<{ id: string; title: string; content: string }>(
+    'select id, title, content from notes where embedding_pending = true and deleted_at is null order by created_at'
+  );
   current.total = rows.length;
   await reindexRows(current, rows);
+}
+
+/**
+ * Same run, behind a Postgres advisory lock (lib/db.ts REINDEX_LOCK_KEY).
+ * The in-memory `progress` flag above already stops a second run inside
+ * THIS process; the lock is what survives the process — a container restart
+ * mid-run leaves no in-memory trace, and the sweep firing 15s after boot
+ * would happily start a second pass over notes an abandoned run was still
+ * embedding. Session-scoped, on its own client, released in a finally: a
+ * bulk run is far too long to hold a transaction open for.
+ *
+ * Losing the race is not an error — it means someone else is already doing
+ * this work. The run ends immediately and says so; the client is polling
+ * GET anyway and shows it.
+ */
+async function runLocked(current: ReindexProgress, mode: 'pending' | 'all'): Promise<void> {
+  const client = await getPool().connect();
+  try {
+    const { rows } = await client.query<{ locked: boolean }>('select pg_try_advisory_lock($1) as locked', [REINDEX_LOCK_KEY]);
+    if (!rows[0]?.locked) {
+      current.stoppedEarly = 'Another reindex is already running — this one did nothing.';
+      return;
+    }
+    try {
+      await run(current, mode);
+    } finally {
+      await client.query('select pg_advisory_unlock($1)', [REINDEX_LOCK_KEY]);
+    }
+  } finally {
+    client.release();
+  }
 }
 
 /**
@@ -95,7 +145,7 @@ export function startReindex(mode: 'pending' | 'all'): { started: boolean; progr
   const current: ReindexProgress = { running: true, mode, done: 0, total: 0, errors: [], startedAt: Date.now() };
   progress = current;
 
-  run(current, mode)
+  runLocked(current, mode)
     .catch(err => {
       current.errors.push({ id: '-', title: '-', message: err instanceof Error ? err.message : 'unknown error' });
     })

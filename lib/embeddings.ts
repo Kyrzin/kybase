@@ -51,6 +51,30 @@ export class EmbedCancelledError extends Error {
   constructor() { super('Reindex cancelled'); }
 }
 
+/**
+ * True when an error is the provider refusing on quota rather than failing
+ * on this particular input. A 429 that already survived fetchWithRetry's
+ * attempts is not a transient burst any more — it's the ceiling, and every
+ * further note buys another full ladder of futile requests.
+ *
+ * Two callers, both of which get it wrong without this distinction:
+ *   - lib/reindex.ts counts a quota streak, not any-failure streak, so five
+ *     genuinely broken notes in a row don't get reported as "quota".
+ *   - lib/indexing.ts's embedNoteHead must NOT mistake this for a context
+ *     overflow: its overflow test matches /token/i against the message, and
+ *     Google's quota metrics are token-named, so a 429 body could send a
+ *     note down the halve-the-budget path and store a silently truncated
+ *     embedding. Checked before that test, never after.
+ *
+ * Message-based by necessity — the provider errors are thrown as strings by
+ * each *Embed function — but anchored on 429/RESOURCE_EXHAUSTED markers
+ * rather than loose wording.
+ */
+export function isQuotaExhausted(err: unknown): boolean {
+  return err instanceof Error
+    && /\(429\)|RESOURCE_EXHAUSTED|exceeded your current quota|rate limit/i.test(err.message);
+}
+
 export async function getEmbedding(text: string, task: EmbedTask = 'document', isCancelled?: () => boolean): Promise<number[]> {
   const cfg = await getEmbeddingConfig();
   switch (cfg.provider) {
@@ -119,7 +143,13 @@ async function sleepCancellable(ms: number, isCancelled?: () => boolean): Promis
 async function fetchWithRetry(
   url: string,
   init: RequestInit,
-  opts: { attempts?: number; onRateLimited?: () => void; isCancelled?: () => boolean } = {}
+  // `pace` is awaited before EVERY attempt, retries included: a retry is a
+  // request like any other and the provider's per-minute meter counts it.
+  // Pacing only the first attempt (as this did initially) means a note that
+  // hits 429 five times spends five slots' worth of quota while the gate
+  // thinks it spent one — the exact shape of the 693-request storm this
+  // whole path exists to prevent.
+  opts: { attempts?: number; onRateLimited?: () => void; isCancelled?: () => boolean; pace?: () => Promise<void> } = {}
 ): Promise<Response> {
   const attempts = opts.attempts ?? 5;
   const MAX_WAIT_MS = 30_000; // same ceiling as our own backoff — a quota
@@ -132,6 +162,7 @@ async function fetchWithRetry(
   let delay = 2000;
   for (let i = 0; ; i++) {
     if (opts.isCancelled?.()) throw new EmbedCancelledError();
+    if (opts.pace) await opts.pace();
     const res = await fetch(url, { ...init, signal: AbortSignal.timeout(EMBED_TIMEOUT_MS) });
     if (res.status !== 429 || i >= attempts - 1) return res;
     opts.onRateLimited?.();
@@ -245,7 +276,6 @@ function googlePace(isCancelled?: () => boolean): Promise<void> {
 async function googleEmbed(text: string, apiKey?: string, isCancelled?: () => boolean): Promise<number[]> {
   if (!apiKey) throw new Error('Google API key is not configured');
   const model = process.env.GOOGLE_MODEL ?? 'text-embedding-004';
-  await googlePace(isCancelled);
   const res = await fetchWithRetry(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${apiKey}`,
     {
@@ -253,7 +283,11 @@ async function googleEmbed(text: string, apiKey?: string, isCancelled?: () => bo
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: `models/${model}`, content: { parts: [{ text }] }, outputDimensionality: 768 }),
     },
-    { onRateLimited: () => { googleGapMs = Math.min(googleGapMs * 1.5, GOOGLE_MAX_GAP_MS); }, isCancelled }
+    {
+      onRateLimited: () => { googleGapMs = Math.min(googleGapMs * 1.5, GOOGLE_MAX_GAP_MS); },
+      isCancelled,
+      pace: () => googlePace(isCancelled),
+    }
   );
   if (!res.ok) throw new Error(`Google embed error (${res.status}): ${(await res.text()).slice(0, 200)}`);
   googleGapMs = Math.max(GOOGLE_MIN_GAP_MS, googleGapMs * 0.9);

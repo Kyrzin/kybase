@@ -83,6 +83,59 @@ export async function setFtsLanguages(languages: string[]): Promise<void> {
   await setSetting('fts_languages', languages.map((s) => s.trim()).filter(Boolean).join(','));
 }
 
+export type BandOverride = { gate?: number; signalFloor?: number };
+
+// Measured noise/signal bands per embedding model, keyed by the provider+model
+// string lib/embeddings.ts builds. Empty by default: the code carries the
+// bands it has actually measured, and this only overrides them — so measuring
+// a new model is a settings write, not a code change and a redeploy.
+//
+// Cached with the same TTL and for the same reason as the weights below:
+// lib/search.ts reads it on every semantic/hybrid call.
+const BANDS_CACHE_TTL_MS = 5_000;
+let cachedBands: { value: Record<string, BandOverride>; expiresAt: number } | null = null;
+
+export async function getBandOverride(modelKey: string): Promise<BandOverride | null> {
+  if (!cachedBands || Date.now() >= cachedBands.expiresAt) {
+    cachedBands = { value: await getBandsUncached(), expiresAt: Date.now() + BANDS_CACHE_TTL_MS };
+  }
+  return cachedBands.value[modelKey] ?? null;
+}
+
+async function getBandsUncached(): Promise<Record<string, BandOverride>> {
+  const raw = await getSetting('embedding_bands');
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+  const out: Record<string, BandOverride> = {};
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== 'object' || value === null) continue;
+    const v = value as Record<string, unknown>;
+    const band: BandOverride = {};
+    // A cosine band only makes sense inside [0, 1), and the floor has to sit
+    // ABOVE the gate or the fraction the ladder computes from them inverts.
+    // A hand-edited row must degrade to "unmeasured" (the ladder then refuses
+    // to claim full corroboration), never to a silently inverted scale.
+    if (typeof v.gate === 'number' && Number.isFinite(v.gate) && v.gate >= 0 && v.gate < 1) band.gate = v.gate;
+    if (typeof v.signalFloor === 'number' && Number.isFinite(v.signalFloor) && v.signalFloor > 0 && v.signalFloor < 1) {
+      band.signalFloor = v.signalFloor;
+    }
+    if (band.gate !== undefined && band.signalFloor !== undefined && band.signalFloor <= band.gate) continue;
+    if (band.gate !== undefined || band.signalFloor !== undefined) out[key] = band;
+  }
+  return out;
+}
+
+export async function setEmbeddingBands(bands: Record<string, BandOverride>): Promise<void> {
+  await setSetting('embedding_bands', JSON.stringify(bands));
+  cachedBands = null;
+}
+
 export type TagWeights = Record<string, number>;
 
 // Mechanic lives in code (lib/search.ts multiplies a hit's raw score by

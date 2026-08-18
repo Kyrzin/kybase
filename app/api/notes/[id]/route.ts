@@ -4,6 +4,7 @@ import {
 } from '@/lib/db';
 import { indexNoteAsync } from '@/lib/indexing';
 import { softDeleteNote } from '@/lib/trash';
+import { rewriteBacklinks } from '@/lib/rename-links';
 import { MAX_NOTE_CONTENT_CHARS, stripNulBytes } from '@/lib/types';
 import { z } from 'zod';
 
@@ -137,7 +138,7 @@ export async function PATCH(
       );
       const note = rows[0] ?? null;
       if (titleChanged && note) {
-        await client.query('select update_wikilinks($1, $2)', [existing.title, parsed.data.title!]);
+        await rewriteBacklinks(client, existing.title, parsed.data.title!);
       }
       return {
         note,

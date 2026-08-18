@@ -84,6 +84,65 @@ export function extractWikilinkTarget(raw: string, knownTitles?: Set<string>): s
   return raw.split(/[#|]/)[0].trim();
 }
 
+/**
+ * Point every [[Old Title]] in `text` at `newTitle`, preserving each link's
+ * own `#section` / `|alias` suffix. Returns null when nothing matched, so a
+ * caller can skip the write entirely.
+ *
+ * Replaces the regexp_replace inside the SQL update_wikilinks (migration
+ * 020). Two things that function could not do:
+ *
+ *   1. It rewrote inside code. A note showing `[[Old Title]]` as an EXAMPLE
+ *      had its example silently edited when some unrelated note was renamed
+ *      — and migration 020 deliberately suppresses content_updated_at for
+ *      backlink rewrites, so the edit left no trace any "what changed" query
+ *      could surface. This walks the same link spans maskCode() already
+ *      excludes code from.
+ *   2. It matched by pattern, so the title had to be regex-escaped on the
+ *      way in and the replacement backslash-escaped on the way out — two
+ *      escaping layers that migrations 003 and 006 were both bug fixes for.
+ *      Here the link is parsed, not matched: nothing is ever interpreted.
+ *
+ * One deliberate behaviour change: `[[ Old Title ]]` (padded with spaces) is
+ * now rewritten too. The SQL pattern required the title to touch the
+ * brackets, so a padded link was left pointing at a title that no longer
+ * exists — while extractWikilinkTarget trims, meaning the link RESOLVED
+ * before the rename and broke after it. Rewriting it keeps resolution and
+ * rewriting consistent.
+ */
+export function rewriteWikilinkTarget(content: string, oldTitle: string, newTitle: string): string | null {
+  const oldLower = oldTitle.trim().toLowerCase();
+  if (!oldLower) return null;
+  const masked = maskCode(content);
+  let out = '';
+  let cursor = 0;
+  let hits = 0;
+
+  for (const m of masked.matchAll(WIKILINK_RE)) {
+    const start = m.index;
+    const raw = content.slice(start + 2, start + m[0].length - 2);
+    const split = splitAtOldTitle(raw, oldLower);
+    if (!split) continue;
+    out += content.slice(cursor, start) + '[[' + newTitle + split.suffix + ']]';
+    cursor = start + m[0].length;
+    hits++;
+  }
+  return hits ? out + content.slice(cursor) : null;
+}
+
+/**
+ * The link's `#section`/`|alias` tail when its target is `oldLower`, else
+ * null. A title containing '#' or '|' itself (e.g. "closed CodeQL #3") is
+ * checked whole first, for the same reason extractWikilinkTarget prefers a
+ * known title over splitting: a real thing beats a guess.
+ */
+function splitAtOldTitle(raw: string, oldLower: string): { suffix: string } | null {
+  if (raw.trim().toLowerCase() === oldLower) return { suffix: '' };
+  const i = raw.search(/[#|]/);
+  if (i === -1) return null;
+  return raw.slice(0, i).trim().toLowerCase() === oldLower ? { suffix: raw.slice(i) } : null;
+}
+
 /** Return all unique target note titles found in `text` (code excluded). */
 export function extractAllWikilinks(text: string, knownTitles?: Set<string>): string[] {
   const targets = new Set<string>();

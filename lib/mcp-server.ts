@@ -463,12 +463,16 @@ export function createMcpServer(): McpServer {
   );
 
   // ── create_note ──────────────────────────────────────────────────────────
+  // create_note and update_note used to restate this server's wikilink and
+  // tag rules in full. Those rules are already in `instructions` above, which
+  // every client receives once per session, so the copies cost the same bytes
+  // on every schema load while saying nothing new. What a tool description
+  // still has to carry is the CUE that they apply at this call — that stays.
   server.tool(
     'create_note',
     'Create a new note. Embedding is generated automatically in the background. ' +
-    'Before creating, search_notes for the topic and include [[wikilinks]] to related existing notes ' +
-    '(copy titles exactly from tool results — never invent them). Before adding tags, call list_tags ' +
-    'and reuse an existing tag if one matches — do not create RU/EN duplicates.',
+    'The server instructions\' wikilink and tag rules apply: search_notes for the topic first and ' +
+    'link the related notes it finds, and call list_tags before coining a new tag.',
     {
       title:     z.string().trim().min(1).max(500),
       content:   z.string().max(MAX_NOTE_CONTENT_CHARS).default(''),
@@ -509,9 +513,7 @@ export function createMcpServer(): McpServer {
   server.tool(
     'update_note',
     'Update note fields. Re-embeds if title or content changed. Updates wikilinks if title changed. ' +
-    'When substantially rewriting content, consider adding [[wikilinks]] to related notes found via ' +
-    'search_notes (copy titles exactly from tool results). Before adding tags, call list_tags and ' +
-    'reuse an existing tag if one matches — do not create RU/EN duplicates. ' +
+    'The server instructions\' wikilink and tag rules apply when substantially rewriting. ' +
     'Pass expected_updated_at (the updated_at you read) to be refused instead of overwriting a ' +
     'change made in between.',
     {
@@ -924,8 +926,16 @@ export function createMcpServer(): McpServer {
       confidence: r.confidence,
     };
     if (hybrid.matched_by) out.matched_by = hybrid.matched_by;
-    if (r.text_tier) out.text_tier = r.text_tier;
-    if (r.coverage !== undefined) out.coverage = round2(r.coverage);
+    // text_tier and coverage are the inputs confidenceFor discounts on. They
+    // are worth their bytes exactly when they DID discount something, so they
+    // ship only then: a non-'and' tier, or coverage below 1. In the ordinary
+    // case ('and' at full coverage) their presence carried no information the
+    // verdict didn't already state, and they were on every hit of every
+    // response. Absence is now itself the signal "nothing qualified this
+    // hit"; explain:true still shows them unconditionally, so the discount
+    // stays auditable from outside rather than merely trusted.
+    if (r.text_tier && (explain || r.text_tier !== 'and')) out.text_tier = r.text_tier;
+    if (r.coverage !== undefined && (explain || r.coverage < 1)) out.coverage = round2(r.coverage);
     if (r.content_length !== undefined) out.content_length = r.content_length;
     if (explain) {
       // Hybrid results carry text_score/semantic_score directly (rrfMerge
@@ -963,14 +973,13 @@ export function createMcpServer(): McpServer {
     '`moderate` means one real signal only (or a partial cascade match plus semantic): read the ' +
     'excerpt before relying on it. `weak` usually means ' +
     'reformulate, EXCEPT: if a weak/moderate hit is the only or top-ranked result and its excerpt ' +
-    'already answers the question, read it before discarding it. `text_tier` (when present) shows ' +
-    'which cascade level the text side matched at — "and" is a real query match, "or"/"substring" ' +
-    'mean the strict query found nothing and a looser pass filled in (recall, not confirmation — ' +
-    'never `strong` on its own). `coverage` (text hits only) is the fraction of the query\'s ' +
-    'significant words actually found in the hit — a long query whose top "or" hit only matched one ' +
-    'word out of five reads low coverage even at relevance 1.0 (relevance is only ever relative to ' +
-    'the best hit in this same response, coverage is not). ' +
-    'Not comparable across different queries\' results, only within one. ' +
+    'already answers the question, read it before discarding it. ' +
+    '`text_tier` and `coverage` appear ONLY when they qualified the verdict, so their absence is ' +
+    'itself the clean case — the query as typed matched, in full. A tier of "or"/"substring" means ' +
+    'the strict query found nothing and a looser pass filled in (recall, not confirmation, never ' +
+    '`strong` on its own); coverage below 1 is the fraction of the query\'s significant words the ' +
+    'hit actually contains. Neither is comparable across different queries, only within one ' +
+    'response. ' +
     'Filters: folder_id, tag, created_after/before (when a note was made), updated_after/before ' +
     '(when its own content/title/folder/tags last actually changed — a rename elsewhere rewriting ' +
     'a [[link]] to this note does not count) — these are NOT interchangeable. ' +

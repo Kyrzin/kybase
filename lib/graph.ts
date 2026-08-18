@@ -1,12 +1,10 @@
 // lib/graph.ts — pure knowledge-graph helpers, safe to import from both the
 // server (API route, MCP tool) and the client (no DB import, so no `pg` in
 // the browser bundle). The DB-backed graph builder lives in lib/graph-data.ts.
-import { extractWikilinkTarget } from './wikilinks';
+import { extractWikilinkTarget, rawWikilinks } from './wikilinks';
 
 export type GraphNode = { id: string; title: string };
 export type GraphEdge = { from: string; to: string };
-
-const WIKILINK_RE = /\[\[([^\]]+)\]\]/g;
 
 /** A [[wikilink]] whose target matches no note title in the given set. */
 export type UnresolvedLink = { from: string; target: string };
@@ -30,11 +28,11 @@ export function buildWikilinkEdges(
   const edges: GraphEdge[] = [];
   const unresolved: UnresolvedLink[] = [];
   for (const note of notes) {
-    for (const m of note.content.matchAll(WIKILINK_RE)) {
+    for (const raw of rawWikilinks(note.content)) {
       // The full title set is already in hand here, so this can prefer an
       // exact "Title#3"-as-literal-title match over splitting at '#' — see
       // extractWikilinkTarget's own comment for why that matters.
-      const target = extractWikilinkTarget(m[1], knownTitles);
+      const target = extractWikilinkTarget(raw, knownTitles);
       if (!target) continue; // same-note anchor [[#Section]], no title to resolve
       const targetId = titleToId.get(target.toLowerCase());
       if (!targetId) { unresolved.push({ from: note.id, target }); continue; }

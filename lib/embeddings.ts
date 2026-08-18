@@ -42,11 +42,20 @@ export async function getMinSimilarity(): Promise<number> {
   return minSimilarityFor(await getEmbeddingConfig());
 }
 
-export async function getEmbedding(text: string, task: EmbedTask = 'document'): Promise<number[]> {
+// A reindex batch (lib/reindex.ts) can be stopped mid-run by the user. The
+// only waits long enough to be worth interrupting are Google's — pacing and
+// 429 backoff can each run tens of seconds — so this is only honored there;
+// Ollama's single 500ms retry and OpenAI's fast path aren't worth the extra
+// plumbing.
+export class EmbedCancelledError extends Error {
+  constructor() { super('Reindex cancelled'); }
+}
+
+export async function getEmbedding(text: string, task: EmbedTask = 'document', isCancelled?: () => boolean): Promise<number[]> {
   const cfg = await getEmbeddingConfig();
   switch (cfg.provider) {
     case 'ollama': return ollamaEmbed(text, cfg.ollamaModel, task);
-    case 'google': return googleEmbed(text, cfg.googleApiKey);
+    case 'google': return googleEmbed(text, cfg.googleApiKey, isCancelled);
     case 'openai': return openaiEmbed(text, cfg.openaiApiKey);
     default:       throw new Error(`Unknown embedding provider: ${cfg.provider}`);
   }
@@ -72,18 +81,65 @@ export async function getEmbedConcurrency(): Promise<EmbedConcurrency> {
 // embedding_pending stays true for the next reindex.
 const EMBED_TIMEOUT_MS = 30_000;
 
+// Google's RESOURCE_EXHAUSTED body carries the real wait in
+// error.details[].retryDelay (a "23s"-style string), not a Retry-After
+// header — verified live 2026-08-18, this vault's actual 429 body has no
+// such header. Safe to try on any provider: returns null on anything that
+// isn't this exact shape.
+async function parseRetryDelayMs(res: Response): Promise<number | null> {
+  try {
+    const body = await res.clone().json();
+    const info = body?.error?.details?.find((d: { '@type'?: string }) => d['@type']?.includes('RetryInfo'));
+    const seconds = typeof info?.retryDelay === 'string' ? parseFloat(info.retryDelay) : NaN;
+    return Number.isFinite(seconds) ? seconds * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+// The 429 backoff/retryDelay wait can run up to 30s per attempt — a plain
+// setTimeout would make a Stop click sit unanswered for that long. Polling
+// isCancelled in short slices instead means a cancel lands within one slice
+// of a click, without needing a real AbortController (there's no in-flight
+// fetch during this wait — the previous attempt already got its 429 back).
+async function sleepCancellable(ms: number, isCancelled?: () => boolean): Promise<void> {
+  const slice = 500;
+  for (let remaining = ms; remaining > 0; remaining -= slice) {
+    if (isCancelled?.()) throw new EmbedCancelledError();
+    await new Promise(r => setTimeout(r, Math.min(slice, remaining)));
+  }
+  if (isCancelled?.()) throw new EmbedCancelledError();
+}
+
 /**
- * Retry on 429 with exponential backoff (honors Retry-After) —
- * bulk reindexing bursts past the provider's requests-per-minute limit.
+ * Retry on 429 with exponential backoff (honors a body-embedded retryDelay,
+ * then Retry-After, then our own backoff) — bulk reindexing bursts past the
+ * provider's requests-per-minute limit.
  */
-async function fetchWithRetry(url: string, init: RequestInit, attempts = 5): Promise<Response> {
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  opts: { attempts?: number; onRateLimited?: () => void; isCancelled?: () => boolean } = {}
+): Promise<Response> {
+  const attempts = opts.attempts ?? 5;
+  const MAX_WAIT_MS = 30_000; // same ceiling as our own backoff — a quota
+  // that's exhausted for the day can hand back a retryDelay measured in
+  // minutes/hours; honoring that literally per attempt would stall a single
+  // note for as long as the quota window, defeating reindexRows' own
+  // consecutive-failure circuit breaker (lib/reindex.ts). Capping it means
+  // we still back off, just not indefinitely — the breaker decides when to
+  // give up, not the provider's raw hint.
   let delay = 2000;
   for (let i = 0; ; i++) {
+    if (opts.isCancelled?.()) throw new EmbedCancelledError();
     const res = await fetch(url, { ...init, signal: AbortSignal.timeout(EMBED_TIMEOUT_MS) });
     if (res.status !== 429 || i >= attempts - 1) return res;
-    const retryAfterMs = Number(res.headers.get('retry-after')) * 1000;
-    await new Promise(r => setTimeout(r, retryAfterMs > 0 ? retryAfterMs : delay));
-    delay = Math.min(delay * 2, 30_000);
+    opts.onRateLimited?.();
+    const bodyDelayMs = await parseRetryDelayMs(res);
+    const headerDelayMs = Number(res.headers.get('retry-after')) * 1000;
+    const waitMs = bodyDelayMs || (headerDelayMs > 0 ? headerDelayMs : delay);
+    await sleepCancellable(Math.min(waitMs, MAX_WAIT_MS), opts.isCancelled);
+    delay = Math.min(delay * 2, MAX_WAIT_MS);
   }
 }
 
@@ -159,18 +215,48 @@ async function ollamaEmbed(text: string, model: string | undefined, task: EmbedT
   }
 }
 
-async function googleEmbed(text: string, apiKey?: string): Promise<number[]> {
+// getEmbedConcurrency's notes:1/chunks:2 only caps how many Google calls run
+// at once — it has no idea how many ran in the last minute, so a reindex
+// still bursts past the free-tier RPM limit at that concurrency (measured
+// live 2026-08-18: 693 requests, 429 on most of them). This paces every
+// Google call against a shared minimum gap instead. There's no single
+// published RPM figure worth hard-coding (and free-tier limits change), so
+// it adapts: back off hard on a 429, ease back down after a run of clean
+// calls — an async chain (not a timestamp check-then-set) so two calls
+// racing past the gate can't both read the same "next allowed" time.
+let googleGapMs = 1100;
+let googleNextAt = 0;
+let googleChain: Promise<void> = Promise.resolve();
+const GOOGLE_MIN_GAP_MS = 250;
+const GOOGLE_MAX_GAP_MS = 15_000;
+
+function googlePace(isCancelled?: () => boolean): Promise<void> {
+  const p = googleChain.then(async () => {
+    const wait = googleNextAt - Date.now();
+    if (wait > 0) await sleepCancellable(wait, isCancelled);
+    googleNextAt = Date.now() + googleGapMs;
+  });
+  // Even a cancelled wait must still advance the chain so the next queued
+  // call doesn't inherit this one's already-consumed wait.
+  googleChain = p.catch(() => {});
+  return p;
+}
+
+async function googleEmbed(text: string, apiKey?: string, isCancelled?: () => boolean): Promise<number[]> {
   if (!apiKey) throw new Error('Google API key is not configured');
   const model = process.env.GOOGLE_MODEL ?? 'text-embedding-004';
+  await googlePace(isCancelled);
   const res = await fetchWithRetry(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${apiKey}`,
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: `models/${model}`, content: { parts: [{ text }] }, outputDimensionality: 768 }),
-    }
+    },
+    { onRateLimited: () => { googleGapMs = Math.min(googleGapMs * 1.5, GOOGLE_MAX_GAP_MS); }, isCancelled }
   );
   if (!res.ok) throw new Error(`Google embed error (${res.status}): ${(await res.text()).slice(0, 200)}`);
+  googleGapMs = Math.max(GOOGLE_MIN_GAP_MS, googleGapMs * 0.9);
   const data = await res.json();
   return data.embedding.values as number[];
 }

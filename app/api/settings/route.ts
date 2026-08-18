@@ -66,9 +66,15 @@ export async function PUT(req: NextRequest) {
   if (body.tagWeights)    await setTagWeights(body.tagWeights);
   if (body.folderWeights) await setFolderWeights(body.folderWeights);
 
-  // Mark all live notes for reindex when provider changes
+  // Mark all live notes for reindex when provider changes. Used to also
+  // kick off /api/admin/reindex itself right here — a single Save click
+  // silently re-embedding the whole vault against a fresh API key/quota
+  // with no confirmation. Now it only flags the notes; the caller decides
+  // whether to run "Reindex" right away.
+  let pendingCount = 0;
   if (providerChanged) {
-    await query('update notes set embedding_pending = true where deleted_at is null');
+    const marked = await query<{ id: string }>('update notes set embedding_pending = true where deleted_at is null returning id');
+    pendingCount = marked.length;
   }
   // A language list change needs every note's search_vector recomputed —
   // same forced-recompute trick migration 016's own backfill uses.
@@ -76,5 +82,5 @@ export async function PUT(req: NextRequest) {
     await query('update notes set title = title where deleted_at is null');
   }
 
-  return NextResponse.json({ ok: true, reindexTriggered: providerChanged });
+  return NextResponse.json({ ok: true, reindexTriggered: providerChanged, pendingCount });
 }

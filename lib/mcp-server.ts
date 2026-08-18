@@ -8,6 +8,7 @@ import { escapeLike } from './sql';
 import { textSearch, semanticSearch, hybridSearch, makeExcerpt, bestSemanticScore, effectiveSemanticThreshold, type SearchResult, type HybridSearchResult } from './search';
 import { indexNoteAsync } from './indexing';
 import { extractAllWikilinks } from './wikilinks';
+import { rewriteBacklinks } from './rename-links';
 import { buildGraph } from './graph-data';
 import { indexedForm } from './graph';
 import { extractHeadings, type Heading } from './markdown';
@@ -623,7 +624,7 @@ export function createMcpServer(): McpServer {
           );
           const note = rows[0] ?? null;
           if (title && title !== locked.title && note) {
-            await client.query('select update_wikilinks($1, $2)', [locked.title, title]);
+            await rewriteBacklinks(client, locked.title, title);
           }
           return { note, changed, newTitle: title ?? locked.title, newContent: fixedContent ?? content ?? locked.content };
         });

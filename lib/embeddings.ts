@@ -35,6 +35,11 @@ function minSimilarityFor(cfg: EmbeddingConfig): number {
     if ((cfg.ollamaModel ?? '').includes('nomic-embed-text')) return 0.65;
     return 0.30; // embeddinggemma (default) and other local models
   }
+  // 0.55 for Google confirmed by measurement 2026-08-18, not inherited from
+  // the "everything else" branch it used to sit in: the highest noise sample
+  // on a live 121-note vault was 0.552, and signalMargin lifts the effective
+  // floor to ~0.58, which cleared all five noise probes. See signalFloorFor
+  // below for the full battery. OpenAI's 0.45 is still unmeasured.
   return cfg.provider === 'openai' ? 0.45 : 0.55;
 }
 
@@ -62,15 +67,32 @@ export async function getMinSimilarity(): Promise<number> {
  * the procedure is in the "методика оценки embedding-моделей" note, and the
  * result belongs in the `embedding_bands` setting, not here.
  *
- * Values below are the 2026-08-14 measurement, 5 pairs per model. Google's
- * text-embedding-004 and OpenAI are NOT measured — see roadmap item 36.
+ * Ollama values are the 2026-08-14 measurement, 5 pairs per model.
+ *
+ * Google text-embedding-004 measured 2026-08-18 on a live 121-note RU/DE/EN
+ * vault, 11 probes: 5 queries on topics the vault demonstrably does not
+ * contain (noise: 0.516, 0.516, 0.533, 0.540, 0.552) and 6 whose correct
+ * answer came back first (signal: 0.736, 0.743, 0.787, 0.796, 0.825, 0.844).
+ * A wide empty corridor between 0.552 and 0.736 — and three probes landed
+ * inside it (0.612, 0.613, 0.625), every one of them a query with no real
+ * answer in the vault and an irrelevant top hit. That corridor is exactly
+ * what the two numbers are for: the gate keeps recall (0.55 stays, since the
+ * degenerate-set margin already lifts the effective floor to ~0.58, above the
+ * highest noise sample), while the signal floor decides confidence — so a
+ * 0.61 near-miss now comes back as a candidate the ladder marks as NOT full
+ * corroboration, instead of either being silently dropped or dressed up as a
+ * confident answer.
+ *
+ * 0.72 rather than the observed 0.736: eleven probes are enough to place the
+ * corridor, not enough to pin its edge to three digits. OpenAI stays
+ * unmeasured — its hits cap at `moderate` until someone runs the same battery.
  */
 function signalFloorFor(cfg: EmbeddingConfig): number | null {
   if (cfg.provider === 'ollama') {
     if ((cfg.ollamaModel ?? '').includes('nomic-embed-text')) return 0.68;
     return 0.53; // embeddinggemma
   }
-  return null;
+  return cfg.provider === 'google' ? 0.72 : null;
 }
 
 export type EmbeddingBand = { gate: number; signalFloor: number | null };

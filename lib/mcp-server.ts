@@ -927,7 +927,7 @@ export function createMcpServer(): McpServer {
       confidence: r.confidence,
     };
     if (hybrid.matched_by) out.matched_by = hybrid.matched_by;
-    // text_tier and coverage are the inputs confidenceFor discounts on. They
+    // text_tier and coverage are the inputs the confidence ladder discounts on.
     // are worth their bytes exactly when they DID discount something, so they
     // ship only then: a non-'and' tier, or coverage below 1. In the ordinary
     // case ('and' at full coverage) their presence carried no information the
@@ -966,13 +966,16 @@ export function createMcpServer(): McpServer {
     'Returns short excerpts, not full notes — call get_note on the top 1-2 hits to read them. ' +
     'Each hit carries `relevance` (0..1, how close to the best hit in THIS response — always 1.0 ' +
     'for the top result, says nothing about absolute quality on its own) and `confidence` ' +
-    '("strong"/"moderate"/"weak", the field to actually act on). `strong` means corroborated — both ' +
-    'text and semantic found it, AND the text side is a real match: either the query as typed ' +
-    '("and"), or a loosened OR match that still contains EVERY significant word of the query ' +
-    '(coverage 1.0 — the strict pass just didn\'t fire, the content is genuinely all there). A ' +
-    'partial OR/substring match (coverage < 1) never counts — quote a `strong` hit directly. ' +
-    '`moderate` means one real signal only (or a partial cascade match plus semantic): read the ' +
-    'excerpt before relying on it. `weak` usually means ' +
+    '("strong"/"moderate"/"weak", the field to actually act on). The two are independent on ' +
+    'purpose: relevance orders a response, confidence judges a hit. **A hit\'s confidence never ' +
+    'changes because of what else is in the response** — it is computed from what each arm found ' +
+    'on its own, so a correct answer keeps its verdict even when a stronger hit sits above it. ' +
+    '`strong` means both arms are convincing: the text side matched the query as typed ("and") or ' +
+    'a loosened OR match that still contains EVERY significant word, AND the semantic side landed ' +
+    'inside the embedding model\'s own measured signal band. On a model whose band was never ' +
+    'measured the semantic side cannot claim that, so hits cap at `moderate` — that is a missing ' +
+    'measurement, not a weak result. `moderate` means one convincing signal: read the excerpt ' +
+    'before relying on it. `weak` usually means ' +
     'reformulate, EXCEPT: if a weak/moderate hit is the only or top-ranked result and its excerpt ' +
     'already answers the question, read it before discarding it. ' +
     '`text_tier` and `coverage` appear ONLY when they qualified the verdict, so their absence is ' +

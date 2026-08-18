@@ -1,5 +1,5 @@
 // lib/embeddings.ts — embedding provider abstraction (DB settings override env vars)
-import { getEmbeddingConfig, type EmbeddingConfig } from './settings';
+import { getEmbeddingConfig, getBandOverride, type EmbeddingConfig } from './settings';
 
 export type EmbedTask = 'query' | 'document';
 
@@ -40,6 +40,61 @@ function minSimilarityFor(cfg: EmbeddingConfig): number {
 
 export async function getMinSimilarity(): Promise<number> {
   return minSimilarityFor(await getEmbeddingConfig());
+}
+
+/**
+ * Where a model's REAL matches start, as opposed to where its noise stops.
+ * minSimilarityFor above is the second number; this is the first.
+ *
+ * Why both are needed: a raw cosine says nothing on its own, because models
+ * do not share a scale — embeddinggemma separates noise (~0.08–0.18) from
+ * signal (~0.53–0.69) by a wide gap, nomic-embed-text compresses the same
+ * distinction into ~0.02–0.05. So "0.7 is a good match" is meaningless
+ * across models, while "70% of the way from this model's noise ceiling to
+ * its signal floor" is the same statement for all of them. That fraction is
+ * what lib/search.ts's confidence ladder consumes, and it is the only way to
+ * judge a hit WITHOUT looking at its neighbours in the same response.
+ *
+ * null = this model's band was never measured. Deliberately not guessed:
+ * the ladder then refuses to treat its cosine as full corroboration rather
+ * than inventing a number, which is visible (hits cap at `moderate`) instead
+ * of silently wrong. Fix by measuring, not by picking a plausible constant —
+ * the procedure is in the "методика оценки embedding-моделей" note, and the
+ * result belongs in the `embedding_bands` setting, not here.
+ *
+ * Values below are the 2026-08-14 measurement, 5 pairs per model. Google's
+ * text-embedding-004 and OpenAI are NOT measured — see roadmap item 36.
+ */
+function signalFloorFor(cfg: EmbeddingConfig): number | null {
+  if (cfg.provider === 'ollama') {
+    if ((cfg.ollamaModel ?? '').includes('nomic-embed-text')) return 0.68;
+    return 0.53; // embeddinggemma
+  }
+  return null;
+}
+
+export type EmbeddingBand = { gate: number; signalFloor: number | null };
+
+/**
+ * The active model's band, with the `embedding_bands` setting overriding the
+ * measured defaults above. A setting rather than a constant so that measuring
+ * a new model is a value change, not a code change and a redeploy — rule 2 of
+ * the roadmap's own framing ("настройка с разумным дефолтом").
+ */
+export async function getEmbeddingBand(): Promise<EmbeddingBand> {
+  const cfg = await getEmbeddingConfig();
+  const override = await getBandOverride(embeddingModelKey(cfg));
+  return {
+    gate: override?.gate ?? minSimilarityFor(cfg),
+    signalFloor: override?.signalFloor ?? signalFloorFor(cfg),
+  };
+}
+
+/** Stable key for the active provider+model, used by the bands setting. */
+export function embeddingModelKey(cfg: EmbeddingConfig): string {
+  return cfg.provider === 'ollama'
+    ? `ollama:${cfg.ollamaModel ?? 'embeddinggemma'}`
+    : `${cfg.provider}:${cfg.provider === 'google' ? (process.env.GOOGLE_MODEL ?? 'text-embedding-004') : 'default'}`;
 }
 
 // A reindex batch (lib/reindex.ts) can be stopped mid-run by the user. The

@@ -7,5 +7,5 @@ npm-debug.log*
 .env*.local
 docs
 README.md
-*.test.ts
+**/*.test.ts
 vitest.config.ts

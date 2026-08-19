@@ -76,7 +76,7 @@ Everything below goes in `.env` (copied from `.env.example`). `KYBASE_SECRET` an
 | `KYBASE_SECRET` | *(required)* | UI login password and MCP/API bearer token. Generate with `openssl rand -hex 32`. |
 | `KYBASE_PORT` | `3000` | Host port the app is exposed on. |
 | `POSTGRES_PASSWORD` | *(required)* | Postgres is only reachable inside the compose network, but `docker compose up` refuses to start without one — no silent weak default. Generate with `openssl rand -hex 16`. |
-| `KYBASE_TAG` | `latest` | Prebuilt image tag from `ghcr.io/kyrzin/kybase` — pin a release (e.g. `v1.2`) instead of tracking `main`. |
+| `KYBASE_TAG` | `latest` | Prebuilt image tag from `ghcr.io/kyrzin/kybase`. `latest` always tracks the newest [release](https://github.com/Kyrzin/kybase/releases) tag; pin to a specific version (e.g. `v1.3.0`) if you want upgrades to be a deliberate step. |
 | `EMBEDDING_PROVIDER` | `ollama` | `ollama`, `google`, or `openai` — see [Switching Embedding Providers](#switching-embedding-providers). |
 | `OLLAMA_URL` | `http://ollama:11434` | Point at an external Ollama instance instead of the bundled container. |
 | `OLLAMA_MODEL` | `embeddinggemma` | Or `nomic-embed-text`. |

@@ -256,6 +256,32 @@ export function windowContent<T extends { content: string }>(
   };
 }
 
+/**
+ * The [[links]] in `text` that point at no existing note — what a write just
+ * broke, reported at the moment it happens instead of surfacing hours later in
+ * get_graph. The `[[` guard keeps writes carrying no links from paying for the
+ * title scan at all; when there are links, one scan answers all of them, which
+ * is why this resolves in memory rather than running a query per target the way
+ * get_note's resolve_links does — that one needs each linked note's id and body,
+ * this one only needs to know whether the title exists.
+ */
+async function unresolvedWikilinksIn(text: string, selfTitle?: string): Promise<string[]> {
+  if (!text.includes('[[')) return [];
+  const rows = await query<{ title: string }>('select title from notes where deleted_at is null');
+  const known = new Set(rows.map((r) => r.title.toLowerCase()));
+  const self = selfTitle?.toLowerCase();
+  const missing: string[] = [];
+  const seen = new Set<string>();
+  for (const target of extractAllWikilinks(text, known)) {
+    // [[Guide]] and [[guide]] are one note: report the miss once, not twice.
+    const key = target.toLowerCase();
+    if (key === self || known.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    missing.push(target);
+  }
+  return missing;
+}
+
 export function createMcpServer(): McpServer {
   const server = new McpServer(
     { name: 'kybase', version: '1.0.0' },
@@ -269,7 +295,8 @@ export function createMcpServer(): McpServer {
         'note body — inline where natural, or as a final "Related: [[A]], [[B]]" line.\n' +
         '3. Copy linked titles VERBATIM from tool results (search_notes, list_notes, get_graph). Never ' +
         'write a [[link]] to a title you have not seen in a tool result in this conversation — invented ' +
-        'or misremembered titles produce broken links.\n' +
+        'or misremembered titles produce broken links. A write that introduces one comes back ' +
+        'with `unresolved_links` naming it — fix it there, not hours later.\n' +
         '4. Do not force links: if nothing is related, create the note without any.\n\n' +
         'Tagging: new tags are English, lowercase, kebab-case. Call list_tags first and reuse an ' +
         'existing tag when one fits, rather than coining an RU/EN or case-variant duplicate.\n\n' +
@@ -506,7 +533,8 @@ export function createMcpServer(): McpServer {
       // background index (note embedding + chunks)
       indexNoteAsync(note.id, title, content);
 
-      return { content: [{ type: 'text' as const, text: JSON.stringify(withFolderPath(note, paths)) }] };
+      const unresolved_links = await unresolvedWikilinksIn(content, title);
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ ...withFolderPath(note, paths), ...(unresolved_links.length ? { unresolved_links } : {}) }) }] };
     }
   );
 
@@ -644,7 +672,11 @@ export function createMcpServer(): McpServer {
       if (result.changed) {
         indexNoteAsync(id, result.newTitle, result.newContent);
       }
-      return { content: [{ type: 'text' as const, text: JSON.stringify(withFolderPath(result.note, paths)) }] };
+      // Only what THIS call wrote: on a title/tags-only update the existing
+      // body is not this write's doing, and reporting its old breakage every
+      // time would train the reader to ignore the field.
+      const unresolved_links = content !== undefined ? await unresolvedWikilinksIn(content, result.newTitle) : [];
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ ...withFolderPath(result.note, paths), ...(unresolved_links.length ? { unresolved_links } : {}) }) }] };
     }
   );
 
@@ -706,10 +738,11 @@ export function createMcpServer(): McpServer {
 
       const { note, next } = result;
       indexNoteAsync(found.id, result.title, next);
+      const unresolved_links = await unresolvedWikilinksIn(addition, result.title);
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ ...note, appended_chars: addition.length, content_total_length: next.length }),
+          text: JSON.stringify({ ...note, appended_chars: addition.length, content_total_length: next.length, ...(unresolved_links.length ? { unresolved_links } : {}) }),
         }],
       };
     }
@@ -852,10 +885,11 @@ export function createMcpServer(): McpServer {
       const { note, next, results } = result;
       indexNoteAsync(found.id, result.title, next);
       const replaced_count = results.reduce((sum, r) => sum + r.replaced_count, 0);
+      const unresolved_links = await unresolvedWikilinksIn(editsList.map((e) => e.replace).join('\n'), result.title);
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ ...note, replaced_count, results, content_length: next.length }),
+          text: JSON.stringify({ ...note, replaced_count, results, content_length: next.length, ...(unresolved_links.length ? { unresolved_links } : {}) }),
         }],
       };
     }

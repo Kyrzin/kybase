@@ -7,5 +7,13 @@ npm-debug.log*
 .env*.local
 docs
 README.md
+# The private test suite. This block must mirror the testing block in
+# .gitignore: anything kept out of the repo is by definition absent from CI
+# and present only in a developer working copy, so a build there picks it up
+# and typechecks it against devDependencies the image does not install.
+# Half-mirroring it is what broke the build on 2026-08-18 and again today.
 **/*.test.ts
+lib/__itest__
 vitest.config.ts
+vitest.integration.config.ts
+/coverage

@@ -4,16 +4,16 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="google-site-verification" content="2PKdHFJM5HTb6YHJ_Ra_3BtBItU-GrHFR4TioOPvLCw" />
-  <title>Kybase — Self-hosted memory for Claude | Markdown knowledge base + MCP server</title>
-  <meta name="description" content="Kybase is a self-hosted markdown knowledge base with a wikilink graph, hybrid semantic search (pgvector + Ollama) and a first-party MCP server — persistent memory for Claude Code and Claude Desktop. One docker compose up.">
+  <title>Kybase — Self-hosted memory for AI agents | Markdown knowledge base + MCP server</title>
+  <meta name="description" content="Kybase is a self-hosted markdown knowledge base with a wikilink graph, hybrid semantic search (pgvector + Ollama) and a first-party MCP server — persistent memory for AI agents. Markdown for humans, MCP for agents. One docker compose up.">
   <link rel="canonical" href="https://kyrzin.github.io/kybase/">
-  <meta property="og:title" content="Kybase — Self-hosted memory for Claude">
+  <meta property="og:title" content="Kybase — Self-hosted memory for AI agents">
   <meta property="og:description" content="Markdown knowledge base with wikilink graph, hybrid semantic search (pgvector + Ollama) and a first-party MCP server. 100% private, one docker compose up.">
   <meta property="og:url" content="https://kyrzin.github.io/kybase/">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://kyrzin.github.io/kybase/og-image.png">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Kybase — Self-hosted memory for Claude">
+  <meta name="twitter:title" content="Kybase — Self-hosted memory for AI agents">
   <meta name="twitter:description" content="Markdown knowledge base with wikilink graph, hybrid semantic search (pgvector + Ollama) and a first-party MCP server. 100% private, one docker compose up.">
   <meta name="twitter:image" content="https://kyrzin.github.io/kybase/og-image.png">
   <script type="application/ld+json">
@@ -97,7 +97,7 @@
       <div class="grid" style="margin-top:20px">
         <div class="card">
           <h3>MCP-native</h3>
-          <p>13 tools (search, graph, backlinks, CRUD for notes and folders) over Streamable HTTP — works with Claude Code, Claude Desktop and claude.ai connectors.</p>
+          <p>17 tools (search, graph, backlinks, CRUD for notes and folders) over Streamable HTTP — works with any Streamable HTTP MCP client: Claude Code, Claude Desktop, claude.ai connectors, Cursor, Windsurf.</p>
         </div>
         <div class="card">
           <h3>Local semantic search</h3>
@@ -121,11 +121,11 @@ cd kybase
 cp .env.example .env
 # set KYBASE_SECRET (openssl rand -hex 32)
 docker compose up -d --build</code></pre>
-      <p class="note">Open <code>http://localhost:3000</code> and log in with your <code>KYBASE_SECRET</code>. Migrations apply automatically; Ollama pulls the embedding model (~270&nbsp;MB) once in the background.</p>
+      <p class="note">Open <code>http://localhost:3000</code> and log in with your <code>KYBASE_SECRET</code>. Migrations apply automatically; Ollama pulls the embedding model (embeddinggemma, ~620&nbsp;MB) once in the background.</p>
     </section>
 
     <section>
-      <h2>Connect Claude (MCP)</h2>
+      <h2>Connect an MCP client</h2>
       <pre><code>{
   "mcpServers": {
     "kybase": {
@@ -144,7 +144,7 @@ docker compose up -d --build</code></pre>
         <tr><th>Layer</th><th>Tech</th></tr>
         <tr><td>Frontend</td><td>Next.js App Router, React 19</td></tr>
         <tr><td>Database</td><td>PostgreSQL 16 + pgvector</td></tr>
-        <tr><td>Embeddings</td><td>Ollama <code>nomic-embed-text</code> / Google / OpenAI (768-dim)</td></tr>
+        <tr><td>Embeddings</td><td>Ollama <code>embeddinggemma</code> (default, multilingual) / Google / OpenAI (768-dim)</td></tr>
         <tr><td>Search</td><td>RRF hybrid: pgvector HNSW cosine + bilingual FTS</td></tr>
         <tr><td>MCP</td><td><code>@modelcontextprotocol/sdk</code> Streamable HTTP</td></tr>
       </table>

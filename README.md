@@ -12,7 +12,8 @@
 
 Your AI agent forgets everything between sessions. Kybase fixes that: a
 self-hosted Markdown knowledge base **you** browse and edit in the browser,
-that **Claude** uses as persistent memory over MCP. The agent writes notes as
+that **any MCP-speaking agent** — Claude, Cursor, Windsurf — uses as
+persistent memory over MCP. The agent writes notes as
 you work, links them with `[[wikilinks]]`, and finds them again next session —
 no re-onboarding, no lost decisions.
 

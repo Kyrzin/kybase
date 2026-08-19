@@ -514,7 +514,12 @@ export function createMcpServer(): McpServer {
   server.tool(
     'update_note',
     'Update note fields. Re-embeds if title or content changed. Updates wikilinks if title changed. ' +
-    'The server instructions\' wikilink and tag rules apply when substantially rewriting. ' +
+    // The cue has to name list_tags explicitly, not just point at the server
+    // instructions: an agent about to add a tag reads THIS description, and a
+    // pointer it has to follow is a pointer it will skip. Deduplicating the
+    // rules is fine; deduplicating the tool name is not.
+    'The server instructions\' wikilink and tag rules apply when substantially rewriting — ' +
+    'in particular, call list_tags before coining a new tag. ' +
     'Pass expected_updated_at (the updated_at you read) to be refused instead of overwriting a ' +
     'change made in between.',
     {

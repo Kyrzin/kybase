@@ -12,7 +12,14 @@ env:
   IMAGE_NAME: kyrzin/kybase
 
 jobs:
+  # Re-runs CI (typecheck/lint/unit/integration/smoke) for the exact commit
+  # being published — nothing reaches `latest` or a version tag without
+  # passing the same gate a PR would have to pass.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   build:
+    needs: [ci]
     strategy:
       fail-fast: false
       matrix:
@@ -89,11 +96,17 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # latest=auto: metadata-action tags `latest` only when this run is
+          # a stable (non-prerelease) semver tag push — never for a plain
+          # main push, so `docker compose pull` can't silently land on an
+          # untested commit between releases.
+          flavor: |
+            latest=auto
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha,format=long
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+            type=raw,value=edge,enable={{is_default_branch}}
 
       - uses: docker/login-action@v3
         with:

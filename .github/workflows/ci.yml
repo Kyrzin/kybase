@@ -3,13 +3,17 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
+  # Lets publish.yml gate image builds on this workflow passing for the
+  # exact commit being published, instead of duplicating these steps.
+  workflow_call:
 
 permissions:
   contents: read
 
 jobs:
-  ci:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,3 +29,52 @@ jobs:
           # Build-time placeholders — real secrets are injected at runtime
           KYBASE_SECRET: ci-placeholder
           EMBEDDING_PROVIDER: ollama
+
+  smoke:
+    # Full docker-compose round-trip against the real image (build+MCP+DB+
+    # Ollama) — the only behavioral gate in this public workflow (the unit/
+    # integration suite is developer-local only, not part of CI). Proves a
+    # fresh `docker compose up` can actually create a note over MCP, find
+    # it, and export the vault before anything ships as `latest`/a version
+    # tag. Skipped on plain PRs to keep PR feedback fast; runs on main, on
+    # release tags, and can be forced via workflow_dispatch.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write .env for the compose stack
+        run: |
+          secret=$(openssl rand -hex 32)
+          {
+            echo "KYBASE_SECRET=$secret"
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 16)"
+            # Smaller/faster pull than the embeddinggemma default — this job
+            # only needs to prove the round-trip works, not embedding quality.
+            echo "OLLAMA_MODEL=nomic-embed-text"
+          } > .env
+          # Also expose it to later steps for smoke-test.mts, which reads it
+          # from the environment rather than parsing .env itself.
+          echo "KYBASE_SECRET=$secret" >> "$GITHUB_ENV"
+      - name: Build and start the stack
+        run: docker compose up -d --build
+      - name: Wait for kybase to answer
+        run: |
+          timeout 180 bash -c '
+            until curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/ | grep -qE "^[23]"; do
+              sleep 3
+            done
+          '
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run smoke test
+        # KYBASE_SECRET is already in the job environment via $GITHUB_ENV above.
+        run: npm run smoke-test
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

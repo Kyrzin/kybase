@@ -26,8 +26,8 @@ Consequences you should understand before deploying:
   cookie for the current browser. There is no way to revoke a single
   *other* session early short of rotating the master secret, which signs
   out every browser at once, not just the one you're worried about.
-  The markdown renderer is hardened and test-covered against XSS payloads
-  regardless, but self-audit accordingly.
+  The markdown renderer is hardened against XSS payloads regardless (see
+  `lib/markdown.ts`), but self-audit accordingly.
 
 ## What is implemented
 

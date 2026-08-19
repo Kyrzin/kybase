@@ -291,7 +291,6 @@ cp .env.example .env.local
 npm install
 npm run dev                  # http://localhost:3000
 
-npm test          # Vitest unit tests
 npm run build     # Production build check
 npx tsc --noEmit  # Type check
 ```

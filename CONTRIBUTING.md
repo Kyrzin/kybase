@@ -17,14 +17,18 @@ CI runs these on every push and PR — matching them locally first saves a round
 ```bash
 npx tsc --noEmit                    # type check
 npm run lint -- --max-warnings 0    # lint
-npm test                            # Vitest unit tests
 npm run build                       # production build check
 ```
+
+CI also runs a full `docker compose` smoke test (build the image, create a
+note over MCP, search for it, export the vault) on pushes to `main` and on
+release tags — not on plain PRs, to keep PR feedback fast. Run it locally
+with `docker compose up -d --build && npm run smoke-test` if you're touching
+the MCP endpoint, auth, or the compose/Dockerfile setup.
 
 ## PR expectations
 
 - Keep changes focused — a bug fix doesn't need surrounding refactors.
-- Add or update tests for behavior you change.
 - If you touch `lib/mcp-server.ts`, update the tool count/table in `README.md` and re-check the MCP tool descriptions the agent sees.
 - Migrations go in `db/migrations/` as a new numbered `.sql` file — never edit an already-released one.
 

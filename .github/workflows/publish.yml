@@ -11,8 +11,13 @@ env:
   # Lowercase literal: ghcr.io rejects uppercase, and github.repository is "Kyrzin/kybase"
   IMAGE_NAME: kyrzin/kybase
 
+# Default-deny for every job: read the code and nothing more. The two jobs that
+# push to ghcr.io widen this to packages: write themselves.
+permissions:
+  contents: read
+
 jobs:
-  # Re-runs CI (typecheck/lint/unit/integration/smoke) for the exact commit
+  # Re-runs CI (typecheck/lint/build/smoke) for the exact commit
   # being published — nothing reaches `latest` or a version tag without
   # passing the same gate a PR would have to pass.
   ci:

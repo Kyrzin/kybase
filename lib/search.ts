@@ -11,20 +11,21 @@ export type SearchResult = {
   excerpt: string;
   tags: string[];
   score: number;
-  // How this hit compares to the BEST hit in this same response — always
-  // exactly 1.0 for the top result, 0..1 for the rest. A ratio, not an
-  // absolute score: says nothing about quality on its own (a relevance-1.0
-  // hit can still be the best of a bad set), and is NOT comparable across
-  // different queries' results, only within one. `confidence` is the field
-  // to actually act on. On hybrid results this is the MAX of the
-  // contributing arms — arms corroborate a hit, they don't add up.
+  // How this hit compares to the BEST hit in this same response, 0..1. A
+  // ratio, not an absolute score: says nothing about quality on its own (a
+  // relevance-1.0 hit can still be the best of a bad set), and is NOT
+  // comparable across different queries' results, only within one. Judge a
+  // hit by its excerpt; this only orders them. The top hit reads 1.0 unless
+  // the whole response is discounted — every hit matching one word out of
+  // four caps the set at its coverage. On hybrid results this is the MAX of
+  // the contributing arms — arms corroborate a hit, they don't add up.
   relevance: number;
   // Present only on hybrid results, and only for the pass(es) that actually
   // matched this note — text_score is FTS ts_rank (or a positional fallback
   // score for substring matches), semantic_score is raw cosine similarity.
   // `score` itself stays the RRF rank fusion, used for hybrid's own sort
   // order — it is NOT a relevance measure (see rrfMerge); keep using
-  // relevance/confidence for decisions and these raw fields for debugging.
+  // relevance for ordering and these raw fields for debugging.
   text_score?: number;
   semantic_score?: number;
   // The semantic hit expressed in background units: how many IQRs above
@@ -45,11 +46,19 @@ export type SearchResult = {
   // absent on a pure-semantic hit). 'and' means the strict query itself
   // matched — real corroboration. 'or'/'substring' mean the strict query
   // found NOTHING and a looser pass filled in instead: recall, not
-  // confirmation. textEvidenceFor discounts non-'and' tiers accordingly —
-  // exposed here so that discount is checkable from outside, not just
-  // trusted (2026-08-14 measurement: an 'or' match was silently counting
-  // as full corroboration and inflating confidence).
+  // confirmation. Exposed as an observed fact so a caller can tell the two
+  // apart, rather than being folded invisibly into the ranking.
   text_tier?: 'and' | 'or' | 'substring';
+  // textSearch only. The query occurs as a contiguous, case-insensitive
+  // substring of this note's title or content. Set only for a whitespace-free
+  // query that still splits into several words — a filename, an identifier, a
+  // code symbol — never for a phrase or a question (see textSearch for both
+  // guards and the counter-test that drew the second one).
+  // A fact about the string, NOT a verdict about
+  // the note — it earns the upper half of the relevance scale (applyExactBand)
+  // and nothing more; two verbatim hits are still ranked against each other by
+  // their own text score.
+  exact?: boolean;
   // textSearch only. Fraction of the query's significant lexemes actually
   // present in this hit's search_vector (see computeTextCoverage) — a
   // query/document ratio, not a corpus-tuned constant. Exists because
@@ -753,10 +762,46 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // one note that literally contains the filename, because those five counted
   // as "results found". An identifier query is not a fallback for failure — it
   // is its own kind of match, and it now runs alongside rather than instead.
-  const exactHits = await substringSearch(query, limit, filters);
+  //
+  // A hit that contains the query verbatim is also the top of the lexical
+  // evidence order — above a strict-AND match, far above a partial OR one —
+  // and it is the one thing FTS structurally cannot say. Measured live
+  // 2026-08-20, `cleanup-n8n-binary.sh`: the note holding that filename came
+  // back at relevance 0.50 (the flat substring constant) UNDER an unrelated
+  // note at 0.52 that had matched the single token "n8n" and repeated it
+  // often enough to win on ts_rank. The tokenizers disagree by construction —
+  // in the note the string sits inside a longer path, so Postgres stores it
+  // as one `file` lexeme, while the bare query parses as a `host` — so no
+  // amount of FTS tuning reaches it. Only the literal does.
+  //
+  // Two guards, each earned by a query that broke without it.
+  //
+  // More than one significant word — because for a single word the claim is
+  // worth nothing: `ilike '%n8n%'` matches every note FTS already found, and
+  // calling them all verbatim would collapse the ranking into one flat tie.
+  //
+  // And NO whitespace: the query has to be one contiguous name that the
+  // tokenizer took apart, not a phrase the user typed with spaces. This is
+  // the whole failure mode — `cleanup-n8n-binary.sh` and `AGENT_RUN_ID_8832a`
+  // are single names to a human and several lexemes to Postgres, which is why
+  // FTS cannot reassemble them. A phrase with spaces has no such disagreement:
+  // every word is its own lexeme on both sides, and FTS ranks it correctly
+  // without help (measured 2026-08-20: `PostgreSQL backup and restore` and
+  // `Log Rotation einrichten` were already ordered right before any of this).
+  //
+  // Without the second guard the rule reaches queries it has no business
+  // deciding. Counter-test, measured live: for `как добавить новый инструмент
+  // MCP`, a note that merely QUOTES that question in a list of test prompts
+  // beat the runbook that answers it — despite the runbook's ts_rank being
+  // 4.4x higher. Containing a sentence is not the same as being about it;
+  // containing a filename essentially is.
+  const verbatim = words.length > 1 && !/\s/.test(query.trim());
+  const exactHits = (await substringSearch(query, limit, filters))
+    .map((r) => (verbatim ? { ...r, exact: true } : r));
   if (rows.length === 0 && orRows.length === 0) {
-    return enrichResults(exactHits);
+    return enrichResults(applyExactBand(exactHits));
   }
+  const exactIds = new Set(verbatim ? exactHits.map((r) => r.id) : []);
 
   // n.rank is Postgres's actual ts_rank for this query — a genuine
   // relevance signal, unlike the positional score substringSearch falls
@@ -803,7 +848,11 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     // itself and the top hit would land back at 1.0, silently undoing the
     // whole point (2026-08-14 search-relevance overhaul, step 3b).
     const normalized = best > 0 ? weightedRank(n) / best : 0;
-    const coverage = tier === 'and' ? 1 : (coverageMap?.get(n.id) ?? 1);
+    const exact = exactIds.has(n.id);
+    // A note containing the query verbatim contains every word of it by
+    // definition, so a computed coverage below 1 here would be two reported
+    // facts contradicting each other.
+    const coverage = exact || tier === 'and' ? 1 : (coverageMap?.get(n.id) ?? 1);
     const relevance = normalized * coverage;
     // `tier` and `coverage` travel as observed facts — which cascade level
     // matched and how much of the query it contained. They used to be folded
@@ -817,10 +866,14 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
       relevance,
       text_tier: tier,
       coverage,
+      exact,
     };
   };
   // FTS rows win a duplicate: they carry a real ts_rank, while a substring hit
-  // only knows where in the document the literal appeared.
+  // only knows where in the document the literal appeared. The literal itself
+  // is not discarded with the row — `exact` above carries it onto the FTS row,
+  // so a note found by both keeps its real rank AND the fact that the whole
+  // query is in there.
   // Anchor hits are reported as the loose tier they are: they matched part of
   // the query, not the query. Their coverage — now weighted by rarity — is
   // what argues for them, and it argues honestly.
@@ -830,14 +883,45 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     ...anchorRows.map((n) => toResult(n, 'or')),
   ];
   const ftsIds = new Set(ftsResults.map((r) => r.id));
-  const results = [...ftsResults, ...exactHits.filter((r) => !ftsIds.has(r.id))]
+  const results = applyExactBand([...ftsResults, ...exactHits.filter((r) => !ftsIds.has(r.id))])
     // Relevance alone: the SQL returns 'and' rows before 'or' rows by raw
     // rank, but coverage can push an 'or' hit above an 'and' one, and the
     // caller reads top to bottom.
-    .sort((a, b) => b.relevance - a.relevance);
+    .sort((a, b) => Number(b.exact ?? false) - Number(a.exact ?? false) || b.relevance - a.relevance);
   const filtered = await applyFilters(results, limit, filters);
   await repairBrokenTableExcerpts(filtered);
   return enrichResults(filtered);
+}
+
+// Verbatim hits take the upper half of the relevance scale, everything else
+// the lower half. Only ever applied when something actually matched verbatim —
+// for the overwhelmingly common query that matches nothing literally, this is
+// the identity function and relevance is exactly what it has always been.
+//
+// The split exists so "verbatim outranks partial" is true of the NUMBER and
+// not only of the sort order: a caller that re-sorts by relevance, or reads it
+// to decide how many hits to open, reaches the same conclusion this function
+// does. The first attempt at this simply wrote relevance = 1 on every exact
+// hit, which ordered them correctly but flattened three genuinely different
+// notes into one tie — the same mistake as the confidence label this project
+// already removed, of promoting one strong signal to an absolute verdict.
+// Within each half the existing scores keep their proportions, so those three
+// still read 1.00 / 0.92 / 0.92 by their own ts_rank.
+const EXACT_BAND = 0.5;
+
+function applyExactBand<T extends { relevance: number; exact?: boolean }>(results: T[]): T[] {
+  const exactScores = results.filter((r) => r.exact).map((r) => r.relevance);
+  if (exactScores.length === 0) return results;
+  // Guarded: an exact hit whose own rank came out 0 would otherwise divide by
+  // zero. It still belongs above every partial match, so it lands on the floor
+  // of the upper band rather than being dropped through it.
+  const top = Math.max(...exactScores) || 1;
+  return results.map((r) => ({
+    ...r,
+    relevance: r.exact
+      ? EXACT_BAND + (1 - EXACT_BAND) * Math.min(1, r.relevance / top)
+      : EXACT_BAND * r.relevance,
+  }));
 }
 
 /** Title matches rank above content matches (queried separately, merged in order). */
@@ -919,8 +1003,6 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
   // match_chunks orders by similarity desc, so the first row is this
   // query's best hit — the reference point relevance is measured against.
   const best = (data[0]?.similarity as number | undefined) ?? 0;
-
-  // Degenerate set: the top hit barely cleared the floor at all. On a
 
   const candidates = best > 0 ? data.filter((n) => (n.similarity as number) >= 0.75 * best) : data;
 

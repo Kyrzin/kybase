@@ -972,6 +972,9 @@ export function createMcpServer(): McpServer {
     // always under explain.
     if (r.text_tier && (explain || r.text_tier !== 'and')) out.text_tier = r.text_tier;
     if (r.coverage !== undefined && (explain || r.coverage < 1)) out.coverage = round2(r.coverage);
+    // Only ever shipped as true: `exact: false` on nearly every hit would be
+    // noise, and its absence already means "not verbatim".
+    if (r.exact) out.exact = true;
     if (r.content_length !== undefined) out.content_length = r.content_length;
     if (explain) {
       // Hybrid results carry text_score/semantic_score directly (rrfMerge
@@ -1000,8 +1003,8 @@ export function createMcpServer(): McpServer {
     'Hybrid is the right default; prefer type=text for exact identifiers, code fragments, or quoted ' +
     'phrases, where FTS beats meaning-matching. ' +
     'Returns short excerpts, not full notes — call get_note on the top 1-2 hits to read them. ' +
-    'Each hit carries `relevance` (0..1, how close to the best hit in THIS response — always 1.0 ' +
-    'for the top result) and `matched_by` (which arms found it). Both describe the response, not ' +
+    'Each hit carries `relevance` (0..1, how close to the best hit in THIS response) and ' +
+    '`matched_by` (which arms found it). Both describe the response, not ' +
     'the world: relevance orders hits, it does not judge them, and there is deliberately no ' +
     'confidence score. Judge a hit by reading its excerpt.' +
     '\n\nWhat the search DOES decide on its own is whether to answer at all: a semantic hit below ' +
@@ -1009,10 +1012,24 @@ export function createMcpServer(): McpServer {
     'is close enough", not "nothing matched". That threshold is a per-model heuristic measured on ' +
     'a few corpora — see indexing_status for which model is active, the number in force, and ' +
     'whether it was ever measured for that model.' +
-    '\n\n`text_tier` and `coverage` are observed facts about the text match, shipped when they say ' +
-    'something you would not assume. A tier of "or"/"substring" means the strict query found ' +
-    'nothing and a looser pass filled in — recall, not confirmation. Coverage below 1 is the ' +
-    'fraction of the query\'s significant words the hit actually contains. Neither is comparable ' +
+    '\n\nA hit found ONLY by the semantic arm (`matched_by` is semantic_score alone) says the ' +
+    'passage is ABOUT something similar — never that it confirms what you asked. The two are ' +
+    'routinely different: a query about a technology a vault has never used still returns its ' +
+    'nearest neighbours, comfortably above threshold, with nothing about that technology in them. ' +
+    'So when a hit is semantic-only and its excerpt does not actually contain what you asked ' +
+    'about, the honest reading is "no confirmation found" — say that, or open the note to check. ' +
+    'Do not report it as evidence the thing exists.' +
+    '\n\n`text_tier`, `coverage` and `exact` are observed facts about the text match, shipped when ' +
+    'they say something you would not assume. A tier of "or"/"substring" means the strict query ' +
+    'found nothing and a looser pass filled in — recall, not confirmation. Coverage below 1 is the ' +
+    'fraction of the query\'s significant words the hit actually contains. `exact: true` is the ' +
+    'one thing FTS cannot express, and it means exactly this and nothing more: the query occurs ' +
+    'as a contiguous, case-insensitive substring of that note (wildcards escaped — `A_B` does not ' +
+    'match `AxB`). It is set only for a whitespace-free query that still splits into several ' +
+    'words — a filename, an identifier, a code symbol, the case where the tokenizer takes one ' +
+    'name apart and cannot put it back. Never for a phrase or a question: a note QUOTING your ' +
+    'question is not a note answering it. Such hits take the top half of the relevance scale, ' +
+    'ranked among themselves by their own text score. Neither tier nor coverage is comparable ' +
     'across different queries, only within one response. ' +
     'Filters: folder_id, tag, created_after/before (when a note was made), updated_after/before ' +
     '(when its own content/title/folder/tags last actually changed — a rename elsewhere rewriting ' +

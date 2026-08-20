@@ -3,113 +3,100 @@ import { getEmbeddingConfig, getBandOverride, type EmbeddingConfig } from './set
 
 export type EmbedTask = 'query' | 'document';
 
-// Semantic-search recall floor — a junk gate, not a relevance judgment.
-// Everything at or above this cosine is a *candidate*; how good a candidate
-// is gets decided relative to the best hit in its own result set
-// (lib/search.ts semanticSearch), not against this absolute number. That
-// split is deliberate: a single absolute cosine can't do both jobs at once
-// (2026-08-14 measurement — see the 2026-08-14 search-relevance overhaul). This is
-// still per-model, and still a real number pulled from measurement, not a
-// vault-tuned judgment threshold like the old 0.40/0.55 — the reason it
-// can't be one flat number for every model is architectural, not this
-// vault's content: embeddinggemma and nomic-embed-text distribute cosine
-// similarity completely differently regardless of what's being searched.
+// ── Model profiles ─────────────────────────────────────────────────────────
 //
-// Measured live 2026-08-14, same-text pairs on both models (noise = two
-// genuinely unrelated passages, signal = a real query against its actual
-// answer):
-//   embeddinggemma:   noise ~0.08–0.18, signal ~0.53–0.69 → wide gap, a
-//                      single flat gate works (0.30 sits in the middle).
-//   nomic-embed-text: noise ~0.50–0.66, signal ~0.68–0.72 → compressed to
-//                      a ~0.02–0.05 gap. A gate here can only sit just
-//                      below the observed signal floor; it will still let
-//                      some noise through on its own — see
-//                      MIN_SIGNAL_MARGIN in lib/search.ts for the second
-//                      layer that catches that (a "best" result that only
-//                      barely clears this floor isn't a confident one).
-//   Only 5 pairs each — enough to show the shapes are genuinely different,
-//   not enough to call these final. Re-run the battery
-//   (see the 2026-08-14 search-relevance overhaul methodology) on any model change.
-function minSimilarityFor(cfg: EmbeddingConfig): number {
-  if (cfg.provider === 'ollama') {
-    if ((cfg.ollamaModel ?? '').includes('nomic-embed-text')) return 0.65;
-    return 0.30; // embeddinggemma (default) and other local models
+// One number per embedding MODEL: the cosine below which a semantic hit is
+// treated as unrelated, and the only absolute number left in search.
+//
+// Keyed by MODEL, not provider. A provider is not a property of a similarity
+// space — an OpenAI-compatible endpoint can serve a different model tomorrow,
+// and the threshold would then belong to the wrong geometry.
+//
+// Honest about what it is: a heuristic measured on a handful of pairs, never
+// a probability.
+//
+// Deriving it from a vault's own contents instead was built, measured and
+// abandoned. It does not work, and the reason is structural rather than a
+// tuning failure: probes drawn from a collection's own text — titles, or
+// sentences out of the documents — outscore the questions people actually
+// ask, because everything in one collection resembles everything else in it
+// more than an outsider's phrasing ever will. The background such probes
+// produce sits ABOVE real searches, so a cutoff derived from it removes
+// answers rather than noise. Underneath that: how similar a collection is to
+// itself does not answer whether one query-document pair is related.
+//
+// The geometry of cosine mostly follows the model, so the model carries the
+// number. A portable alternative would have to score the (query, document)
+// pair directly, or come from a fixed benchmark run once per model — not
+// from a fourth way of averaging the corpus.
+//
+// Measured on live vaults (2026-08-14 gemma/nomic, 2026-08-18 google), noise =
+// unrelated passages, signal = a real query against its actual answer:
+//   embeddinggemma      noise ~0.08–0.21, signal ~0.38–0.69  — wide gap
+//   nomic-embed-text    noise ~0.50–0.66, signal ~0.68–0.72  — compressed
+//   text-embedding-004  noise ≤0.552,     signal ≥0.736
+//
+// The values are the EFFECTIVE thresholds those batteries produced. They used
+// to be a base number plus a relative margin computed in lib/search.ts; that
+// indirection is gone, because the two together only ever produced one number
+// and hid it in two files. What a search applies is what is written here.
+//
+// Adding a model means measuring it — properly, across several unrelated
+// corpora rather than one vault (roadmap).
+type ModelProfile = {
+  minSimilarity: number;
+  /** false = shipped but never actually measured; reported as such. */
+  measured: boolean;
+};
+
+const MODEL_PROFILES: Record<string, ModelProfile> = {
+  'embeddinggemma':     { minSimilarity: 0.349, measured: true },
+  'nomic-embed-text':   { minSimilarity: 0.674, measured: true },
+  'text-embedding-004': { minSimilarity: 0.582, measured: true },
+  // Inherited from the old "everything that is not Google" branch and never
+  // measured on anything. Kept so behaviour does not silently change for
+  // whoever is using it, and flagged so nobody mistakes it for a result.
+  'text-embedding-3':   { minSimilarity: 0.489, measured: false },
+};
+
+// An unknown model gets semantic retrieval but no promise of abstention.
+// Pretending a stranger's cosines behave like embeddinggemma's is exactly the
+// quiet unmeasured claim this file spent a day removing; a user who has
+// measured their own model sets `embedding_bands` and gets a threshold back.
+const UNPROFILED_MIN_SIMILARITY = 0;
+
+export type SemanticProfile = {
+  model: string;
+  minSimilarity: number;
+  status: 'profiled' | 'unverified' | 'unprofiled' | 'configured';
+};
+
+function modelNameOf(cfg: EmbeddingConfig): string {
+  if (cfg.provider === 'ollama') return cfg.ollamaModel ?? 'embeddinggemma';
+  if (cfg.provider === 'google') return process.env.GOOGLE_MODEL ?? 'text-embedding-004';
+  return process.env.OPENAI_MODEL ?? 'text-embedding-3-small';
+}
+
+/**
+ * The abstention threshold in force, and where it came from. Reported rather
+ * than merely applied: a user whose model was never profiled deserves to know
+ * that semantic search will not refuse anything on its own.
+ */
+export async function getSemanticProfile(): Promise<SemanticProfile> {
+  const cfg = await getEmbeddingConfig();
+  const model = modelNameOf(cfg);
+  const override = await getBandOverride(embeddingModelKey(cfg));
+  if (override?.gate !== undefined) {
+    return { model, minSimilarity: override.gate, status: 'configured' };
   }
-  // 0.55 for Google confirmed by measurement 2026-08-18, not inherited from
-  // the "everything else" branch it used to sit in: the highest noise sample
-  // on a live 121-note vault was 0.552, and signalMargin lifts the effective
-  // floor to ~0.58, which cleared all five noise probes. See signalFloorFor
-  // below for the full battery. OpenAI's 0.45 is still unmeasured.
-  return cfg.provider === 'openai' ? 0.45 : 0.55;
+  const key = Object.keys(MODEL_PROFILES).find((k) => model.includes(k));
+  const profile = key ? MODEL_PROFILES[key] : null;
+  if (!profile) return { model, minSimilarity: UNPROFILED_MIN_SIMILARITY, status: 'unprofiled' };
+  return { model, minSimilarity: profile.minSimilarity, status: profile.measured ? 'profiled' : 'unverified' };
 }
 
 export async function getMinSimilarity(): Promise<number> {
-  return minSimilarityFor(await getEmbeddingConfig());
-}
-
-/**
- * Where a model's REAL matches start, as opposed to where its noise stops.
- * minSimilarityFor above is the second number; this is the first.
- *
- * Why both are needed: a raw cosine says nothing on its own, because models
- * do not share a scale — embeddinggemma separates noise (~0.08–0.18) from
- * signal (~0.53–0.69) by a wide gap, nomic-embed-text compresses the same
- * distinction into ~0.02–0.05. So "0.7 is a good match" is meaningless
- * across models, while "70% of the way from this model's noise ceiling to
- * its signal floor" is the same statement for all of them. That fraction is
- * what lib/search.ts's confidence ladder consumes, and it is the only way to
- * judge a hit WITHOUT looking at its neighbours in the same response.
- *
- * null = this model's band was never measured. Deliberately not guessed:
- * the ladder then refuses to treat its cosine as full corroboration rather
- * than inventing a number, which is visible (hits cap at `moderate`) instead
- * of silently wrong. Fix by measuring, not by picking a plausible constant —
- * the procedure is in the "методика оценки embedding-моделей" note, and the
- * result belongs in the `embedding_bands` setting, not here.
- *
- * Ollama values are the 2026-08-14 measurement, 5 pairs per model.
- *
- * Google text-embedding-004 measured 2026-08-18 on a live 121-note RU/DE/EN
- * vault, 11 probes: 5 queries on topics the vault demonstrably does not
- * contain (noise: 0.516, 0.516, 0.533, 0.540, 0.552) and 6 whose correct
- * answer came back first (signal: 0.736, 0.743, 0.787, 0.796, 0.825, 0.844).
- * A wide empty corridor between 0.552 and 0.736 — and three probes landed
- * inside it (0.612, 0.613, 0.625), every one of them a query with no real
- * answer in the vault and an irrelevant top hit. That corridor is exactly
- * what the two numbers are for: the gate keeps recall (0.55 stays, since the
- * degenerate-set margin already lifts the effective floor to ~0.58, above the
- * highest noise sample), while the signal floor decides confidence — so a
- * 0.61 near-miss now comes back as a candidate the ladder marks as NOT full
- * corroboration, instead of either being silently dropped or dressed up as a
- * confident answer.
- *
- * 0.72 rather than the observed 0.736: eleven probes are enough to place the
- * corridor, not enough to pin its edge to three digits. OpenAI stays
- * unmeasured — its hits cap at `moderate` until someone runs the same battery.
- */
-function signalFloorFor(cfg: EmbeddingConfig): number | null {
-  if (cfg.provider === 'ollama') {
-    if ((cfg.ollamaModel ?? '').includes('nomic-embed-text')) return 0.68;
-    return 0.53; // embeddinggemma
-  }
-  return cfg.provider === 'google' ? 0.72 : null;
-}
-
-export type EmbeddingBand = { gate: number; signalFloor: number | null };
-
-/**
- * The active model's band, with the `embedding_bands` setting overriding the
- * measured defaults above. A setting rather than a constant so that measuring
- * a new model is a value change, not a code change and a redeploy — rule 2 of
- * the roadmap's own framing ("настройка с разумным дефолтом").
- */
-export async function getEmbeddingBand(): Promise<EmbeddingBand> {
-  const cfg = await getEmbeddingConfig();
-  const override = await getBandOverride(embeddingModelKey(cfg));
-  return {
-    gate: override?.gate ?? minSimilarityFor(cfg),
-    signalFloor: override?.signalFloor ?? signalFloorFor(cfg),
-  };
+  return (await getSemanticProfile()).minSimilarity;
 }
 
 /** Stable key for the active provider+model, used by the bands setting. */
@@ -263,6 +250,14 @@ async function fetchWithRetry(
 //   - nomic-embed-text: search_query: / search_document:
 //     (kept a narrow high band on RU — see lib/search.ts MIN_SIMILARITY note).
 //   - anything else: no prefix.
+/**
+ * Bump whenever the QUERY-side prompt below changes. Stored query vectors
+ * from two versions live in different subspaces and must never be pooled into
+ * one distribution — the same trap that made 2026-08-19's first calibration
+ * compare document-space against query-space and read 0.3 too high.
+ */
+export const QUERY_PROMPT_VERSION = 1;
+
 function ollamaPromptInput(model: string, task: EmbedTask, text: string): string {
   if (model.includes('embeddinggemma')) {
     return task === 'query'

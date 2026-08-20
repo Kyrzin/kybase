@@ -83,8 +83,14 @@ export async function setFtsLanguages(languages: string[]): Promise<void> {
   await setSetting('fts_languages', languages.map((s) => s.trim()).filter(Boolean).join(','));
 }
 
-export type BandOverride = { gate?: number; signalFloor?: number };
+export type BandOverride = { gate?: number };
 
+// Semantic abstention threshold override per embedding model. Empty by
+// default: the code ships profiles for the models it measured, and this is
+// how someone on an unprofiled model supplies a number without a code change.
+// A companion `signalFloor` used to live here and fed a confidence verdict;
+// both are gone: see the note above minSimilarityFor in lib/embeddings.ts.
+// Original note, kept for the caching rationale:
 // Measured noise/signal bands per embedding model, keyed by the provider+model
 // string lib/embeddings.ts builds. Empty by default: the code carries the
 // bands it has actually measured, and this only overrides them — so measuring
@@ -95,11 +101,20 @@ export type BandOverride = { gate?: number; signalFloor?: number };
 const BANDS_CACHE_TTL_MS = 5_000;
 let cachedBands: { value: Record<string, BandOverride>; expiresAt: number } | null = null;
 
-export async function getBandOverride(modelKey: string): Promise<BandOverride | null> {
+/**
+ * Every stored band, validated the same way a single lookup is. The
+ * calibrator needs it to merge its result with other models' bands instead
+ * of overwriting them, and the settings UI needs it to show what is stored.
+ */
+export async function getEmbeddingBands(): Promise<Record<string, BandOverride>> {
   if (!cachedBands || Date.now() >= cachedBands.expiresAt) {
     cachedBands = { value: await getBandsUncached(), expiresAt: Date.now() + BANDS_CACHE_TTL_MS };
   }
-  return cachedBands.value[modelKey] ?? null;
+  return cachedBands.value;
+}
+
+export async function getBandOverride(modelKey: string): Promise<BandOverride | null> {
+  return (await getEmbeddingBands())[modelKey] ?? null;
 }
 
 async function getBandsUncached(): Promise<Record<string, BandOverride>> {
@@ -122,11 +137,7 @@ async function getBandsUncached(): Promise<Record<string, BandOverride>> {
     // A hand-edited row must degrade to "unmeasured" (the ladder then refuses
     // to claim full corroboration), never to a silently inverted scale.
     if (typeof v.gate === 'number' && Number.isFinite(v.gate) && v.gate >= 0 && v.gate < 1) band.gate = v.gate;
-    if (typeof v.signalFloor === 'number' && Number.isFinite(v.signalFloor) && v.signalFloor > 0 && v.signalFloor < 1) {
-      band.signalFloor = v.signalFloor;
-    }
-    if (band.gate !== undefined && band.signalFloor !== undefined && band.signalFloor <= band.gate) continue;
-    if (band.gate !== undefined || band.signalFloor !== undefined) out[key] = band;
+    if (band.gate !== undefined) out[key] = band;
   }
   return out;
 }

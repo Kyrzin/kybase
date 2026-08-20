@@ -12,6 +12,7 @@ import { rewriteBacklinks } from './rename-links';
 import { buildGraph } from './graph-data';
 import { indexedForm } from './graph';
 import { extractHeadings, type Heading } from './markdown';
+import { getSemanticProfile } from './embeddings';
 import { MAX_NOTE_CONTENT_CHARS, stripNulBytes } from './types';
 
 
@@ -963,17 +964,12 @@ export function createMcpServer(): McpServer {
       excerpt: r.excerpt,
       tags: r.tags,
       relevance: round2(r.relevance),
-      confidence: r.confidence,
     };
     if (hybrid.matched_by) out.matched_by = hybrid.matched_by;
-    // text_tier and coverage are the inputs the confidence ladder discounts on.
-    // are worth their bytes exactly when they DID discount something, so they
-    // ship only then: a non-'and' tier, or coverage below 1. In the ordinary
-    // case ('and' at full coverage) their presence carried no information the
-    // verdict didn't already state, and they were on every hit of every
-    // response. Absence is now itself the signal "nothing qualified this
-    // hit"; explain:true still shows them unconditionally, so the discount
-    // stays auditable from outside rather than merely trusted.
+    // Observed facts about the text match: which cascade level found it and
+    // how much of the query it contains. Shipped when they say something a
+    // reader would not assume — a non-'and' tier or coverage below 1 — and
+    // always under explain.
     if (r.text_tier && (explain || r.text_tier !== 'and')) out.text_tier = r.text_tier;
     if (r.coverage !== undefined && (explain || r.coverage < 1)) out.coverage = round2(r.coverage);
     if (r.content_length !== undefined) out.content_length = r.content_length;
@@ -991,6 +987,7 @@ export function createMcpServer(): McpServer {
       if (hybrid.semantic_score !== undefined) out.semantic_score = round3(hybrid.semantic_score);
       else if (plain.score !== undefined && plain.text_tier === undefined) out.semantic_score = round3(plain.score);
       if (hybrid.rrf_score !== undefined) out.rrf_score = round3(hybrid.rrf_score);
+
       if (r.created_at) out.created_at = r.created_at;
     }
     return out;
@@ -1004,25 +1001,19 @@ export function createMcpServer(): McpServer {
     'phrases, where FTS beats meaning-matching. ' +
     'Returns short excerpts, not full notes — call get_note on the top 1-2 hits to read them. ' +
     'Each hit carries `relevance` (0..1, how close to the best hit in THIS response — always 1.0 ' +
-    'for the top result, says nothing about absolute quality on its own) and `confidence` ' +
-    '("strong"/"moderate"/"weak", the field to actually act on). The two are independent on ' +
-    'purpose: relevance orders a response, confidence judges a hit. **A hit\'s confidence never ' +
-    'changes because of what else is in the response** — it is computed from what each arm found ' +
-    'on its own, so a correct answer keeps its verdict even when a stronger hit sits above it. ' +
-    '`strong` means both arms are convincing: the text side matched the query as typed ("and") or ' +
-    'a loosened OR match that still contains EVERY significant word, AND the semantic side landed ' +
-    'inside the embedding model\'s own measured signal band. On a model whose band was never ' +
-    'measured the semantic side cannot claim that, so hits cap at `moderate` — that is a missing ' +
-    'measurement, not a weak result. `moderate` means one convincing signal: read the excerpt ' +
-    'before relying on it. `weak` usually means ' +
-    'reformulate, EXCEPT: if a weak/moderate hit is the only or top-ranked result and its excerpt ' +
-    'already answers the question, read it before discarding it. ' +
-    '`text_tier` and `coverage` appear ONLY when they qualified the verdict, so their absence is ' +
-    'itself the clean case — the query as typed matched, in full. A tier of "or"/"substring" means ' +
-    'the strict query found nothing and a looser pass filled in (recall, not confirmation, never ' +
-    '`strong` on its own); coverage below 1 is the fraction of the query\'s significant words the ' +
-    'hit actually contains. Neither is comparable across different queries, only within one ' +
-    'response. ' +
+    'for the top result) and `matched_by` (which arms found it). Both describe the response, not ' +
+    'the world: relevance orders hits, it does not judge them, and there is deliberately no ' +
+    'confidence score. Judge a hit by reading its excerpt.' +
+    '\n\nWhat the search DOES decide on its own is whether to answer at all: a semantic hit below ' +
+    'the active model\'s minimum similarity is not returned, so an empty result means "nothing here ' +
+    'is close enough", not "nothing matched". That threshold is a per-model heuristic measured on ' +
+    'a few corpora — see indexing_status for which model is active, the number in force, and ' +
+    'whether it was ever measured for that model.' +
+    '\n\n`text_tier` and `coverage` are observed facts about the text match, shipped when they say ' +
+    'something you would not assume. A tier of "or"/"substring" means the strict query found ' +
+    'nothing and a looser pass filled in — recall, not confirmation. Coverage below 1 is the ' +
+    'fraction of the query\'s significant words the hit actually contains. Neither is comparable ' +
+    'across different queries, only within one response. ' +
     'Filters: folder_id, tag, created_after/before (when a note was made), updated_after/before ' +
     '(when its own content/title/folder/tags last actually changed — a rename elsewhere rewriting ' +
     'a [[link]] to this note does not count) — these are NOT interchangeable. ' +
@@ -1096,7 +1087,15 @@ export function createMcpServer(): McpServer {
     'indexing_status',
     'Semantic-index progress: total/indexed/pending notes, complete=true when pending=0. Pending ' +
     'notes are still found by text search but not semantic/hybrid until embedded (automatic, ' +
-    'background). Stuck pending count while nothing is being edited = check Ollama/server logs.',
+    'background). Stuck pending count while nothing is being edited = check Ollama/server logs.\n' +
+    'Also names the active embedding model and the semantic cutoff in force. ' +
+    'semantic_min_similarity is the cosine below which a semantic hit is not returned at all, and ' +
+    'semantic_profile says where that number came from: "profiled" (measured for this model), ' +
+    '"unverified" (shipped but never actually measured), "configured" (set by hand in settings), ' +
+    'or "unprofiled" — no threshold for this model, so semantic search returns its nearest ' +
+    'matches and refuses nothing. Raw cosines are NOT comparable between models: a number that ' +
+    'means a good match on one means noise on another, which is why the model is named here ' +
+    'rather than left to be inferred from the score.',
     {},
     async () => {
       const row = await queryOne<{ total: number; pending: number }>(
@@ -1106,10 +1105,16 @@ export function createMcpServer(): McpServer {
       );
       const total = row?.total ?? 0;
       const pending = row?.pending ?? 0;
+      const profile = await getSemanticProfile();
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ total, indexed: total - pending, pending, complete: pending === 0 }),
+          text: JSON.stringify({
+            total, indexed: total - pending, pending, complete: pending === 0,
+            embedding_model: profile.model,
+            semantic_min_similarity: profile.minSimilarity,
+            semantic_profile: profile.status,
+          }),
         }],
       };
     }

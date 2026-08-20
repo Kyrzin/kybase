@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages, getTagWeights, setTagWeights, getFolderWeights, setFolderWeights } from '@/lib/settings';
+import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages, getTagWeights, setTagWeights, getFolderWeights, setFolderWeights, getEmbeddingBands, setEmbeddingBands } from '@/lib/settings';
 import { z } from 'zod';
 
 const UpdateSettingsSchema = z.object({
@@ -25,6 +25,14 @@ const UpdateSettingsSchema = z.object({
   // exist (typo, later-deleted folder) just never matches anything, same as
   // an unknown tag name.
   folderWeights: z.record(z.string(), z.number()).optional(),
+  // Semantic abstention threshold per model key. Only the `gate` half exists:
+  // this is how someone running a model kybase has no profile for supplies a
+  // number for it without a code change and a redeploy. Absent by default —
+  // profiled models carry their own (lib/embeddings.ts).
+  embeddingBands: z.record(z.string(), z.object({
+    gate:        z.number().min(0).max(0.999).optional(),
+    signalFloor: z.number().min(0.001).max(0.999).optional(),
+  })).optional(),
 });
 
 // Auth is proxy.ts.ts (session cookie or master-secret bearer) — this
@@ -33,8 +41,8 @@ const UpdateSettingsSchema = z.object({
 // stopped sending it (see the session-cookie change): the browser started
 // getting 401s here even though proxy.ts had already let it through.
 export async function GET() {
-  const [cfg, ftsLanguages, tagWeights, folderWeights] = await Promise.all([
-    getEmbeddingConfig(), getFtsLanguages(), getTagWeights(), getFolderWeights(),
+  const [cfg, ftsLanguages, tagWeights, folderWeights, embeddingBands] = await Promise.all([
+    getEmbeddingConfig(), getFtsLanguages(), getTagWeights(), getFolderWeights(), getEmbeddingBands(),
   ]);
   return NextResponse.json({
     provider: cfg.provider,
@@ -44,6 +52,7 @@ export async function GET() {
     ftsLanguages,
     tagWeights,
     folderWeights,
+    embeddingBands,
   });
 }
 
@@ -65,6 +74,8 @@ export async function PUT(req: NextRequest) {
   if (body.ftsLanguages)  await setFtsLanguages(body.ftsLanguages);
   if (body.tagWeights)    await setTagWeights(body.tagWeights);
   if (body.folderWeights) await setFolderWeights(body.folderWeights);
+  // Merge, not replace: a vault that has measured two models keeps both.
+  if (body.embeddingBands) await setEmbeddingBands({ ...(await getEmbeddingBands()), ...body.embeddingBands });
 
   // Mark all live notes for reindex when provider changes. Used to also
   // kick off /api/admin/reindex itself right here — a single Save click

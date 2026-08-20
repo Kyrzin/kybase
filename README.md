@@ -74,6 +74,7 @@ Everything below goes in `.env` (copied from `.env.example`). `KYBASE_SECRET` an
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `KYBASE_SECRET` | *(required)* | UI login password and MCP/API bearer token. Generate with `openssl rand -hex 32`. |
+| `KYBASE_OAUTH_ALLOWED_HOSTS` | `claude.ai` | Comma-separated extra hosts allowed as an OAuth `redirect_uri` (localhost is always allowed). Only relevant if an MCP client does its own hosted OAuth instead of a static Bearer token. |
 | `KYBASE_PORT` | `3000` | Host port the app is exposed on. |
 | `POSTGRES_PASSWORD` | *(required)* | Postgres is only reachable inside the compose network, but `docker compose up` refuses to start without one — no silent weak default. Generate with `openssl rand -hex 16`. |
 | `KYBASE_TAG` | `latest` | Prebuilt image tag from `ghcr.io/kyrzin/kybase`. `latest` always tracks the newest [release](https://github.com/Kyrzin/kybase/releases) tag; pin to a specific version (e.g. `v1.3.0`) if you want upgrades to be a deliberate step. |
@@ -147,7 +148,7 @@ revocable OAuth token — see **Settings → Connected clients** in the web UI.
 
 | Tool | Category | What it does for the agent |
 |------|----------|------------------------------|
-| `search_notes` | Search | Hybrid RRF search (pgvector + bilingual FTS); per-model similarity cutoff decides when nothing is close enough |
+| `search_notes` | Search | Hybrid RRF search (pgvector + bilingual FTS); `exact` flags a literal substring match, `matched_by` shows which arms found it, `section` names which part of a long note matched |
 | `get_note` | Read | Fetch a note by id or fuzzy title; windowed for large notes, with a heading outline. `resolve_links:true` also resolves every `[[wikilink]]` inside it, one level deep, in the same round-trip |
 | `list_notes` | Read | Newest-first listing, filterable by folder/tag/updated date |
 | `list_tags` | Read | All tags in use with counts, so the agent reuses existing tags instead of coining duplicates |
@@ -168,6 +169,15 @@ revocable OAuth token — see **Settings → Connected clients** in the web UI.
 The server ships with MCP instructions that teach the agent to search before
 writing and to add `[[wikilinks]]` to related notes — so the knowledge graph
 grows as the agent uses it, instead of accumulating orphan notes.
+
+**On search results.** Kybase doesn't grade a hit's confidence — `relevance`
+only orders a response against its own best hit, it isn't a probability.
+What it does decide is whether to answer at all: a semantic hit below the
+active model's threshold isn't returned, so an empty result means "nothing
+close enough," not "nothing matched." `exact:true` means the query is a
+literal substring of the note, nothing softer. When a hit's `section` is
+set, `get_note(section:)` reads just that part instead of the whole note —
+cheaper, and usually all an agent needs.
 
 ## Stack
 
@@ -201,9 +211,13 @@ All supported providers use 768-dimensional embeddings, so switching does not re
 multilingual) — for multilingual vaults (e.g. Russian/German) set the Ollama
 model to `embeddinggemma`; it separates relevant from irrelevant notes far
 better than English-centric models. `nomic-embed-text` is a smaller,
-English-leaning alternative. The semantic-similarity threshold adapts to the
-model automatically (see `getMinSimilarity` in `lib/embeddings.ts`), so no
-manual tuning is needed when you switch.
+English-leaning alternative. Models Kybase has measured (`embeddinggemma`,
+`nomic-embed-text`, Google's `text-embedding-004`) ship with their own
+similarity threshold, so switching between them needs no manual tuning —
+see `lib/embeddings.ts` for which models are profiled. An unmeasured model
+runs semantic search with no threshold at all rather than a guessed one;
+`indexing_status` reports this, and you can supply your own via the
+`embeddingBands` setting.
 
 > [!TIP]
 > **Already run Ollama?** On a host that already has an Ollama instance (e.g. a

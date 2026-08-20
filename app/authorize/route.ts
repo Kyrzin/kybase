@@ -10,10 +10,30 @@ function esc(s: string) {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// claude.ai is the only hosted OAuth client this server documents — every
+// other client in the README (Claude Code, Claude Desktop, Cursor,
+// Windsurf) authenticates with a static Bearer token, never through this
+// flow. KYBASE_OAUTH_ALLOWED_HOSTS lets an owner add their own without a
+// code change.
+const DEFAULT_ALLOWED_HOSTS = ['claude.ai'];
+
+function allowedHosts(): string[] {
+  const extra = (process.env.KYBASE_OAUTH_ALLOWED_HOSTS ?? '')
+    .split(',')
+    .map(h => h.trim())
+    .filter(Boolean);
+  return [...DEFAULT_ALLOWED_HOSTS, ...extra];
+}
+
 // The code (and with it the master secret) is sent wherever redirect_uri
-// points, so a phishing link with an attacker-controlled redirect_uri would
-// exfiltrate it. Require https (or localhost for local MCP clients) and show
-// the target host on the consent form so the user sees where they're sent.
+// points. Requiring https alone isn't enough: an attacker can build their
+// own PKCE pair and mail a victim a link to this server's real /authorize
+// with redirect_uri set to a host they control — the victim sees the real
+// domain, submits the real secret, and the code lands on the attacker's
+// server via the 303 redirect, PKCE untouched because the attacker holds
+// the matching code_verifier. Hosts must be on the allowlist; loopback
+// stays open unconditionally for local MCP clients that run their own
+// short-lived callback server on a random port.
 function parseRedirectUri(uri: string): URL | null {
   let url: URL;
   try {
@@ -22,7 +42,8 @@ function parseRedirectUri(uri: string): URL | null {
     return null;
   }
   const isLoopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-  if (url.protocol === 'https:' || (url.protocol === 'http:' && isLoopback)) return url;
+  if (isLoopback) return url.protocol === 'http:' || url.protocol === 'https:' ? url : null;
+  if (url.protocol === 'https:' && allowedHosts().includes(url.hostname)) return url;
   return null;
 }
 
@@ -80,7 +101,7 @@ export async function GET(req: NextRequest) {
   }
   if (!parseRedirectUri(p.redirect_uri ?? '')) {
     return NextResponse.json(
-      { error: 'invalid_request', error_description: 'redirect_uri must be https (or http on localhost)' },
+      { error: 'invalid_request', error_description: 'redirect_uri must be https on an allowed host (or localhost)' },
       { status: 400 }
     );
   }
@@ -125,7 +146,7 @@ export async function POST(req: NextRequest) {
   const callbackUrl = parseRedirectUri(redirectUri);
   if (!callbackUrl) {
     return NextResponse.json(
-      { error: 'invalid_request', error_description: 'redirect_uri must be https (or http on localhost)' },
+      { error: 'invalid_request', error_description: 'redirect_uri must be https on an allowed host (or localhost)' },
       { status: 400 }
     );
   }

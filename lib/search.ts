@@ -59,6 +59,13 @@ export type SearchResult = {
   // and nothing more; two verbatim hits are still ranked against each other by
   // their own text score.
   exact?: boolean;
+  // The markdown heading the excerpt was taken from, when it is known — set
+  // by the semantic arm, where the chunker already recorded it. Travels with
+  // the excerpt it belongs to (rrfMerge keeps the first arm's result object
+  // whole), so it never labels one passage with another's heading. Pass it
+  // to get_note's `section` to read that part of the note alone: measured
+  // 2026-08-20 on a real server note, 681 characters instead of 13035.
+  section?: string;
   // textSearch only. Fraction of the query's significant lexemes actually
   // present in this hit's search_vector (see computeTextCoverage) — a
   // query/document ratio, not a corpus-tuned constant. Exists because
@@ -1027,17 +1034,23 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
 
   const results = dedupedCandidates.map((n) => {
     const heading = n.heading as string | null;
-    // Drop the chunk's own `# Heading` line so it isn't repeated by the
-    // `[heading]` context prefix below.
+    // Drop the chunk's own `# Heading` line — it travels as `section` instead.
     const excerpt = makeExcerpt(stripLeadingHeading(n.chunk_content as string), query);
     const relevance = (n.similarity as number) / best;
     return {
       id:      n.id as string,
       title:   n.title as string,
-      excerpt: heading ? `[${heading}] ${excerpt}` : excerpt,
+      excerpt,
       tags:    n.tags as string[],
       score:   n.similarity as number,
       relevance,
+      // The chunker already splits notes at markdown headings and stores each
+      // chunk's own (lib/chunking.ts, note_chunks.heading), so the section a
+      // semantic hit landed in costs nothing to report. It used to be glued
+      // onto the front of the excerpt as "[Heading] …" — readable, but an
+      // agent had to parse it back out of prose to use it, and get_note's
+      // `section` argument takes exactly this string. A field, not a prefix.
+      ...(heading ? { section: heading } : {}),
     };
   });
   return enrichResults(await applyFilters(results, limit, filters));

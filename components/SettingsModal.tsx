@@ -47,6 +47,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   const [stopping, setStopping]               = useState(false);
   const [importRunning, setImportRunning]     = useState(false);
   const [settingsTab, setSettingsTab]         = useState<'embeddings' | 'access'>('embeddings');
+  const [keyStatus, setKeyStatus] = useState<{ google: string; openai: string } | null>(null);
   const [oauthClients, setOauthClients]       = useState<OAuthClient[]>([]);
   const [shares, setShares]                   = useState<ShareItem[]>([]);
   const [trash, setTrash]                     = useState<TrashedNote[]>([]);
@@ -57,6 +58,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
       setSettingsProvider(data.provider ?? 'ollama');
       setSettingsOllamaModel(data.ollamaModel ?? 'embeddinggemma');
       setSettingsStatus(null);
+      setKeyStatus({ google: data.googleKeyStatus ?? 'unset', openai: data.openaiKeyStatus ?? 'unset' });
     });
     apiFetch('/api/oauth/clients')
       .then(r => (r.ok ? r.json() : []))
@@ -272,6 +274,11 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
 
             {settingsTab === 'embeddings' && (
             <>
+            {keyStatus && (keyStatus.google === 'undecryptable' || keyStatus.openai === 'undecryptable') && (
+              <div style={{ fontSize: 12, color: '#f38ba8', background: 'rgba(243,139,168,0.1)', border: '1px solid rgba(243,139,168,0.3)', borderRadius: 6, padding: '8px 10px', marginBottom: 16, lineHeight: 1.5 }}>
+                {[keyStatus.google === 'undecryptable' && 'Google', keyStatus.openai === 'undecryptable' && 'OpenAI'].filter(Boolean).join(' and ')} API key{keyStatus.google === 'undecryptable' && keyStatus.openai === 'undecryptable' ? 's are' : ' is'} saved but can no longer be read — usually means the server&apos;s secret was rotated after the key was saved. Re-enter it below to fix.
+              </div>
+            )}
             <label style={{ fontSize: 12, color: '#a6adc8', display: 'block', marginBottom: 6 }}>Provider</label>
             <select value={settingsProvider} onChange={e => setSettingsProvider(e.target.value as 'ollama' | 'google' | 'openai')} style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', marginBottom: 16, outline: 'none' }}>
               <option value="ollama">Ollama (local, free)</option>

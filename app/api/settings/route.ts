@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages, getTagWeights, setTagWeights, getFolderWeights, setFolderWeights, getEmbeddingBands, setEmbeddingBands } from '@/lib/settings';
+import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages, getTagWeights, setTagWeights, getFolderWeights, setFolderWeights, getEmbeddingBands, setEmbeddingBands, getProviderKeyHealth } from '@/lib/settings';
 import { z } from 'zod';
 
 const UpdateSettingsSchema = z.object({
@@ -43,14 +43,22 @@ const UpdateSettingsSchema = z.object({
 // stopped sending it (see the session-cookie change): the browser started
 // getting 401s here even though proxy.ts had already let it through.
 export async function GET() {
-  const [cfg, ftsLanguages, tagWeights, folderWeights, embeddingBands] = await Promise.all([
-    getEmbeddingConfig(), getFtsLanguages(), getTagWeights(), getFolderWeights(), getEmbeddingBands(),
+  const [cfg, ftsLanguages, tagWeights, folderWeights, embeddingBands, keyHealth] = await Promise.all([
+    getEmbeddingConfig(), getFtsLanguages(), getTagWeights(), getFolderWeights(), getEmbeddingBands(), getProviderKeyHealth(),
   ]);
   return NextResponse.json({
     provider: cfg.provider,
     ollamaModel: cfg.ollamaModel,
     hasGoogleKey: !!cfg.googleApiKey,
     hasOpenaiKey: !!cfg.openaiApiKey,
+    // 'undecryptable' means a key was saved through this UI but can no
+    // longer be read back — almost always KYBASE_SECRET was rotated after
+    // it was saved. hasGoogleKey/hasOpenaiKey above can still be true here
+    // (an env var is covering for it), which is exactly why this needs its
+    // own field: the saved value is still orphaned even if something else
+    // happens to be working right now.
+    googleKeyStatus: keyHealth.googleApiKey,
+    openaiKeyStatus: keyHealth.openaiApiKey,
     ftsLanguages,
     tagWeights,
     folderWeights,
@@ -67,7 +75,9 @@ export async function PUT(req: NextRequest) {
   const body = parsed.data;
 
   const currentCfg = await getEmbeddingConfig();
-  const providerChanged = body.provider && body.provider !== currentCfg.provider;
+  const providerChanged =
+    (body.provider && body.provider !== currentCfg.provider) ||
+    (body.ollamaModel && body.ollamaModel !== currentCfg.ollamaModel);
 
   if (body.provider)     await setSetting('embedding_provider', body.provider);
   if (body.googleApiKey) await setSetting('google_api_key',     body.googleApiKey);

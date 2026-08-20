@@ -44,6 +44,57 @@ async function getSetting(key: string): Promise<string | null> {
   }
 }
 
+// Which provider+model last actually indexed the vault (see
+// lib/embeddings.ts's embeddingModelKey) — set only by
+// instrumentation.ts's startup drift check. Changing the provider/model
+// through the settings UI already marks every note pending on its own
+// (app/api/settings/route.ts's providerChanged); this covers the gap that
+// left open — a .env edit (EMBEDDING_PROVIDER, OLLAMA_MODEL, GOOGLE_MODEL,
+// OPENAI_MODEL) plus a container restart, which getEmbeddingConfig() picks
+// up silently since it falls back to process.env.* with nothing in the
+// write path to notice.
+export async function getLastIndexedModel(): Promise<string | null> {
+  return getSetting('last_indexed_model');
+}
+
+export async function setLastIndexedModel(key: string): Promise<void> {
+  await setSetting('last_indexed_model', key);
+}
+
+export type KeyStatus = 'unset' | 'ok' | 'undecryptable';
+
+// Distinguishes "never set" from "set but can't be decrypted with the
+// current KYBASE_SECRET" — getSetting()/getEmbeddingConfig() collapse both
+// into a silent null (falls back to the env var, keeps the hot embedding
+// path from throwing), which is right for that path but hides a real
+// problem: a stored key that used to work has gone dark, usually because
+// KYBASE_SECRET was rotated after it was saved. Read directly rather than
+// reusing getSetting so this stays a diagnostic, not a second silent
+// fallback — the settings UI needs to tell the two states apart, not
+// paper over the second one too.
+async function getEncryptedKeyStatus(key: string): Promise<KeyStatus> {
+  const row = await queryOne<{ value: string }>(
+    'select value from settings where key = $1',
+    [key]
+  );
+  if (!row) return 'unset';
+  if (!isEncrypted(row.value)) return 'ok'; // pre-encryption plaintext, still readable
+  try {
+    decryptWithSecret(row.value, requireSecret());
+    return 'ok';
+  } catch {
+    return 'undecryptable';
+  }
+}
+
+export async function getProviderKeyHealth(): Promise<{ googleApiKey: KeyStatus; openaiApiKey: KeyStatus }> {
+  const [googleApiKey, openaiApiKey] = await Promise.all([
+    getEncryptedKeyStatus('google_api_key'),
+    getEncryptedKeyStatus('openai_api_key'),
+  ]);
+  return { googleApiKey, openaiApiKey };
+}
+
 export async function setSetting(key: string, value: string): Promise<void> {
   const stored = ENCRYPTED_SETTING_KEYS.has(key) ? encryptWithSecret(value, requireSecret()) : value;
   await query(

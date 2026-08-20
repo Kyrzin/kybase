@@ -540,6 +540,62 @@ function significantWords(query: string): string[] {
  * significance test, callers get `null` and apply no discount rather than
  * losing the search results entirely over a debug signal.
  */
+// How many of a query's words to keep when the strict pass finds nothing and
+// the loose one is about to answer with whatever filler word is commonest.
+// Two, not one: a question often carries a pair that only means something
+// together ("cadvisor docker"), and two rare words still exclude far more
+// than they admit.
+const ANCHOR_COUNT = 2;
+
+/**
+ * The rarest words of a query, by document frequency in this vault. Same
+ * statistic the coverage weighting uses, asked a different question: not "how
+ * much of the query does this hit contain" but "which part of the query was
+ * worth searching for at all".
+ *
+ * A word that appears in no note at all is dropped rather than ranked first —
+ * infinite rarity is not evidence, it is a typo or an invented token, and
+ * anchoring on it would return nothing while looking authoritative.
+ */
+async function rareAnchors(words: string[], languages: string[]): Promise<string[]> {
+  const unique = [...new Set(words)];
+  if (unique.length < 2 || languages.length === 0) return [];
+  const langExprs = languages.map((_, i) => `websearch_to_tsquery($${i + 2}::regconfig, unaccent(wt.word))`);
+  const tsqExpr = [`websearch_to_tsquery('simple', unaccent(wt.word))`, ...langExprs].join(' || ');
+  try {
+    const rows = await dbQuery<{ word: string; df: number }>(
+      `with word_tsq as (
+         select word, (${tsqExpr}) as tsq
+         from unnest($1::text[]) as wt(word)
+       )
+       select wt.word,
+         (select count(*)::int from notes n
+           where n.deleted_at is null and n.search_vector @@ wt.tsq) as df
+       from word_tsq wt
+       order by df asc`,
+      [unique, ...languages]
+    );
+    const found = rows.filter((r) => r.df > 0);
+    if (found.length === 0) return [];
+    // An anchor has to be meaningfully rarer than the query's commonest word,
+    // not merely first after sorting. Without this a query containing a typo
+    // (dropped above for having no matches at all) would anchor on whichever
+    // filler words remained — measured on a synthetic corpus: an invented token
+    // plus three common words picked the two commonest as "anchors".
+    // Half is a ratio between two words of the SAME query, not a threshold on
+    // any absolute count, so it carries across vaults and languages.
+    const commonest = found[found.length - 1].df;
+    const anchors = found.filter((r) => r.df * 2 < commonest).slice(0, ANCHOR_COUNT);
+    // Narrowing to the whole query narrows nothing — the strict pass already
+    // ran that exact query and came back empty.
+    if (anchors.length === 0 || anchors.length === unique.length) return [];
+    return anchors.map((r) => r.word);
+  } catch (err) {
+    console.warn('[search] anchor selection failed, loose pass stands alone:', err instanceof Error ? err.message : err);
+    return [];
+  }
+}
+
 async function computeTextCoverage(words: string[], ids: string[]): Promise<Map<string, number> | null> {
   if (words.length === 0 || ids.length === 0) return null;
   const uniqueWords = [...new Set(words)];
@@ -656,6 +712,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   ]);
 
   let orRows: FtsRow[] = [];
+  let anchorRows: FtsRow[] = [];
   const words = significantWords(query);
   // >2 words: with 1-2 words an OR pass is identical to (or looser than
   // pointless versus) the strict AND pass already run.
@@ -666,6 +723,27 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
       [words.join(' or '), fetchLimit]
     );
     orRows = orAll.filter((r) => !seen.has(r.id));
+  }
+
+  // A natural question that the strict pass could not satisfy: instead of
+  // leaving the answer to whichever filler word is commonest here, search the
+  // query's rarest words as a strict query of their own. Measured live
+  // 2026-08-20: "почему нельзя использовать cadvisor" returned notes matching
+  // only "почему"/"нельзя" while the note containing `cadvisor` never entered
+  // the candidate set — and the bare word `cadvisor` found it instantly. The
+  // agent had learned to strip its own questions down to keywords before
+  // asking; that is work the search should be doing.
+  //
+  // Only when the strict pass found NOTHING. If it found something, the query
+  // as typed already matched and narrowing it would be second-guessing a real
+  // result.
+  if (rows.length === 0 && words.length > 1) {
+    const anchors = await rareAnchors(words, await getFtsLanguages());
+    if (anchors.length > 0) {
+      const seen = new Set(orRows.map((r) => r.id));
+      const anchorAll = await dbQuery<FtsRow>('select * from search_notes_fts($1, $2)', [anchors.join(' '), fetchLimit]);
+      anchorRows = anchorAll.filter((r) => !seen.has(r.id));
+    }
   }
 
   // The exact/substring pass used to run ONLY when both FTS passes came back
@@ -699,7 +777,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // weight just gets a say in which hit that is. At the default empty
   // weights maps this is `n.rank * 1 * 1` for every row, i.e. unchanged.
   const weightedRank = (n: FtsRow) => n.rank * weightForTags(n.tags, tagWeights) * weightForFolder(n.folder_id, folderWeights);
-  const best = Math.max(0, ...rows.map(weightedRank), ...orRows.map(weightedRank));
+  const best = Math.max(0, ...rows.map(weightedRank), ...orRows.map(weightedRank), ...anchorRows.map(weightedRank));
   // Coverage only applies to the 'or' tier — an 'and' hit already matched
   // EVERY term websearch_to_tsquery's own parser produced for the strict
   // query, by construction (that's what AND semantics means), so it's
@@ -715,7 +793,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // discount to the tier that's actually the overhaul's failure mode (OR found
   // one word out of N) sidesteps the disagreement entirely instead of
   // trying to make the two tokenizers consistent.
-  const coverageMap = await computeTextCoverage(words, orRows.map((n) => n.id));
+  const coverageMap = await computeTextCoverage(words, [...orRows, ...anchorRows].map((n) => n.id));
   const toResult = (n: FtsRow, tier: 'and' | 'or') => {
     // Order matters: coverage multiplies the ALREADY-normalized rank, never
     // the other way around. Applying it before dividing by the set's max
@@ -743,7 +821,14 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   };
   // FTS rows win a duplicate: they carry a real ts_rank, while a substring hit
   // only knows where in the document the literal appeared.
-  const ftsResults = [...rows.map((n) => toResult(n, 'and')), ...orRows.map((n) => toResult(n, 'or'))];
+  // Anchor hits are reported as the loose tier they are: they matched part of
+  // the query, not the query. Their coverage — now weighted by rarity — is
+  // what argues for them, and it argues honestly.
+  const ftsResults = [
+    ...rows.map((n) => toResult(n, 'and')),
+    ...orRows.map((n) => toResult(n, 'or')),
+    ...anchorRows.map((n) => toResult(n, 'or')),
+  ];
   const ftsIds = new Set(ftsResults.map((r) => r.id));
   const results = [...ftsResults, ...exactHits.filter((r) => !ftsIds.has(r.id))]
     // Relevance alone: the SQL returns 'and' rows before 'or' rows by raw

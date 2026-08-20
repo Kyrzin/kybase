@@ -10,23 +10,24 @@
   <img src="https://img.shields.io/badge/private-by%20default-success" alt="private by default">
 </p>
 
-Your AI agent forgets everything between sessions. Kybase fixes that: a
-self-hosted Markdown knowledge base **you** browse and edit in the browser,
-that **any MCP-speaking agent** — Claude, Cursor, Windsurf — uses as
-persistent memory over MCP. The agent writes notes as
-you work, links them with `[[wikilinks]]`, and finds them again next session —
-no re-onboarding, no lost decisions.
+**Kybase is self-hosted, long-term memory for AI agents.** Any
+MCP-speaking agent — Claude, Cursor, Windsurf — can search, read, and
+update a persistent Markdown knowledge base through MCP, while **you**
+keep full control in the browser: read every note, edit anything, revoke
+access anytime. Hybrid search finds the right note, section-level reads
+avoid loading entire documents into context, and `[[wikilinks]]` keep the
+knowledge connected as it grows.
 
-Everything runs on your machine via Docker: PostgreSQL for notes,
-pgvector + Ollama for embeddings. **No SaaS, no accounts, private by default**
-(see [Switching Embedding Providers](#switching-embedding-providers) for the
-trade-off if you opt into a cloud embedding provider).
+PostgreSQL + pgvector + Ollama, one `docker compose up`. **No SaaS, no
+accounts, private by default** — cloud embeddings (Google, OpenAI) are
+optional, not required (see [Switching Embedding
+Providers](#switching-embedding-providers) for the trade-off).
 
 <p align="center">
   <img src="public/readme/screenshot.png" width="100%" alt="Kybase UI: a markdown note with wikilinks and tags on the left, the folder tree beside it, and an interactive knowledge graph (17 notes, 76 edges) with wikilink and semantic edges on the right.">
 </p>
 
-**[Why Kybase?](#why-kybase) · [Quick Start](#quick-start-docker) · [Environment variables](#environment-variables) · [Connect an MCP Client](#connect-an-mcp-client) · [Stack](#stack) · [Switching Embedding Providers](#switching-embedding-providers) · [Export & Import](#export--import) · [Sharing](#sharing-notes) · [Backups](#backups) · [Upgrading](#upgrading) · [Local development](#local-development) · [License](#license)**
+**[Why Kybase?](#why-kybase) · [How agents use it](#how-agents-use-it) · [Quick Start](#quick-start-docker) · [Environment variables](#environment-variables) · [Connect an MCP Client](#connect-an-mcp-client) · [Stack](#stack) · [Switching Embedding Providers](#switching-embedding-providers) · [Export & Import](#export--import) · [Sharing](#sharing-notes) · [Backups](#backups) · [Upgrading](#upgrading) · [Local development](#local-development) · [More documentation](#more-documentation) · [License](#license)**
 
 ## Why Kybase?
 
@@ -34,11 +35,36 @@ Giving an agent persistent memory usually means assembling it yourself:
 a notes app, an MCP bridge, an embedding pipeline, and sync between them.
 Kybase is that whole stack as one `docker compose up`:
 
-- **MCP-native** — 17 tools (`search_notes`, `get_note` with optional wikilink resolution, `get_graph`, `get_backlinks`, `append_to_note`, `replace_in_note`, `indexing_status`, CRUD for notes/folders) over Streamable HTTP, with instructions that teach the agent to interlink notes properly
-- **Local semantic search** — pgvector + Ollama embeddings, private by default; hybrid RRF fusion with bilingual full-text search and chunked, excerpt-based results
-- **Agent-friendly graph** — explicit wikilink edges plus *semantic edges* computed from embedding similarity, so the agent discovers related notes that were never linked
-- **A real notes app, not a black box** — web editor with backlinks, graph view with a similarity slider, workspace focus mode; renaming a note rewrites its wikilinks everywhere
-- **Zero external services** — app, Postgres+pgvector, and Ollama in one compose file; single-secret auth, revocable per-client OAuth tokens for MCP
+- **Markdown, not an opaque memory blob** — every note is a plain `.md`
+  file with frontmatter; read it, edit it, `grep` it, back it up with `cp`
+- **MCP-native reads and writes** — an agent searches, reads, and updates
+  notes directly through MCP tools, not through a side-channel it can't use
+- **Hybrid search** — full-text and semantic search fused into one ranked
+  result, so an agent finds the right note whether it knows the exact
+  wording or not
+- **Section-level reads and writes** — an agent reads or edits the part
+  of a note it actually needs, not the whole file
+- **Backlinks and a knowledge graph** — `[[wikilinks]]` connect related
+  notes automatically; explicit and semantic edges are both visible in
+  the graph view
+- **Self-hosted, private by default** — your own Postgres, your own
+  Ollama; nothing leaves your machine unless you opt into a cloud
+  embedding provider
+
+## How agents use it
+
+```text
+search_notes("deployment steps for staging")
+  → hit includes section: "Rollback"
+  → get_note(section: "Rollback")
+  → agent reads just that section, not the whole note
+  → append_to_note(section: "Rollback", text: "...")
+```
+
+Search returns which section of a note matched, not just which note. For
+a long note, reading one section instead of the whole file can mean
+reading a fraction of the content — cheaper for every step after the
+first search, and it's how the agent writes back too.
 
 ## Quick Start (Docker)
 
@@ -46,16 +72,24 @@ Kybase is that whole stack as one `docker compose up`:
 git clone https://github.com/Kyrzin/kybase.git
 cd kybase
 cp .env.example .env
-# edit .env: set KYBASE_SECRET (openssl rand -hex 32)
+sed -i.bak "s/^KYBASE_SECRET=$/KYBASE_SECRET=$(openssl rand -hex 32)/" .env
+sed -i.bak "s/^POSTGRES_PASSWORD=$/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+rm -f .env.bak
 docker compose pull && docker compose up -d
 ```
+
+That generates both required secrets in place (the `sed -i.bak` form
+works on both Linux and macOS) — nothing else in `.env` needs to change
+to get started.
 
 This pulls the prebuilt multi-arch image
 ([`ghcr.io/kyrzin/kybase`](https://github.com/Kyrzin/kybase/pkgs/container/kybase),
 linux/amd64 + linux/arm64) from GitHub Packages, tagged `latest`. To build from
 source instead, run `docker compose up -d --build`.
 
-Open http://localhost:3000 and log in with your `KYBASE_SECRET`.
+Open http://localhost:3000 and log in with your `KYBASE_SECRET` — then
+jump to [Connect an MCP Client](#connect-an-mcp-client) to point an agent
+at it.
 
 That's it. On startup the app applies `db/migrations/*.sql` automatically
 (tracked in the `schema_migrations` table) and Ollama downloads the
@@ -173,14 +207,27 @@ The server ships with MCP instructions that teach the agent to search before
 writing and to add `[[wikilinks]]` to related notes — so the knowledge graph
 grows as the agent uses it, instead of accumulating orphan notes.
 
-**On search results.** Kybase doesn't grade a hit's confidence — `relevance`
-only orders a response against its own best hit, it isn't a probability.
-What it does decide is whether to answer at all: a semantic hit below the
-active model's threshold isn't returned, so an empty result means "nothing
-close enough," not "nothing matched." `exact:true` means the query is a
-literal substring of the note, nothing softer. When a hit's `section` is
-set, `get_note(section:)` reads just that part instead of the whole note —
-cheaper, and usually all an agent needs.
+**How search works, in plain terms.** `search_notes` has three modes:
+`text` (exact words, filenames, identifiers), `semantic` (meaning, via
+embeddings), and `hybrid` (both, fused into one ranked list — the
+default, and usually the right choice). A few fields on each hit mean
+something narrower than they sound:
+
+- `exact: true` means the query is a literal, contiguous substring of
+  the note — good for finding a specific compound identifier or
+  filename, not a signal that "this is the right answer."
+- `relevance` ranks hits within this one response, relative to its own
+  best hit — it's not a confidence score or a probability.
+- A hit found only by the semantic arm means "similar topic," not
+  "confirms this fact." Read the excerpt before trusting it.
+- `unprofiled` (reported by `indexing_status`) means semantic search
+  still works on that embedding model, but nothing is guaranteed to be
+  rejected as "not close enough" — the automatic cutoff needs a model
+  Kybase has measured, or one you configure yourself (see [Switching
+  Embedding Providers](#switching-embedding-providers)).
+
+When a hit's `section` is set, `get_note(section:)` reads just that part
+instead of the whole note.
 
 ## Stack
 
@@ -210,17 +257,17 @@ All supported providers use 768-dimensional embeddings, so switching does not re
 > and OpenAI are convenience options: picking either sends your notes' full
 > text to that provider's API to compute the embedding.
 
-**Local model choice.** The default local model is `embeddinggemma` (Google,
-multilingual) — for multilingual vaults (e.g. Russian/German) set the Ollama
-model to `embeddinggemma`; it separates relevant from irrelevant notes far
-better than English-centric models. `nomic-embed-text` is a smaller,
-English-leaning alternative. Models Kybase has measured (`embeddinggemma`,
-`nomic-embed-text`, Google's `text-embedding-004`) ship with their own
-similarity threshold, so switching between them needs no manual tuning —
-see `lib/embeddings.ts` for which models are profiled. An unmeasured model
-runs semantic search with no threshold at all rather than a guessed one;
-`indexing_status` reports this, and you can supply your own via the
-`embeddingBands` setting.
+**Local model choice.** The default local model is `embeddinggemma`
+(multilingual) — for multilingual vaults (e.g. Russian/German) it
+separates relevant from irrelevant notes far better than English-centric
+models. `nomic-embed-text` is a smaller, English-leaning alternative.
+
+Supported embedding models include sensible built-in defaults for
+semantic search. Unprofiled models still support semantic search, but
+Kybase does not automatically reject weak semantic matches unless a
+threshold is configured — `indexing_status` reports whether the active
+model is profiled. See `lib/embeddings.ts` for the details and how to
+configure a threshold yourself.
 
 > [!TIP]
 > **Already run Ollama?** On a host that already has an Ollama instance (e.g. a
@@ -312,6 +359,14 @@ npm run dev                  # http://localhost:3000
 npm run build     # Production build check
 npx tsc --noEmit  # Type check
 ```
+
+---
+
+## More documentation
+
+[SECURITY.md](SECURITY.md) (threat model, what's implemented) ·
+[CONTRIBUTING.md](CONTRIBUTING.md) · [docs/backup.md](docs/backup.md) ·
+[docs/upgrading.md](docs/upgrading.md)
 
 ---
 

@@ -802,7 +802,29 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // beat the runbook that answers it — despite the runbook's ts_rank being
   // 4.4x higher. Containing a sentence is not the same as being about it;
   // containing a filename essentially is.
-  const verbatim = words.length > 1 && !/\s/.test(query.trim());
+  //
+  // A name does not have to split into several words to be a name. Measured
+  // 2026-08-20: `build.sh`, `x86-64` and an opaque id like `HL6AjEyrn6xOkSgr`
+  // all failed the word-count test — "sh", "64" and the id are one significant
+  // word or none — and lost the protection that `cleanup-n8n-binary.sh` got,
+  // for no reason a user could see. So the question is asked structurally
+  // instead: does this look like an identifier?
+  //
+  //   - a delimiter inside it (`-_.:/\`) — filenames, versions, code symbols;
+  //   - or long enough to be opaque AND mixing letters with digits — the shape
+  //     of a generated id, which no prose word has.
+  //
+  // Both restricted to printable ASCII, and that is a deliberate, narrow
+  // limitation rather than an oversight: `какой-то` and `well-known` carry a
+  // delimiter too, and promoting an ordinary hyphenated word would hand the
+  // top band to every note that happens to use it. Identifiers are ASCII in
+  // practice; the multi-word rule above stays language-neutral and is what
+  // covers everything else.
+  const q = query.trim();
+  const asciiToken = /^[\x21-\x7E]+$/.test(q);
+  const structured = asciiToken && q.length >= 4 && /[-_.:/\\]/.test(q);
+  const opaque = asciiToken && q.length >= 8 && /[0-9]/.test(q) && /[A-Za-z]/.test(q);
+  const verbatim = !/\s/.test(q) && (words.length > 1 || structured || opaque);
   const exactHits = (await substringSearch(query, limit, filters))
     .map((r) => (verbatim ? { ...r, exact: true } : r));
   if (rows.length === 0 && orRows.length === 0) {
@@ -1053,7 +1075,33 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
       ...(heading ? { section: heading } : {}),
     };
   });
-  return enrichResults(await applyFilters(results, limit, filters));
+  const filtered = await applyFilters(results, limit, filters);
+
+  // Coverage on a semantic hit answers the question the cosine cannot: does
+  // the thing you asked about actually APPEAR in this note. Measured
+  // 2026-08-20 on a 16-query near-domain battery, half the convincing false
+  // positives were of exactly one shape — a query naming a technology the
+  // vault has never used, answered with the vault's nearest neighbour at a
+  // healthy similarity and no mention of that technology anywhere in it. The
+  // cosine ranges of true answers and near-domain misses overlap completely
+  // (0.556–0.760 against 0.585–0.684 on that run), so no threshold separates
+  // them — but "coverage: 0" separates them by stating a fact.
+  //
+  // A fact, and deliberately nothing more: nothing here rejects a hit for
+  // covering none of the query. Some correct answers legitimately share no
+  // vocabulary with the question, which is the entire point of searching by
+  // meaning. The caller reads the number and the excerpt and decides.
+  const words = significantWords(query);
+  if (words.length > 0 && filtered.length > 0) {
+    const coverageMap = await computeTextCoverage(words, filtered.map((r) => r.id));
+    if (coverageMap) {
+      for (const r of filtered) {
+        const c = coverageMap.get(r.id);
+        if (c !== undefined) r.coverage = c;
+      }
+    }
+  }
+  return enrichResults(filtered);
 }
 
 /**

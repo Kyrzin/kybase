@@ -41,7 +41,25 @@ function renderForm(params: Record<string, string>, error?: string) {
     .map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`)
     .join('\n      ');
 
-  const redirectHost = parseRedirectUri(params.redirect_uri ?? '')?.host ?? '';
+  const callback = parseRedirectUri(params.redirect_uri ?? '');
+  const redirectHost = callback?.host ?? '';
+
+  // This page's whole job is to submit and then leave for the client's
+  // callback, so form-action has to name that origin — and ONLY that origin,
+  // the one parseRedirectUri just accepted. The global policy (next.config.ts)
+  // deliberately stops at /authorize so this can be per-request: two CSP
+  // headers are enforced as an intersection, so a route can never widen a
+  // policy the framework already sent, only send its own.
+  const csp = [
+    "default-src 'self'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    `form-action 'self'${callback ? ` ${callback.origin}` : ''}`,
+    "frame-ancestors 'none'",
+  ].join('; ');
 
   return new Response(`<!DOCTYPE html>
 <html lang="en">
@@ -78,7 +96,7 @@ function renderForm(params: Record<string, string>, error?: string) {
       'Content-Type': 'text/html',
       // The form takes the master secret — never allow it inside a frame.
       'X-Frame-Options': 'DENY',
-      'Content-Security-Policy': "frame-ancestors 'none'",
+      'Content-Security-Policy': csp,
     },
   });
 }

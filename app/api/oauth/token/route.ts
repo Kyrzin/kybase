@@ -3,6 +3,7 @@ import { consumeCode } from '@/lib/auth-codes';
 import { safeEqual } from '@/lib/auth';
 import { verifyPkce } from '@/lib/pkce';
 import { issueToken } from '@/lib/tokens';
+import { getClient } from '@/lib/oauth-clients';
 import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
@@ -57,7 +58,18 @@ export async function POST(req: NextRequest) {
     }
 
     // A real, revocable token — never the master secret (see lib/tokens.ts).
-    const { token, expiresAt } = await issueToken(params.get('client_id') ?? 'mcp-client');
+    //
+    // Labelled with the name the client registered under, not its client_id.
+    // Before dynamic registration a client_id was a human-chosen string and
+    // reading it in "Connected clients" told you what you were revoking; an
+    // issued one is 22 random characters, and a list of those tells you
+    // nothing. The name is the client's own claim about itself and nothing is
+    // authenticated by it — it labels a row in the owner's UI, it does not
+    // grant anything.
+    const clientId = params.get('client_id') ?? '';
+    const registered = await getClient(clientId).catch(() => null);
+    const label = registered?.clientName?.trim() || clientId || 'mcp-client';
+    const { token, expiresAt } = await issueToken(label);
     return NextResponse.json({
       access_token: token,
       token_type: 'bearer',

@@ -147,7 +147,25 @@ export function sectionRange(
   // reports a section that plainly exists as missing.
   const norm = (s: string) => s.normalize('NFC').trim().toLowerCase();
   const wanted = norm(section);
-  let i = headings.findIndex(h => norm(h.text) === wanted || norm(h.slug) === wanted);
+  // Text and slug are matched together, not one after the other, and the
+  // question asked is how many HEADINGS the string picks out — not whether
+  // some heading matches it.
+  //
+  // A note repeating a heading — "Setup" under both Windows and Linux — is
+  // ordinary, not pathological, and taking the first match was the one failure
+  // in this file that silently wrote to the wrong place: measured 2026-08-20,
+  // an append aimed at section "Setup" landed under Windows when Linux was
+  // meant, with nothing in the response suggesting a choice had been made.
+  //
+  // Matching in two passes does NOT fix that, which is worth recording because
+  // it looks like it should: the first duplicate's slug ("setup") is its own
+  // lowercased text, so a slug-first pass resolves the ambiguous string before
+  // any ambiguity check runs. Only the union answers correctly. The later
+  // duplicates keep distinct slugs ("setup-2") and stay addressable; the first
+  // one does not, and the error says so rather than guessing.
+  const matched = headings.filter(h => norm(h.text) === wanted || norm(h.slug) === wanted);
+  let i = matched.length === 1 ? headings.indexOf(matched[0]) : -1;
+  if (matched.length > 1) return null;
   if (i === -1) {
     for (const matches of [
       wanted ? headings.filter(h => norm(h.text).startsWith(wanted)) : [],
@@ -160,6 +178,23 @@ export function sectionRange(
   if (i === -1) return null;
   const next = headings.slice(i + 1).find(h => h.level <= headings[i].level);
   return { start: headings[i].offset, end: next ? next.offset : total };
+}
+
+/**
+ * Why a section did not resolve, and what to pass instead.
+ *
+ * Lists every heading as "text (slug)" rather than text alone, because the
+ * text is not always an answer: when a note repeats a heading, the slug is the
+ * only thing that picks one of them, and a caller refused for ambiguity needs
+ * the handle that resolves it — not the ambiguous name repeated back.
+ */
+function sectionNotResolved(section: string, headings: Heading[]): string {
+  const available = headings.map(h => `${h.text} (${h.slug})`).join(' | ') || '(this note has no headings)';
+  return `No single section matches "${section}" in this note — it is missing, or it picks out more than one heading. ` +
+    `Repeated headings are addressable by their distinct slugs ("setup-2"); the FIRST of a repeated pair is not, ` +
+    `because its slug is the same ambiguous string — rename it, or read the note and use offset/limit. ` +
+    `Refusing rather than choosing: writing to the wrong section cannot be undone by the caller noticing later. ` +
+    `Available: ${available}`;
 }
 
 export type AppendAt = 'note_end' | 'note_start' | 'section_end' | 'section_start' | 'before_section' | 'after_section';
@@ -191,8 +226,7 @@ export function resolveInsertOffset(
   if (!section) throw new Error(`at: "${at}" requires section`);
   const range = sectionRange(headings, content.length, section);
   if (!range) {
-    const available = headings.map(h => h.text).join(' | ') || '(this note has no headings)';
-    throw new Error(`No section "${section}" in this note. Available: ${available}`);
+    throw new Error(sectionNotResolved(section, headings));
   }
   if (at === 'before_section') return range.start;
   if (at === 'section_end' || at === 'after_section') return range.end;
@@ -470,8 +504,7 @@ export function createMcpServer(): McpServer {
       if (section !== undefined) {
         const range = sectionRange(headings, data.content.length, section);
         if (!range) {
-          const available = headings.map(h => h.text).join(' | ') || '(this note has no headings)';
-          throw new Error(`No section "${section}" in this note. Available: ${available}`);
+          throw new Error(sectionNotResolved(section, headings));
         }
         // offset/limit now page within the section, not the whole note.
         body = { ...data, content: data.content.slice(range.start, range.end) };

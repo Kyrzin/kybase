@@ -975,6 +975,7 @@ export function createMcpServer(): McpServer {
     // Only ever shipped as true: `exact: false` on nearly every hit would be
     // noise, and its absence already means "not verbatim".
     if (r.exact) out.exact = true;
+    if (r.section) out.section = r.section;
     if (r.content_length !== undefined) out.content_length = r.content_length;
     if (explain) {
       // Hybrid results carry text_score/semantic_score directly (rrfMerge
@@ -1003,6 +1004,13 @@ export function createMcpServer(): McpServer {
     'Hybrid is the right default; prefer type=text for exact identifiers, code fragments, or quoted ' +
     'phrases, where FTS beats meaning-matching. ' +
     'Returns short excerpts, not full notes — call get_note on the top 1-2 hits to read them. ' +
+    '\n\nRead the SECTION, not the note. When a hit carries `section`, that is the markdown ' +
+    'heading its excerpt came from — pass that exact string to get_note\'s `section` and you get ' +
+    'that part alone (measured on a real 13000-character note: 681 characters). When a hit has no ' +
+    '`section` and its `content_length` is large, get_note with a small `limit` still returns the ' +
+    'note\'s FULL `headings` outline for about a kilobyte — choose a heading from it, then re-read ' +
+    'with `section`. Two small calls beat one 13-60 KB one; pull a whole note only when you ' +
+    'genuinely need the whole note. ' +
     'Each hit carries `relevance` (0..1, how close to the best hit in THIS response) and ' +
     '`matched_by` (which arms found it). Both describe the response, not ' +
     'the world: relevance orders hits, it does not judge them, and there is deliberately no ' +

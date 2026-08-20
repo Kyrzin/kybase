@@ -536,28 +536,46 @@ export function createMcpServer(): McpServer {
     'The server instructions\' wikilink and tag rules apply: search_notes for the topic first and ' +
     'link the related notes it finds, and call list_tags before coining a new tag.',
     {
-      title:     z.string().trim().min(1).max(500),
-      content:   z.string().max(MAX_NOTE_CONTENT_CHARS).default(''),
-      folder_id: z.string().uuid().nullable().optional(),
-      tags:      z.array(z.string()).default([]),
+      title:       z.string().trim().min(1).max(500),
+      content:     z.string().max(MAX_NOTE_CONTENT_CHARS).default(''),
+      folder_id:   z.string().uuid().nullable().optional(),
+      folder_path: z.string().optional()
+        .describe('Folder path (e.g. "02. Личные Проекты/Kybase") as alternative to folder_id'),
+      tags:        z.array(z.string()).default([]),
     },
-    async ({ title, content: rawContent, folder_id, tags }) => {
+    async ({ title, content: rawContent, folder_id: rawFolderId, folder_path, tags }) => {
+      if (rawFolderId && folder_path) {
+        throw new Error('Provide either folder_id or folder_path, not both');
+      }
+      const paths = await folderPathMap();
+      let folder_id = rawFolderId ?? null;
+      if (folder_path) {
+        const normalized = folder_path.trim().replace(/^\/+|\/+$/g, '').toLowerCase();
+        let foundId: string | null = null;
+        for (const [id, p] of paths.entries()) {
+          if (p.trim().replace(/^\/+|\/+$/g, '').toLowerCase() === normalized) {
+            foundId = id;
+            break;
+          }
+        }
+        if (!foundId) {
+          const available = Array.from(paths.values()).filter(Boolean).slice(0, 10).join('", "');
+          throw new Error(`Folder path "${folder_path}" not found. Available folders include: "${available}" (or create it with create_folder)`);
+        }
+        folder_id = foundId;
+      }
       const content = stripNulBytes(rawContent);
       // Echoing the content back would double its cost for nothing — the
       // caller just sent it and knows what it is. length(content) lets it
       // confirm the write landed intact without paying for the text again.
       let note: { id: string; title: string; folder_id: string | null; tags: string[]; created_at: string; content_length: number } | null;
-      let paths: Map<string, string>;
       try {
-        [note, paths] = await Promise.all([
-          queryOne<{ id: string; title: string; folder_id: string | null; tags: string[]; created_at: string; content_length: number }>(
-            `insert into notes (title, content, folder_id, tags, embedding_pending)
-             values ($1, $2, $3, $4, true)
-             returning id, title, folder_id, tags, created_at, length(content) as content_length`,
-            [title, content, folder_id ?? null, tags]
-          ),
-          folderPathMap(),
-        ]);
+        note = await queryOne<{ id: string; title: string; folder_id: string | null; tags: string[]; created_at: string; content_length: number }>(
+          `insert into notes (title, content, folder_id, tags, embedding_pending)
+           values ($1, $2, $3, $4, true)
+           returning id, title, folder_id, tags, created_at, length(content) as content_length`,
+          [title, content, folder_id, tags]
+        );
       } catch (err) {
         if (isUniqueViolation(err)) throw new Error(`A note titled "${title}" already exists — update it or pick another title`);
         throw err;
@@ -1153,8 +1171,9 @@ export function createMcpServer(): McpServer {
   server.tool(
     'indexing_status',
     'Semantic-index progress: total/indexed/pending notes, complete=true when pending=0. Pending ' +
-    'notes are still found by text search but not semantic/hybrid until embedded (automatic, ' +
-    'background). Stuck pending count while nothing is being edited = check Ollama/server logs.\n' +
+    'notes are still found by text search; notes with previous embeddings remain in semantic search ' +
+    'with their last vector, while notes never embedded are excluded from semantic/hybrid until ' +
+    'processed (automatic, background). Stuck pending count while nothing is being edited = check Ollama/server logs.\n' +
     'Also names the active embedding model and says whether any automatic semantic cutoff is in ' +
     'force. By default there is none: semantic_profile reads "none" and semantic_min_similarity is ' +
     'null, meaning semantic search returns its nearest matches and refuses nothing on its own. ' +
@@ -1430,15 +1449,25 @@ export function createMcpServer(): McpServer {
       include_semantic: z.boolean().default(true).describe('Include semantic_edges at all'),
       min_score:        z.number().min(0).max(1).default(0.75)
         .describe('Cosine floor for semantic_edges — lower to see more (noisier) edges'),
+      unresolved_only:  z.boolean().default(false)
+        .describe('If true, return only { unresolved_links } without nodes and edges (fast check for broken links)'),
     },
-    async ({ folder_id, root_title, depth, include_semantic, min_score }) => {
+    async ({ folder_id, root_title, depth, include_semantic, min_score, unresolved_only }) => {
       const graph = await buildGraph({
         folderId: folder_id,
         rootTitle: root_title,
         depth,
-        includeSemantic: include_semantic,
+        includeSemantic: unresolved_only ? false : include_semantic,
         minScore: min_score,
       });
+      if (unresolved_only) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ unresolved_links: graph.unresolved_links }),
+          }],
+        };
+      }
       return { content: [{ type: 'text' as const, text: JSON.stringify(indexedForm(graph)) }] };
     }
   );

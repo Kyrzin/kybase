@@ -220,11 +220,15 @@ something narrower than they sound:
   best hit — it's not a confidence score or a probability.
 - A hit found only by the semantic arm means "similar topic," not
   "confirms this fact." Read the excerpt before trusting it.
-- `unprofiled` (reported by `indexing_status`) means semantic search
-  still works on that embedding model, but nothing is guaranteed to be
-  rejected as "not close enough" — the automatic cutoff needs a model
-  Kybase has measured, or one you configure yourself (see [Switching
-  Embedding Providers](#switching-embedding-providers)).
+- `coverage` measures how much of the query is literally present in a
+  hit — a low or zero value doesn't mean the hit is wrong, since a
+  cross-language or paraphrased match can legitimately share no words
+  with the question.
+- Semantic search returns candidates by default, not verdicts — nothing
+  is filtered out for being "too dissimilar" unless you configure a
+  minimum similarity yourself (see [Switching Embedding
+  Providers](#switching-embedding-providers)); an empty result means
+  the index found nothing at all.
 
 When a hit's `section` is set, `get_note(section:)` reads just that part
 instead of the whole note.
@@ -262,12 +266,20 @@ All supported providers use 768-dimensional embeddings, so switching does not re
 separates relevant from irrelevant notes far better than English-centric
 models. `nomic-embed-text` is a smaller, English-leaning alternative.
 
-Supported embedding models include sensible built-in defaults for
-semantic search. Unprofiled models still support semantic search, but
-Kybase does not automatically reject weak semantic matches unless a
-threshold is configured — `indexing_status` reports whether the active
-model is profiled. See `lib/embeddings.ts` for the details and how to
-configure a threshold yourself.
+**Semantic search returns candidates, not verdicts.** Kybase does not
+reject a semantic match for being "too dissimilar" — there is no built-in
+similarity cutoff, and an empty result means the index found nothing, not
+that something was filtered out. That is deliberate: a shipped per-model
+cutoff was measured and withdrawn, because it removed real answers
+(a cross-language match shares no words, so nothing else finds it) without
+reliably stopping confident near-misses. Each hit instead carries what you
+need to judge it — which arm found it, how much of your query literally
+appears in it, and the matching excerpt.
+
+If you have a homogeneous corpus and have measured your own model, you can
+set a minimum similarity as precision tuning; `indexing_status` reports
+whether one is in force. See `lib/embeddings.ts` for the measurements and
+the reasoning.
 
 > [!TIP]
 > **Already run Ollama?** On a host that already has an Ollama instance (e.g. a

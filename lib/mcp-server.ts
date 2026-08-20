@@ -1048,22 +1048,27 @@ export function createMcpServer(): McpServer {
     '`matched_by` (which arms found it). Both describe the response, not ' +
     'the world: relevance orders hits, it does not judge them, and there is deliberately no ' +
     'confidence score. Judge a hit by reading its excerpt.' +
-    '\n\nWhat the search DOES decide on its own is whether to answer at all: a semantic hit below ' +
-    'the active model\'s minimum similarity is not returned, so an empty result means "nothing here ' +
-    'is close enough", not "nothing matched". That threshold is a per-model heuristic measured on ' +
-    'a few corpora — see indexing_status for which model is active, the number in force, and ' +
-    'whether it was ever measured for that model.' +
-    '\n\nA hit found ONLY by the semantic arm (`matched_by` is semantic_score alone) says the ' +
+    '\n\nThis is candidate retrieval, not a factual answer, and the search does NOT decide for you ' +
+    'whether the vault knows something. Semantic search returns the nearest passages it has; by ' +
+    'default nothing is filtered out for being too dissimilar, so an EMPTY result means the index ' +
+    'returned nothing at all — and a NON-empty one is not evidence that what you asked about is in ' +
+    'there. (An owner may configure a minimum similarity; `threshold` in the response says whether ' +
+    'one is in force, and is null when none is.)' +
+    '\n\nSo a hit found ONLY by the semantic arm (`matched_by` is semantic_score alone) says the ' +
     'passage is ABOUT something similar — never that it confirms what you asked. The two are ' +
     'routinely different: a query about a technology a vault has never used still returns its ' +
-    'nearest neighbours, comfortably above threshold, with nothing about that technology in them. ' +
-    'So when a hit is semantic-only and its excerpt does not actually contain what you asked ' +
-    'about, the honest reading is "no confirmation found" — say that, or open the note to check. ' +
-    'Do not report it as evidence the thing exists.' +
+    'nearest neighbours with nothing about that technology in them. When a hit is semantic-only ' +
+    'and its excerpt does not actually contain what you asked about, the honest reading is "no ' +
+    'confirmation found" — say that, or open the note to check. Do not report it as evidence the ' +
+    'thing exists. The excerpt is the evidence; the score never is.' +
     '\n\n`text_tier`, `coverage` and `exact` are observed facts about the text match, shipped when ' +
     'they say something you would not assume. A tier of "or"/"substring" means the strict query ' +
-    'found nothing and a looser pass filled in — recall, not confirmation. Coverage below 1 is the ' +
-    'fraction of the query\'s significant words the hit actually contains. `exact: true` is the ' +
+    'found nothing and a looser pass filled in — recall, not confirmation. `coverage` measures ' +
+    'LEXICAL overlap: the share of your query\'s significant words that occur in the hit, weighted ' +
+    'by how rare each is here. A low or zero value does NOT mean irrelevant — a paraphrase or a ' +
+    'cross-language match legitimately shares no words with the question, and that is what the ' +
+    'semantic arm is for. Read it as "how much of what you typed is literally in there", nothing ' +
+    'more. `exact: true` is the ' +
     'one thing FTS cannot express, and it means exactly this and nothing more: the query occurs ' +
     'as a contiguous, case-insensitive substring of that note (wildcards escaped — `A_B` does not ' +
     'match `AxB`). It is set only for a whitespace-free query that still splits into several ' +
@@ -1076,8 +1081,8 @@ export function createMcpServer(): McpServer {
     '(when its own content/title/folder/tags last actually changed — a rename elsewhere rewriting ' +
     'a [[link]] to this note does not count) — these are NOT interchangeable. ' +
     'Every semantic/hybrid response includes threshold/best_score/pending_embeddings so you can ' +
-    'tell "nothing relevant" from "just under threshold" from "embeddings not generated yet", even ' +
-    'when results came back non-empty. ' +
+    'tell "nothing was found" from "a configured filter removed it" from "embeddings not generated ' +
+    'yet", even when results came back non-empty. ' +
     'Pass explain:true to also see each hit\'s raw text_score/semantic_score/rrf_score and created_at ' +
     '— only useful for debugging the ranking itself, omitted by default to keep responses short.',
     {
@@ -1131,7 +1136,11 @@ export function createMcpServer(): McpServer {
           type: 'text' as const,
           text: JSON.stringify({
             results: displayResults,
-            threshold: round2(threshold),
+            // null = no automatic cutoff is configured, so an empty result
+            // means the index returned nothing — not that something was
+            // filtered out. Reported as null rather than 0 because zero reads
+            // like a measured boundary that happens to admit everything.
+            threshold: threshold === null ? null : round2(threshold),
             best_score: bestScore === null ? null : round3(bestScore),
             pending_embeddings: pendingRows[0]?.count ?? 0,
           }, null, 2),
@@ -1146,14 +1155,16 @@ export function createMcpServer(): McpServer {
     'Semantic-index progress: total/indexed/pending notes, complete=true when pending=0. Pending ' +
     'notes are still found by text search but not semantic/hybrid until embedded (automatic, ' +
     'background). Stuck pending count while nothing is being edited = check Ollama/server logs.\n' +
-    'Also names the active embedding model and the semantic cutoff in force. ' +
-    'semantic_min_similarity is the cosine below which a semantic hit is not returned at all, and ' +
-    'semantic_profile says where that number came from: "profiled" (measured for this model), ' +
-    '"unverified" (shipped but never actually measured), "configured" (set by hand in settings), ' +
-    'or "unprofiled" — no threshold for this model, so semantic search returns its nearest ' +
-    'matches and refuses nothing. Raw cosines are NOT comparable between models: a number that ' +
-    'means a good match on one means noise on another, which is why the model is named here ' +
-    'rather than left to be inferred from the score.',
+    'Also names the active embedding model and says whether any automatic semantic cutoff is in ' +
+    'force. By default there is none: semantic_profile reads "none" and semantic_min_similarity is ' +
+    'null, meaning semantic search returns its nearest matches and refuses nothing on its own. ' +
+    'Automatic abstention is deliberately not part of the default retrieval contract — a shipped ' +
+    'per-model cutoff was measured and withdrawn, because it cost real answers (cross-language ' +
+    'matches share no words, so nothing else finds them) without reliably stopping confident ' +
+    'near-misses. An owner who has measured their own corpus can set one; then semantic_profile ' +
+    'reads "configured" and the number is theirs. Raw cosines are NOT comparable between models: ' +
+    'a number that means a good match on one means noise on another, which is why the model is ' +
+    'named here rather than left to be inferred from the score.',
     {},
     async () => {
       const row = await queryOne<{ total: number; pending: number }>(

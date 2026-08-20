@@ -25,10 +25,12 @@ const UpdateSettingsSchema = z.object({
   // exist (typo, later-deleted folder) just never matches anything, same as
   // an unknown tag name.
   folderWeights: z.record(z.string(), z.number()).optional(),
-  // Semantic abstention threshold per model key. Only the `gate` half exists:
-  // this is how someone running a model kybase has no profile for supplies a
-  // number for it without a code change and a redeploy. Absent by default —
-  // profiled models carry their own (lib/embeddings.ts).
+  // Optional minimum cosine per model key, and the ONLY way one ever applies:
+  // kybase ships no semantic cutoff of its own any more (lib/embeddings.ts
+  // records what was measured and why it was withdrawn). Absent by default,
+  // which means no automatic abstention at all. Someone with a homogeneous
+  // corpus who has measured their own model can set one here without a code
+  // change or a redeploy — precision tuning, not a correctness feature.
   embeddingBands: z.record(z.string(), z.object({
     gate:        z.number().min(0).max(0.999).optional(),
     signalFloor: z.number().min(0.001).max(0.999).optional(),

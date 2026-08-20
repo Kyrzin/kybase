@@ -100,7 +100,7 @@ const SUBSTRING_RELEVANCE = { title: 0.65, content: 0.5 };
 // two were merged into a per-model profile and the margin kept being added
 // on top of it (live: profile 0.349, effective 0.39, a hit at 0.35 silently
 // dropped). One number, one place.
-export async function effectiveSemanticThreshold(): Promise<number> {
+export async function effectiveSemanticThreshold(): Promise<number | null> {
   return getMinSimilarity();
 }
 
@@ -1019,15 +1019,16 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
   ]);
   const fetchLimit = overfetchLimit(limit, filters);
   const vec = toVector(embedding);
-  // The gate is applied here rather than inside match_chunks. Identical
-  // result either way -- match_chunks orders by similarity, so top-N then
-  // filter equals filter then top-N -- and keeping it in one place with the
-  // margin below makes the whole abstention rule readable at once.
+  // No cutoff unless the owner configured one (lib/embeddings.ts explains at
+  // length why the shipped per-model numbers were withdrawn). What survives
+  // is the relative trim below, which is a different kind of statement: it
+  // compares this query's hits to each other, and never claims that some
+  // absolute cosine means "unrelated".
   const rawData: Record<string, unknown>[] = await dbQuery(
     'select * from match_chunks($1::vector, $2, 0)',
     [vec, fetchLimit]
   );
-  const data = rawData.filter((n) => (n.similarity as number) >= floor);
+  const data = floor === null ? rawData : rawData.filter((n) => (n.similarity as number) >= floor);
 
   // match_chunks orders by similarity desc, so the first row is this
   // query's best hit — the reference point relevance is measured against.

@@ -43,32 +43,50 @@ export type EmbedTask = 'query' | 'document';
 //
 // Adding a model means measuring it — properly, across several unrelated
 // corpora rather than one vault (roadmap).
-type ModelProfile = {
-  minSimilarity: number;
-  /** false = shipped but never actually measured; reported as such. */
-  measured: boolean;
-};
-
-const MODEL_PROFILES: Record<string, ModelProfile> = {
-  'embeddinggemma':     { minSimilarity: 0.349, measured: true },
-  'nomic-embed-text':   { minSimilarity: 0.674, measured: true },
-  'text-embedding-004': { minSimilarity: 0.582, measured: true },
-  // Inherited from the old "everything that is not Google" branch and never
-  // measured on anything. Kept so behaviour does not silently change for
-  // whoever is using it, and flagged so nobody mistakes it for a result.
-  'text-embedding-3':   { minSimilarity: 0.489, measured: false },
-};
-
-// An unknown model gets semantic retrieval but no promise of abstention.
-// Pretending a stranger's cosines behave like embeddinggemma's is exactly the
-// quiet unmeasured claim this file spent a day removing; a user who has
-// measured their own model sets `embedding_bands` and gets a threshold back.
-const UNPROFILED_MIN_SIMILARITY = 0;
+// ─── and then it was measured properly, and it lost ──────────────────────
+//
+// None of those numbers ship any more. Semantic retrieval has NO automatic
+// cutoff by default; a user who wants one sets it (`embedding_bands`, below)
+// and gets exactly the number they chose.
+//
+// The reason is not that a better threshold is still to be found. It is that
+// the measurements above describe a spread, and a spread is not a boundary.
+// Set against real use, the shipped number failed in both directions at once:
+//
+//   Recall it cost — measured 2026-08-20 on a separate 32-note ru/de/fr/en
+//   corpus, embeddinggemma at 0.349: "оркестрация контейнеров" returned
+//   NOTHING while the vault held both a Kubernetes and a Docker Compose note;
+//   "wine tasting notes" returned NOTHING while a German note on Mosel
+//   viticulture sat there. Two false negatives in four probes, and both were
+//   cross-language — the exact case semantic search exists to serve, since a
+//   translation shares no lexemes for FTS to find.
+//
+//   Precision it did not buy — the same day, on a live 126-note vault: a query
+//   about a Kubernetes cluster (nothing of the sort in it) came back with two
+//   server notes at 0.373 and 0.365, comfortably ABOVE the 0.349 that was
+//   supposed to stop exactly that. On Gemini the two populations overlap
+//   outright: true answers 0.556–0.760, near-domain misses 0.585–0.684, with
+//   a correct answer at 0.556 sitting BELOW an invented one at 0.684.
+//
+// For a memory, a false negative is the expensive error: the agent is told
+// the vault holds nothing, and a document that exists is never used again.
+// A false positive costs a read — and the response now carries what a caller
+// needs to make that read cheap (matched_by, lexical coverage, exact, the
+// section, the excerpt itself).
+//
+// So the burden moved. Automatic abstention is not part of the default
+// retrieval contract, and reintroducing it needs a cross-corpus benchmark
+// showing a precision gain that outweighs the recall — not another vault.
+//
+// Kept as a setting, not deleted: someone with a homogeneous single-language
+// corpus who has measured their own model should be able to say so. That is
+// advanced precision tuning, not a correctness feature.
 
 export type SemanticProfile = {
   model: string;
-  minSimilarity: number;
-  status: 'profiled' | 'unverified' | 'unprofiled' | 'configured';
+  /** null = no automatic cutoff. NOT 0: zero looks like a measured bound. */
+  minSimilarity: number | null;
+  status: 'configured' | 'none';
 };
 
 function modelNameOf(cfg: EmbeddingConfig): string {
@@ -78,9 +96,12 @@ function modelNameOf(cfg: EmbeddingConfig): string {
 }
 
 /**
- * The abstention threshold in force, and where it came from. Reported rather
- * than merely applied: a user whose model was never profiled deserves to know
- * that semantic search will not refuse anything on its own.
+ * Whether an automatic semantic cutoff is in force, and what it is.
+ *
+ * Reported rather than merely applied, and now reports "none" unless the
+ * owner set one: a caller reading an empty semantic result has to be able to
+ * tell "nothing cleared a filter you configured" from "nothing was found at
+ * all", and those are different claims about the vault.
  */
 export async function getSemanticProfile(): Promise<SemanticProfile> {
   const cfg = await getEmbeddingConfig();
@@ -89,13 +110,11 @@ export async function getSemanticProfile(): Promise<SemanticProfile> {
   if (override?.gate !== undefined) {
     return { model, minSimilarity: override.gate, status: 'configured' };
   }
-  const key = Object.keys(MODEL_PROFILES).find((k) => model.includes(k));
-  const profile = key ? MODEL_PROFILES[key] : null;
-  if (!profile) return { model, minSimilarity: UNPROFILED_MIN_SIMILARITY, status: 'unprofiled' };
-  return { model, minSimilarity: profile.minSimilarity, status: profile.measured ? 'profiled' : 'unverified' };
+  return { model, minSimilarity: null, status: 'none' };
 }
 
-export async function getMinSimilarity(): Promise<number> {
+/** null = no cutoff; every candidate the index returns is a candidate. */
+export async function getMinSimilarity(): Promise<number | null> {
   return (await getSemanticProfile()).minSimilarity;
 }
 

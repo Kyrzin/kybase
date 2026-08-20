@@ -179,11 +179,22 @@ async function filteredNoteIds(filters: SearchFilters): Promise<Set<string>> {
 async function applyFilters(
   results: SearchResult[],
   limit: number,
-  filters: SearchFilters | undefined
+  filters: SearchFilters | undefined,
+  allowedIds?: Set<string>
 ): Promise<SearchResult[]> {
   if (!hasFilters(filters)) return results.slice(0, limit);
-  const allowed = await filteredNoteIds(filters);
-  return results.filter((r) => allowed.has(r.id)).slice(0, limit);
+  const allowed = allowedIds ?? await filteredNoteIds(filters);
+  const filtered = results.filter((r) => allowed.has(r.id)).slice(0, limit);
+  // If the filter cut the response's own best hit, the survivors' relevance
+  // stays scaled against a max that's no longer in the response — the top
+  // hit reads under 1.0 even though it's the best thing the caller gets
+  // back. Rescale against the filtered set's own max so relevance keeps
+  // meaning "best hit in THIS response", same contract as everywhere else.
+  const topRelevance = Math.max(0, ...filtered.map((r) => r.relevance));
+  if (topRelevance > 0 && topRelevance < 1) {
+    filtered.forEach((r) => { r.relevance = r.relevance / topRelevance; });
+  }
+  return filtered;
 }
 
 /**
@@ -202,7 +213,7 @@ async function applyFilters(
 async function enrichResults(results: SearchResult[]): Promise<SearchResult[]> {
   if (results.length === 0) return results;
   const rows = await dbQuery<{ id: string; created_at: string; content_length: number }>(
-    'select id, created_at, length(content) as content_length from notes where id = any($1)',
+    'select id, created_at, length(content) as content_length from notes where id = any($1) and deleted_at is null',
     [results.map((r) => r.id)]
   );
   const byId = new Map(rows.map((r) => [r.id, r]));
@@ -380,6 +391,15 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
         existing.relevance = Math.max(existing.relevance, item.relevance);
         existing.extra[field] = item.score;
         if (field === 'text_score') existing.textTier = item.text_tier;
+        // Two arms can hit the same note via genuinely different passages —
+        // a text match in one section, a semantic match (match_chunks) in
+        // another. Whichever arm ran first used to permanently own the
+        // shown excerpt/section regardless of which one actually answers
+        // the query; compare against item's own relevance (not the merged
+        // max above) so the better-matching arm's passage wins.
+        if (item.relevance > existing.result.relevance) {
+          existing.result = item;
+        }
       } else {
         scoreMap.set(item.id, {
           result: item, rrfScore, relevance: item.relevance,
@@ -492,6 +512,59 @@ async function repairBrokenTableExcerpts(results: SearchResult[]): Promise<void>
     if (header && header.offset + header.text.length <= idx) {
       r.excerpt = header.text + r.excerpt;
     }
+  }
+}
+
+// A short/empty excerpt-derived pattern would ILIKE-match every chunk of its
+// note and silently pick chunk 0's heading regardless of where the real
+// match is — this floor stops attachSections from ever reporting a heading
+// it didn't actually verify against the excerpt. Not measured, just a sanity
+// floor: shorter than this and a literal-substring anchor isn't trustworthy.
+const MIN_SECTION_MATCH_LEN = 8;
+
+/**
+ * Attaches `section` to any result missing one, by joining against
+ * note_chunks (lib/indexing.ts) rather than re-deriving a heading from raw
+ * markdown: the chunker already split each note at its own headings and
+ * stored each chunk's heading (migration 002) — reusing that can't disagree
+ * with what the chunker (and semanticSearch's own `section`, sourced the
+ * same way via match_chunks) already decided a heading is. Roadmap item 56's
+ * option (a). Runs on textSearch's full result list — FTS and substring/exact
+ * tiers alike, one code path, since neither has a chunk index of its own to
+ * work from and both need the same excerpt-to-chunk lookup.
+ *
+ * One batched query across every candidate via a paired unnest, zipping
+ * (note_id, pattern) — same "single round trip over the whole limit-bounded
+ * list" family as enrichResults and repairBrokenTableExcerpts. Verified
+ * against a live 2-chunk note before wiring in (paired unnest + join isn't a
+ * pattern used elsewhere in this file).
+ *
+ * Silent no-op per candidate that doesn't resolve — pattern too short to
+ * trust (MIN_SECTION_MATCH_LEN), or genuinely absent from any of its note's
+ * chunks (chunk boundaries don't always land on the same words an excerpt
+ * was cropped to). No section is no worse than before this ran.
+ */
+async function attachSections(results: SearchResult[]): Promise<void> {
+  const candidates = results
+    .filter((r) => !r.section)
+    .map((r) => ({
+      r,
+      pattern: r.excerpt.split('\n')[0].replace(/^(\.\.\.|…)/, '').replace(/(\.\.\.|…)$/, '').trim(),
+    }))
+    .filter((c) => c.pattern.length >= MIN_SECTION_MATCH_LEN);
+  if (candidates.length === 0) return;
+
+  const rows = await dbQuery<{ note_id: string; heading: string | null }>(
+    `select distinct on (p.note_id) p.note_id, nc.heading
+     from unnest($1::uuid[], $2::text[]) as p(note_id, pattern)
+     join note_chunks nc on nc.note_id = p.note_id and nc.content ilike p.pattern
+     order by p.note_id, nc.chunk_index`,
+    [candidates.map((c) => c.r.id), candidates.map((c) => `%${escapeLike(c.pattern)}%`)]
+  );
+  const headingById = new Map(rows.map((r) => [r.note_id, r.heading]));
+  for (const { r } of candidates) {
+    const heading = headingById.get(r.id);
+    if (heading) r.section = heading;
   }
 }
 
@@ -719,7 +792,7 @@ function weightForFolder(folderId: string | null | undefined, weights: FolderWei
   return folderId ? (weights[folderId] ?? 1) : 1;
 }
 
-export async function textSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
+export async function textSearch(query: string, limit = 10, filters?: SearchFilters, allowedIds?: Set<string>): Promise<SearchResult[]> {
   const fetchLimit = overfetchLimit(limit, filters);
   const [rows, tagWeights, folderWeights] = await Promise.all([
     dbQuery<FtsRow>('select * from search_notes_fts($1, $2)', [query, fetchLimit]),
@@ -825,9 +898,9 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   const structured = asciiToken && q.length >= 4 && /[-_.:/\\]/.test(q);
   const opaque = asciiToken && q.length >= 8 && /[0-9]/.test(q) && /[A-Za-z]/.test(q);
   const verbatim = !/\s/.test(q) && (words.length > 1 || structured || opaque);
-  const exactHits = (await substringSearch(query, limit, filters))
+  const exactHits = (await substringSearch(query, limit, filters, allowedIds))
     .map((r) => (verbatim ? { ...r, exact: true } : r));
-  if (rows.length === 0 && orRows.length === 0) {
+  if (rows.length === 0 && orRows.length === 0 && anchorRows.length === 0) {
     return enrichResults(applyExactBand(exactHits));
   }
   const exactIds = new Set(verbatim ? exactHits.map((r) => r.id) : []);
@@ -917,8 +990,9 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     // rank, but coverage can push an 'or' hit above an 'and' one, and the
     // caller reads top to bottom.
     .sort((a, b) => Number(b.exact ?? false) - Number(a.exact ?? false) || b.relevance - a.relevance);
-  const filtered = await applyFilters(results, limit, filters);
+  const filtered = await applyFilters(results, limit, filters, allowedIds);
   await repairBrokenTableExcerpts(filtered);
+  await attachSections(filtered);
   return enrichResults(filtered);
 }
 
@@ -954,13 +1028,25 @@ function applyExactBand<T extends { relevance: number; exact?: boolean }>(result
 }
 
 /** Title matches rank above content matches (queried separately, merged in order). */
-async function substringSearch(query: string, limit: number, filters?: SearchFilters): Promise<SearchResult[]> {
+async function substringSearch(
+  query: string,
+  limit: number,
+  filters?: SearchFilters,
+  allowedIds?: Set<string>
+): Promise<SearchResult[]> {
   const cols = 'id, title, content, tags';
   const escapedQuery = escapeLike(query);
   const fetchLimit = overfetchLimit(limit, filters);
+  // Without an explicit order, LIMIT over a plain seq/index scan has no
+  // guaranteed row order — `score = 1/(i+1)` below would then depend on
+  // whatever order Postgres happened to return, silently reshuffling
+  // RRF's rank contribution for these hits between otherwise-identical
+  // calls. `id` alone is enough for a stable order; it carries no ranking
+  // claim of its own; ordering by anything else here (title length,
+  // recency, ...) would.
   const [byTitle, byContent] = await Promise.all([
-    dbQuery<NoteRow>(`select ${cols} from notes where title ilike $1 and deleted_at is null limit $2`, [`%${escapedQuery}%`, fetchLimit]),
-    dbQuery<NoteRow>(`select ${cols} from notes where content ilike $1 and deleted_at is null limit $2`, [`%${escapedQuery}%`, fetchLimit]),
+    dbQuery<NoteRow>(`select ${cols} from notes where title ilike $1 and deleted_at is null order by id asc limit $2`, [`%${escapedQuery}%`, fetchLimit]),
+    dbQuery<NoteRow>(`select ${cols} from notes where content ilike $1 and deleted_at is null order by id asc limit $2`, [`%${escapedQuery}%`, fetchLimit]),
   ]);
 
   const seen = new Set<string>();
@@ -984,7 +1070,51 @@ async function substringSearch(query: string, limit: number, filters?: SearchFil
       text_tier: 'substring' as const,
     };
   });
-  return applyFilters(results, limit, filters);
+  return applyFilters(results, limit, filters, allowedIds);
+}
+
+/**
+ * How many notes match `query`, without paying for ranking, excerpts, or a
+ * `limit` cutoff — roadmap item 44 ("nothing can be counted"): judging a
+ * defect's real scope, or a lexeme's real drop rate, needs a total, and
+ * search_notes only ever reports how many it returned, never how many exist.
+ *
+ * Two modes, each one honest, unambiguous definition — deliberately not a
+ * single "did ANY tier match" number, which would silently answer a
+ * different question depending on which cascade tier happened to fire:
+ *  - 'fts': the same tsquery search_notes_fts itself builds (fts_normalize +
+ *    per-language websearch_to_tsquery, OR'd — migration 023) — exactly
+ *    textSearch's strict 'and' tier's own match set, counted instead of
+ *    ranked.
+ *  - 'substring': the same `ilike '%query%'` substringSearch already runs,
+ *    counted instead of fetched — literal containment, no tokenizer involved.
+ *
+ * No semantic mode: nearest-neighbor search has no natural "matched" set
+ * without a similarity floor, and getMinSimilarity() is null by default (see
+ * effectiveSemanticThreshold) — "how many matched" would silently mean "the
+ * whole vault" for the common unconfigured case, a number worse than none.
+ *
+ * No SearchFilters param (yet): every roadmap use case behind item 44 was a
+ * vault-wide question ("how many notes have X"), not a scoped one — add
+ * filtering if a real caller needs it rather than guessing the shape now.
+ */
+export async function countNotes(query: string, mode: 'fts' | 'substring'): Promise<number> {
+  if (mode === 'substring') {
+    const escapedQuery = escapeLike(query);
+    const rows = await dbQuery<{ count: number }>(
+      'select count(*)::int as count from notes where deleted_at is null and (title ilike $1 or content ilike $1)',
+      [`%${escapedQuery}%`]
+    );
+    return rows[0]?.count ?? 0;
+  }
+  const languages = await getFtsLanguages();
+  const langExprs = languages.map((_, i) => `websearch_to_tsquery($${i + 2}::regconfig, fts_normalize($1))`);
+  const tsqExpr = [`websearch_to_tsquery('simple', fts_normalize($1))`, ...langExprs].join(' || ');
+  const rows = await dbQuery<{ count: number }>(
+    `select count(*)::int as count from notes where deleted_at is null and search_vector @@ (${tsqExpr})`,
+    [query, ...languages]
+  );
+  return rows[0]?.count ?? 0;
 }
 
 /**
@@ -999,9 +1129,11 @@ async function substringSearch(query: string, limit: number, filters?: SearchFil
  * and a relevance judgment: lowering it to catch more true positives always
  * let more noise in too, on this vault and by construction on anyone else's):
  *
- *  1. Recall — getMinSimilarity() is a low, permissive junk gate applied
- *     INSIDE match_chunks at the CHUNK level (migration 002). Everything
- *     back from the RPC is merely a *candidate*.
+ *  1. Recall — match_chunks itself is always called with a hardcoded 0
+ *     (migration 002's own chunk-level floor is bypassed entirely, see the
+ *     RPC call below); getMinSimilarity() is applied AFTER the RPC returns,
+ *     as a low, permissive junk-gate filter in JS. Everything that survives
+ *     it is merely a *candidate*.
  *  2. Relevance — among those candidates, keep only ones within 0.75x of
  *     this query's own best hit, then score relevance = similarity / best.
  *     A ratio, not a cosine — comparable across models and corpora, unlike
@@ -1012,7 +1144,7 @@ async function substringSearch(query: string, limit: number, filters?: SearchFil
  * text pass only — that's why the combined output shows notes a pure-
  * semantic pass would have dropped.
  */
-export async function semanticSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
+export async function semanticSearch(query: string, limit = 10, filters?: SearchFilters, allowedIds?: Set<string>): Promise<SearchResult[]> {
   const [embedding, floor] = await Promise.all([
     getEmbedding(query, 'query'),
     getMinSimilarity(),
@@ -1059,7 +1191,7 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
     const heading = n.heading as string | null;
     // Drop the chunk's own `# Heading` line — it travels as `section` instead.
     const excerpt = makeExcerpt(stripLeadingHeading(n.chunk_content as string), query);
-    const relevance = (n.similarity as number) / best;
+    const relevance = best > 0 ? (n.similarity as number) / best : 0;
     return {
       id:      n.id as string,
       title:   n.title as string,
@@ -1076,7 +1208,7 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
       ...(heading ? { section: heading } : {}),
     };
   });
-  const filtered = await applyFilters(results, limit, filters);
+  const filtered = await applyFilters(results, limit, filters, allowedIds);
 
   // Coverage on a semantic hit answers the question the cosine cannot: does
   // the thing you asked about actually APPEAR in this note. Measured
@@ -1122,12 +1254,97 @@ export async function bestSemanticScore(query: string): Promise<number | null> {
 
 export async function hybridSearch(query: string, limit = 10, filters?: SearchFilters): Promise<HybridSearchResult[]> {
   const candidateLimit = Math.min(RRF_CANDIDATE_CAP, limit * RRF_CANDIDATE_FACTOR);
+  // Resolved once here rather than separately inside each arm — both would
+  // otherwise independently call filteredNoteIds() for the same filters and
+  // get the same set, a redundant query on every filtered hybrid search.
+  const allowedIds = hasFilters(filters) ? await filteredNoteIds(filters) : undefined;
   const [text, semantic] = await Promise.all([
-    textSearch(query, candidateLimit, filters),
-    semanticSearch(query, candidateLimit, filters),
+    textSearch(query, candidateLimit, filters, allowedIds),
+    semanticSearch(query, candidateLimit, filters, allowedIds),
   ]);
   return rrfMerge([
     { field: 'text_score', results: text },
     { field: 'semantic_score', results: semantic },
   ]).slice(0, limit);
 }
+
+export type SearchMode = 'hybrid' | 'text' | 'semantic';
+
+export interface SearchOptions {
+  mode?: SearchMode;
+  limit?: number;
+  offset?: number;
+  filters?: SearchFilters;
+  explain?: boolean;
+}
+
+/**
+ * Universal search entry point. Thin facade dispatching to textSearch,
+ * semanticSearch, or hybridSearch based on mode (default: 'hybrid').
+ *
+ * Guardrails:
+ * - Default mode is ALWAYS 'hybrid' (no word-count auto heuristics).
+ * - Preserves functional agent signals (section, matched_by, coverage, exact).
+ * - When explain is false/omitted, strips raw internal floating-point scores
+ *   (text_score, semantic_score, rrf_score).
+ * - Supports offset-based pagination.
+ */
+export async function universalSearch(
+  query: string,
+  options: SearchOptions = {}
+): Promise<SearchResult[]> {
+  const {
+    mode = 'hybrid',
+    limit = 10,
+    offset = 0,
+    filters,
+    explain = false,
+  } = options;
+
+  const fetchLimit = limit + offset;
+  let rawResults: (SearchResult | HybridSearchResult)[] = [];
+
+  if (mode === 'text') {
+    rawResults = await textSearch(query, fetchLimit, filters);
+  } else if (mode === 'semantic') {
+    rawResults = await semanticSearch(query, fetchLimit, filters);
+  } else {
+    rawResults = await hybridSearch(query, fetchLimit, filters);
+  }
+
+  // Apply offset pagination if requested
+  const sliced = offset > 0
+    ? rawResults.slice(offset, offset + limit)
+    : rawResults.slice(0, limit);
+
+  // Map to SearchResult[] with strict whitelist
+  return sliced.map((r): SearchResult => {
+    const isHybrid = 'rrf_score' in r;
+    const rawScore = isHybrid ? r.rrf_score : r.score;
+
+    const base: SearchResult = {
+      id: r.id,
+      title: r.title,
+      excerpt: r.excerpt,
+      tags: r.tags,
+      score: explain ? rawScore : 0,
+      relevance: r.relevance,
+    };
+
+    if (r.matched_by !== undefined) base.matched_by = r.matched_by;
+    if (r.text_tier !== undefined) base.text_tier = r.text_tier;
+    if (r.exact !== undefined) base.exact = r.exact;
+    if (r.coverage !== undefined) base.coverage = r.coverage;
+    if (r.section !== undefined) base.section = r.section;
+    if (r.content_length !== undefined) base.content_length = r.content_length;
+    if (r.created_at !== undefined) base.created_at = r.created_at;
+
+    if (explain) {
+      if (r.text_score !== undefined) base.text_score = r.text_score;
+      if (r.semantic_score !== undefined) base.semantic_score = r.semantic_score;
+    }
+
+    return base;
+  });
+}
+

@@ -3,6 +3,8 @@ import crypto from 'crypto';
 import { storeCode } from '@/lib/auth-codes';
 import { safeEqual } from '@/lib/auth';
 import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
+import { parseRedirectUri, normalizeRedirectUri } from '@/lib/oauth-redirect';
+import { getClient, touchClient } from '@/lib/oauth-clients';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,62 +12,28 @@ function esc(s: string) {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// claude.ai's connector is the only hosted OAuth client this server
-// documents — every other client in the README (Claude Code, Claude Desktop,
-// Cursor, Windsurf) authenticates with a static Bearer token and never walks
-// this flow. The value below is not a guess: it is the redirect_uri observed
-// on a real connector authorization, 2026-08-20. KYBASE_OAUTH_REDIRECT_URIS
-// adds more without a code change, for anyone running a different client.
-const DEFAULT_REDIRECT_URIS = ['https://claude.ai/api/mcp/auth_callback'];
-
-// Compared through the URL parser rather than as raw text so that two
-// spellings of the same callback (a trailing slash, a percent-encoded
-// character that needn't be) don't read as different URIs. Both sides go
-// through the same normalization; nothing about the comparison is loosened —
-// path, query and port all still have to match exactly.
-function normalizeUri(uri: string): string | null {
-  try {
-    return new URL(uri).href;
-  } catch {
-    return null;
-  }
-}
-
-function allowedRedirectUris(): string[] {
-  const extra = (process.env.KYBASE_OAUTH_REDIRECT_URIS ?? '')
-    .split(',')
-    .map(u => normalizeUri(u.trim()))
-    .filter((u): u is string => u !== null);
-  return [...DEFAULT_REDIRECT_URIS, ...extra];
-}
-
-// The code (and with it the master secret) is sent wherever redirect_uri
-// points, so this is the one check standing between a phishing link and a
-// full-access token. Requiring https is not enough, and neither is trusting
-// the host: an attacker builds their own PKCE pair and mails a victim a link
-// to this server's REAL /authorize with a redirect_uri they control — the
-// victim sees the real domain, submits the real secret, and the code lands
-// on the attacker's server via the 303, PKCE untouched because the attacker
-// holds the matching code_verifier. Host-level allowlisting narrows that to
-// "any path on an allowed host", which still falls to an open redirect on
-// the allowed host itself.
+// Two questions, asked in this order, and both have to answer yes.
 //
-// So: the WHOLE redirect_uri must match a registered one, which is what
-// OAuth 2.1 and RFC 9700 require and what the MCP spec inherits from them.
+//  1. Is this callback acceptable to this server at all? — parseRedirectUri
+//     (lib/oauth-redirect.ts), the same gate the registration endpoint
+//     applies, so a client can never register a URI authorize would refuse.
+//  2. Is it one of THIS client's own registered callbacks? — exact match
+//     against the row written at registration, which is what OAuth 2.1 and
+//     RFC 9700 actually require and what a server-wide list can only
+//     approximate.
 //
-// Loopback is the standard's own exception (RFC 8252): a native client
-// listens on a random port that cannot be registered ahead of time, so there
-// the port — and, with no client registration in this server, the path — are
-// not pinned. Nothing reaches a third party there: the code goes back to the
-// same machine that started the flow.
-function parseRedirectUri(uri: string): URL | null {
-  const normalized = normalizeUri(uri);
-  if (!normalized) return null;
-  const url = new URL(normalized);
-  const isLoopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
-  if (isLoopback) return url.protocol === 'http:' || url.protocol === 'https:' ? url : null;
-  if (url.protocol !== 'https:') return null;
-  return allowedRedirectUris().includes(normalized) ? url : null;
+// An unregistered client_id skips step 2 rather than failing it. This server
+// accepted an invented client_id long before registration existed, and
+// installs that connected under the old scheme still present one; step 1
+// still holds for them, so they can never reach a callback a registered
+// client couldn't.
+async function checkRedirectUri(uri: string, clientId: string): Promise<URL | null> {
+  const url = parseRedirectUri(uri);
+  if (!url) return null;
+  const client = await getClient(clientId);
+  if (!client) return url;
+  const normalized = normalizeRedirectUri(uri);
+  return normalized && client.redirectUris.includes(normalized) ? url : null;
 }
 
 function renderForm(params: Record<string, string>, error?: string) {
@@ -120,7 +88,7 @@ export async function GET(req: NextRequest) {
   if (p.response_type !== 'code') {
     return NextResponse.json({ error: 'unsupported_response_type' }, { status: 400 });
   }
-  if (!parseRedirectUri(p.redirect_uri ?? '')) {
+  if (!(await checkRedirectUri(p.redirect_uri ?? '', p.client_id ?? ''))) {
     return NextResponse.json(
       { error: 'invalid_request', error_description: 'redirect_uri must exactly match a registered callback URI (or be a loopback address)' },
       { status: 400 }
@@ -164,7 +132,7 @@ export async function POST(req: NextRequest) {
     return renderForm(formParams, 'Invalid API key. Please try again.');
   }
 
-  const callbackUrl = parseRedirectUri(redirectUri);
+  const callbackUrl = await checkRedirectUri(redirectUri, clientId);
   if (!callbackUrl) {
     return NextResponse.json(
       { error: 'invalid_request', error_description: 'redirect_uri must exactly match a registered callback URI (or be a loopback address)' },
@@ -185,6 +153,10 @@ export async function POST(req: NextRequest) {
     redirectUri,
     expiresAt: Date.now() + 10 * 60 * 1000,
   });
+
+  // Marks the registration as actually used, so the ones that were created and
+  // abandoned stay distinguishable from the ones in service.
+  await touchClient(clientId);
 
   callbackUrl.searchParams.set('code', code);
   callbackUrl.searchParams.set('state', state);

@@ -43,10 +43,19 @@ Consequences you should understand before deploying:
   failed attempts from someone else — the limiter only ever applies once the
   credential has already failed.
 - OAuth requires PKCE (S256 only), and `redirect_uri` must match a registered
-  callback URI **in full** — claude.ai's connector callback by default, extend
-  with `KYBASE_OAUTH_REDIRECT_URIS`. Loopback addresses are the standard's own
-  exception (RFC 8252): a local client listens on a random port, and the code
-  never leaves the machine that started the flow.
+  callback URI **in full** — first against the whole-server list (claude.ai's
+  connector callback by default, extend with `KYBASE_OAUTH_REDIRECT_URIS`),
+  then against the specific callbacks that client registered for itself.
+  Loopback addresses are the standard's own exception (RFC 8252): a local
+  client listens on a random port, and the code never leaves the machine that
+  started the flow.
+- Client registration (RFC 7591, `/api/oauth/register`) is unauthenticated,
+  because a hosted client has no credential to present before it registers.
+  That does not widen anything: a registration is refused outright unless every
+  callback in it already passes the server-wide list above. Registering decides
+  *which* acceptable callback a client may use — never *what* is acceptable —
+  so an attacker can obtain a `client_id` and still has nowhere to send a code.
+  The endpoint is rate-limited like every other credential-adjacent path.
   PKCE alone doesn't stop a phishing link that supplies its own code_challenge
   and an attacker-controlled redirect_uri, and matching only the host would
   still fall to an open redirect on that host — so the whole URI is pinned,

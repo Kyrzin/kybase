@@ -42,13 +42,16 @@ Consequences you should understand before deploying:
   checked before the bucket, so a valid secret or token is never blocked by
   failed attempts from someone else — the limiter only ever applies once the
   credential has already failed.
-- OAuth requires PKCE (S256 only); `redirect_uri` must be `https:` on an
-  allowed host (`claude.ai` by default, extend with
-  `KYBASE_OAUTH_ALLOWED_HOSTS`) or `http://localhost` for local MCP
-  clients — PKCE alone doesn't stop a phishing link that supplies its own
-  code_challenge and an attacker-controlled redirect_uri, so the host
-  itself has to be trusted. The consent page also shows the redirect host
-  and refuses to render in a frame.
+- OAuth requires PKCE (S256 only), and `redirect_uri` must match a registered
+  callback URI **in full** — claude.ai's connector callback by default, extend
+  with `KYBASE_OAUTH_REDIRECT_URIS`. Loopback addresses are the standard's own
+  exception (RFC 8252): a local client listens on a random port, and the code
+  never leaves the machine that started the flow.
+  PKCE alone doesn't stop a phishing link that supplies its own code_challenge
+  and an attacker-controlled redirect_uri, and matching only the host would
+  still fall to an open redirect on that host — so the whole URI is pinned,
+  as OAuth 2.1 and RFC 9700 require. The consent page also shows the redirect
+  host and refuses to render in a frame.
 - SQL is fully parameterized; input is zod-validated at every boundary.
 - The container runs as a non-root user; embedding calls have 30 s timeouts.
 

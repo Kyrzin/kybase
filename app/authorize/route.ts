@@ -10,41 +10,62 @@ function esc(s: string) {
   return s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-// claude.ai is the only hosted OAuth client this server documents — every
-// other client in the README (Claude Code, Claude Desktop, Cursor,
-// Windsurf) authenticates with a static Bearer token, never through this
-// flow. KYBASE_OAUTH_ALLOWED_HOSTS lets an owner add their own without a
-// code change.
-const DEFAULT_ALLOWED_HOSTS = ['claude.ai'];
+// claude.ai's connector is the only hosted OAuth client this server
+// documents — every other client in the README (Claude Code, Claude Desktop,
+// Cursor, Windsurf) authenticates with a static Bearer token and never walks
+// this flow. The value below is not a guess: it is the redirect_uri observed
+// on a real connector authorization, 2026-08-20. KYBASE_OAUTH_REDIRECT_URIS
+// adds more without a code change, for anyone running a different client.
+const DEFAULT_REDIRECT_URIS = ['https://claude.ai/api/mcp/auth_callback'];
 
-function allowedHosts(): string[] {
-  const extra = (process.env.KYBASE_OAUTH_ALLOWED_HOSTS ?? '')
-    .split(',')
-    .map(h => h.trim())
-    .filter(Boolean);
-  return [...DEFAULT_ALLOWED_HOSTS, ...extra];
-}
-
-// The code (and with it the master secret) is sent wherever redirect_uri
-// points. Requiring https alone isn't enough: an attacker can build their
-// own PKCE pair and mail a victim a link to this server's real /authorize
-// with redirect_uri set to a host they control — the victim sees the real
-// domain, submits the real secret, and the code lands on the attacker's
-// server via the 303 redirect, PKCE untouched because the attacker holds
-// the matching code_verifier. Hosts must be on the allowlist; loopback
-// stays open unconditionally for local MCP clients that run their own
-// short-lived callback server on a random port.
-function parseRedirectUri(uri: string): URL | null {
-  let url: URL;
+// Compared through the URL parser rather than as raw text so that two
+// spellings of the same callback (a trailing slash, a percent-encoded
+// character that needn't be) don't read as different URIs. Both sides go
+// through the same normalization; nothing about the comparison is loosened —
+// path, query and port all still have to match exactly.
+function normalizeUri(uri: string): string | null {
   try {
-    url = new URL(uri);
+    return new URL(uri).href;
   } catch {
     return null;
   }
+}
+
+function allowedRedirectUris(): string[] {
+  const extra = (process.env.KYBASE_OAUTH_REDIRECT_URIS ?? '')
+    .split(',')
+    .map(u => normalizeUri(u.trim()))
+    .filter((u): u is string => u !== null);
+  return [...DEFAULT_REDIRECT_URIS, ...extra];
+}
+
+// The code (and with it the master secret) is sent wherever redirect_uri
+// points, so this is the one check standing between a phishing link and a
+// full-access token. Requiring https is not enough, and neither is trusting
+// the host: an attacker builds their own PKCE pair and mails a victim a link
+// to this server's REAL /authorize with a redirect_uri they control — the
+// victim sees the real domain, submits the real secret, and the code lands
+// on the attacker's server via the 303, PKCE untouched because the attacker
+// holds the matching code_verifier. Host-level allowlisting narrows that to
+// "any path on an allowed host", which still falls to an open redirect on
+// the allowed host itself.
+//
+// So: the WHOLE redirect_uri must match a registered one, which is what
+// OAuth 2.1 and RFC 9700 require and what the MCP spec inherits from them.
+//
+// Loopback is the standard's own exception (RFC 8252): a native client
+// listens on a random port that cannot be registered ahead of time, so there
+// the port — and, with no client registration in this server, the path — are
+// not pinned. Nothing reaches a third party there: the code goes back to the
+// same machine that started the flow.
+function parseRedirectUri(uri: string): URL | null {
+  const normalized = normalizeUri(uri);
+  if (!normalized) return null;
+  const url = new URL(normalized);
   const isLoopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
   if (isLoopback) return url.protocol === 'http:' || url.protocol === 'https:' ? url : null;
-  if (url.protocol === 'https:' && allowedHosts().includes(url.hostname)) return url;
-  return null;
+  if (url.protocol !== 'https:') return null;
+  return allowedRedirectUris().includes(normalized) ? url : null;
 }
 
 function renderForm(params: Record<string, string>, error?: string) {
@@ -101,7 +122,7 @@ export async function GET(req: NextRequest) {
   }
   if (!parseRedirectUri(p.redirect_uri ?? '')) {
     return NextResponse.json(
-      { error: 'invalid_request', error_description: 'redirect_uri must be https on an allowed host (or localhost)' },
+      { error: 'invalid_request', error_description: 'redirect_uri must exactly match a registered callback URI (or be a loopback address)' },
       { status: 400 }
     );
   }
@@ -146,7 +167,7 @@ export async function POST(req: NextRequest) {
   const callbackUrl = parseRedirectUri(redirectUri);
   if (!callbackUrl) {
     return NextResponse.json(
-      { error: 'invalid_request', error_description: 'redirect_uri must be https on an allowed host (or localhost)' },
+      { error: 'invalid_request', error_description: 'redirect_uri must exactly match a registered callback URI (or be a loopback address)' },
       { status: 400 }
     );
   }

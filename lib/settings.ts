@@ -102,9 +102,9 @@ const BANDS_CACHE_TTL_MS = 5_000;
 let cachedBands: { value: Record<string, BandOverride>; expiresAt: number } | null = null;
 
 /**
- * Every stored band, validated the same way a single lookup is. The
- * calibrator needs it to merge its result with other models' bands instead
- * of overwriting them, and the settings UI needs it to show what is stored.
+ * Every stored band, validated the same way a single lookup is. A settings
+ * write needs the full map to merge one model's band in without overwriting
+ * the others', and the settings UI needs it to show what is stored.
  */
 export async function getEmbeddingBands(): Promise<Record<string, BandOverride>> {
   if (!cachedBands || Date.now() >= cachedBands.expiresAt) {

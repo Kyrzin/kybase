@@ -180,7 +180,10 @@ export default function KybaseApp() {
   const backlinks = useMemo(() => {
     if (!activeNote) return [];
     const escaped = activeNote.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const re = new RegExp(`\\[\\[${escaped}(\\|[^\\]]+)?\\]\\]`, 'gi');
+    // No 'g' flag: re.test() is called once per note below, and a global
+    // regex's lastIndex carries over between calls on the same instance,
+    // silently skipping every other real match.
+    const re = new RegExp(`\\[\\[${escaped}(\\|[^\\]]+)?\\]\\]`, 'i');
     return notes.filter(n => n.id !== activeNote.id && re.test(n.content));
   }, [activeNote, notes]);
 

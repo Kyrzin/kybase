@@ -34,14 +34,21 @@ Consequences you should understand before deploying:
 - All auth comparisons are constant-time (`safeEqual`, `timingSafeEqual`);
   OAuth tokens are looked up by sha256 hash, never stored raw.
 - Failed auth attempts are rate-limited on every endpoint that verifies the
-  secret: 10/min per client IP plus a 30/min global bucket (spoofing
-  `X-Forwarded-For` doesn't help). The credential is always checked before
-  the bucket, so a valid secret or token is never blocked by failed attempts
-  from someone else — the limiter only ever applies once the credential has
-  already failed.
-- OAuth requires PKCE (S256 only); `redirect_uri` must be `https:` (or
-  `http://localhost` for local MCP clients) and the consent page shows the
-  redirect host and refuses to render in a frame.
+  secret: 10/min per client IP plus a 30/min global bucket. The per-IP half
+  trusts `X-Forwarded-For`'s first hop, so it only identifies real clients
+  behind a reverse proxy you control — anyone who can reach Kybase directly
+  can spoof that header and dodge it. The 30/min global bucket does not
+  depend on the header at all and always applies. The credential is always
+  checked before the bucket, so a valid secret or token is never blocked by
+  failed attempts from someone else — the limiter only ever applies once the
+  credential has already failed.
+- OAuth requires PKCE (S256 only); `redirect_uri` must be `https:` on an
+  allowed host (`claude.ai` by default, extend with
+  `KYBASE_OAUTH_ALLOWED_HOSTS`) or `http://localhost` for local MCP
+  clients — PKCE alone doesn't stop a phishing link that supplies its own
+  code_challenge and an attacker-controlled redirect_uri, so the host
+  itself has to be trusted. The consent page also shows the redirect host
+  and refuses to render in a frame.
 - SQL is fully parameterized; input is zod-validated at every boundary.
 - The container runs as a non-root user; embedding calls have 30 s timeouts.
 

@@ -72,5 +72,11 @@ export async function proxy(req: NextRequest) {
 // Every exclusion is anchored ($ or /): a bare prefix like `mcp` would also
 // exempt a future /api/mcp2 from auth.
 export const config = {
-  matcher: ['/api/((?!auth/|mcp$|mcp/|oauth/token$|oauth/discovery$|import$|notes/import-document$).*)'],
+  // oauth/register joins token and discovery for the same reason they are
+  // here: it is part of the flow a client walks BEFORE it has any credential
+  // to present. Registration behind the master secret is registration no
+  // hosted client can reach, which is the same as not having it — and the
+  // endpoint is not therefore unguarded: it rate-limits itself and refuses any
+  // callback the server wouldn't accept anyway (app/api/oauth/register).
+  matcher: ['/api/((?!auth/|mcp$|mcp/|oauth/token$|oauth/discovery$|oauth/register$|import$|notes/import-document$).*)'],
 };

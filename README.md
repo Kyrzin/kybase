@@ -111,8 +111,11 @@ The app exposes a Streamable HTTP MCP endpoint at `/api/mcp`. Any MCP client tha
 Windows: `%APPDATA%\Claude\claude_desktop_config.json`).
 
 **claude.ai** — Settings → Connectors → Add custom connector, same URL
-(requires the instance to be reachable over HTTPS). Each client gets its own
-revocable OAuth token — see **Settings → Connected clients** in the web UI.
+(requires the instance to be reachable over HTTPS). No key to paste: the
+connector registers itself (RFC 7591), sends you to your own instance to enter
+the key once, and gets its own revocable OAuth token — see **Settings →
+Connected clients** in the web UI. A connector can only be sent back to a
+callback this server accepts, so registration cannot point one somewhere else.
 
 **Cursor** — add to `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
 

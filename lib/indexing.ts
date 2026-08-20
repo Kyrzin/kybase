@@ -2,7 +2,7 @@
 // whole-note embedding + per-chunk embeddings. Used by the notes API,
 // the MCP server, the admin reindex endpoint, and scripts/reindex.ts.
 import { getPool, toVector } from './db';
-import { getEmbedding, getEmbedConcurrency, EmbedCancelledError, isQuotaExhausted } from './embeddings';
+import { getEmbedding, getEmbeddings, EmbedCancelledError, isQuotaExhausted } from './embeddings';
 import { chunkNote } from './chunking';
 import { invalidateSemanticEdgesCache } from './semantic-edges';
 
@@ -49,24 +49,24 @@ async function embedNoteHead(title: string, content: string, isCancelled?: () =>
 export async function indexNote(id: string, title: string, content: string, isCancelled?: () => boolean): Promise<void> {
   const noteEmbedding = await embedNoteHead(title, content, isCancelled);
 
-  const { chunks: chunkConcurrency } = await getEmbedConcurrency();
   const chunks = chunkNote(content);
-  const chunkRows = [];
-  for (let i = 0; i < chunks.length; i += chunkConcurrency) {
+  let chunkRows: { note_id: string; chunk_index: number; heading?: string | null; content: string; embedding: number[] }[] = [];
+
+  if (chunks.length > 0) {
     if (isCancelled?.()) throw new EmbedCancelledError();
-    const batch = chunks.slice(i, i + chunkConcurrency);
-    const embedded = await Promise.all(batch.map(async (chunk) => {
+    const chunkTexts = chunks.map((chunk) => {
       const context = chunk.heading ? `${title} › ${chunk.heading}` : title;
-      const embedding = await getEmbedding(`${context}\n\n${chunk.content}`, 'document', isCancelled);
-      return {
-        note_id:     id,
-        chunk_index: chunk.index,
-        heading:     chunk.heading,
-        content:     chunk.content,
-        embedding,
-      };
+      return `${context}\n\n${chunk.content}`;
+    });
+
+    const chunkEmbeddings = await getEmbeddings(chunkTexts, 'document', isCancelled);
+    chunkRows = chunks.map((chunk, i) => ({
+      note_id:     id,
+      chunk_index: chunk.index,
+      heading:     chunk.heading,
+      content:     chunk.content,
+      embedding:   chunkEmbeddings[i],
     }));
-    chunkRows.push(...embedded);
   }
 
   // One transaction: a failure mid-way leaves the previous index intact.

@@ -9,6 +9,26 @@ export async function register() {
   const { runMigrationsOrDie } = await import('./lib/migrate');
   await runMigrationsOrDie();
 
+  // Catches the one path the settings UI's own provider-switch guard
+  // (app/api/settings/route.ts's providerChanged) can't see: an env var
+  // (EMBEDDING_PROVIDER, OLLAMA_MODEL, GOOGLE_MODEL, OPENAI_MODEL) edited in
+  // .env, picked up silently on the restart that follows — getEmbeddingConfig()
+  // falls back to process.env.* with nothing in that read path to notice a
+  // change. First run ever (nothing recorded yet) just records the current
+  // model rather than reindexing — there's no prior model to have drifted
+  // from, and the notes already reflect whatever was live before this check
+  // existed.
+  const { getEmbeddingConfig, getLastIndexedModel, setLastIndexedModel } = await import('./lib/settings');
+  const { embeddingModelKey } = await import('./lib/embeddings');
+  const { query } = await import('./lib/db');
+  const currentModelKey = embeddingModelKey(await getEmbeddingConfig());
+  const lastModelKey = await getLastIndexedModel();
+  if (lastModelKey !== null && lastModelKey !== currentModelKey) {
+    const marked = await query<{ id: string }>('update notes set embedding_pending = true where deleted_at is null returning id');
+    console.warn(`[startup] embedding model changed (${lastModelKey} -> ${currentModelKey}) — marked ${marked.length} notes for reindex`);
+  }
+  await setLastIndexedModel(currentModelKey);
+
   // A note stays embedding_pending when its provider call failed (Ollama
   // down, crash mid-index) — without this it silently never enters semantic
   // search. Delayed so a cold Ollama container has time to come up; if it's

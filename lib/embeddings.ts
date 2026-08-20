@@ -118,11 +118,11 @@ export async function getMinSimilarity(): Promise<number | null> {
   return (await getSemanticProfile()).minSimilarity;
 }
 
-/** Stable key for the active provider+model, used by the bands setting. */
+/** Stable key for the active provider+model, used by the bands setting and drift detection. */
 export function embeddingModelKey(cfg: EmbeddingConfig): string {
-  return cfg.provider === 'ollama'
-    ? `ollama:${cfg.ollamaModel ?? 'embeddinggemma'}`
-    : `${cfg.provider}:${cfg.provider === 'google' ? (process.env.GOOGLE_MODEL ?? 'text-embedding-004') : 'default'}`;
+  if (cfg.provider === 'ollama') return `ollama:${cfg.ollamaModel ?? 'embeddinggemma'}`;
+  if (cfg.provider === 'google') return `google:${process.env.GOOGLE_MODEL ?? 'text-embedding-004'}`;
+  return `openai:${process.env.OPENAI_MODEL ?? 'text-embedding-3-small'}`;
 }
 
 // A reindex batch (lib/reindex.ts) can be stopped mid-run by the user. The
@@ -168,6 +168,34 @@ export async function getEmbedding(text: string, task: EmbedTask = 'document', i
   }
 }
 
+/**
+ * Batch embedding for multiple texts within a single note (Roadmap Item 37).
+ * For Google, sends all texts in a single batchEmbedContents HTTP request.
+ * For Ollama/OpenAI, preserves standard concurrent processing.
+ */
+export async function getEmbeddings(
+  texts: string[],
+  task: EmbedTask = 'document',
+  isCancelled?: () => boolean
+): Promise<number[][]> {
+  if (texts.length === 0) return [];
+  const cfg = await getEmbeddingConfig();
+  if (cfg.provider === 'google') {
+    return googleBatchEmbed(texts, cfg.googleApiKey, isCancelled);
+  }
+  const { chunks: chunkConcurrency } = await getEmbedConcurrency();
+  const results: number[][] = [];
+  for (let i = 0; i < texts.length; i += chunkConcurrency) {
+    if (isCancelled?.()) throw new EmbedCancelledError();
+    const batch = texts.slice(i, i + chunkConcurrency);
+    const batchEmbeddings = await Promise.all(
+      batch.map((t) => getEmbedding(t, task, isCancelled))
+    );
+    results.push(...batchEmbeddings);
+  }
+  return results;
+}
+
 export type EmbedConcurrency = { notes: number; chunks: number };
 
 // How many notes/chunks lib/reindex.ts and lib/indexing.ts embed at once.
@@ -186,7 +214,10 @@ export async function getEmbedConcurrency(): Promise<EmbedConcurrency> {
 // A hung provider (e.g. a stalled Ollama container) would otherwise block
 // note saves and searches forever — the caller sees a TimeoutError and
 // embedding_pending stays true for the next reindex.
+// Cloud providers (Google, OpenAI) stay on 30s. Self-hosted Ollama on low-core
+// CPUs can be slower during inference under load, so it gets 60s (estimated margin).
 const EMBED_TIMEOUT_MS = 30_000;
+const OLLAMA_TIMEOUT_MS = 60_000;
 
 // Google's RESOURCE_EXHAUSTED body carries the real wait in
 // error.details[].retryDelay (a "23s"-style string), not a Retry-After
@@ -308,7 +339,7 @@ async function ollamaEmbedOnce(url: string, model: string, input: string): Promi
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, input }),
-      signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
+      signal: AbortSignal.timeout(OLLAMA_TIMEOUT_MS),
     });
   } catch (err) {
     throw new OllamaRetryableError(err instanceof Error ? err.message : 'fetch failed');
@@ -384,6 +415,50 @@ async function googleEmbed(text: string, apiKey?: string, isCancelled?: () => bo
   googleGapMs = Math.max(GOOGLE_MIN_GAP_MS, googleGapMs * 0.9);
   const data = await res.json();
   return data.embedding.values as number[];
+}
+
+const GOOGLE_BATCH_MAX = 100;
+
+async function googleBatchEmbed(texts: string[], apiKey?: string, isCancelled?: () => boolean): Promise<number[][]> {
+  if (!apiKey) throw new Error('Google API key is not configured');
+  if (texts.length === 0) return [];
+  const model = process.env.GOOGLE_MODEL ?? 'text-embedding-004';
+
+  const allEmbeddings: number[][] = [];
+  for (let i = 0; i < texts.length; i += GOOGLE_BATCH_MAX) {
+    if (isCancelled?.()) throw new EmbedCancelledError();
+    const batchTexts = texts.slice(i, i + GOOGLE_BATCH_MAX);
+    const requests = batchTexts.map((text) => ({
+      model: `models/${model}`,
+      content: { parts: [{ text }] },
+      outputDimensionality: 768,
+    }));
+
+    const res = await fetchWithRetry(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:batchEmbedContents?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requests }),
+      },
+      {
+        onRateLimited: () => { googleGapMs = Math.min(googleGapMs * 1.5, GOOGLE_MAX_GAP_MS); },
+        isCancelled,
+        pace: () => googlePace(isCancelled),
+      }
+    );
+    if (!res.ok) throw new Error(`Google batch embed error (${res.status}): ${(await res.text()).slice(0, 200)}`);
+    googleGapMs = Math.max(GOOGLE_MIN_GAP_MS, googleGapMs * 0.9);
+    const data = await res.json();
+    if (!data.embeddings || !Array.isArray(data.embeddings)) {
+      throw new Error('Google batch embed error: missing embeddings array in response');
+    }
+    for (const item of data.embeddings) {
+      allEmbeddings.push(item.values as number[]);
+    }
+  }
+
+  return allEmbeddings;
 }
 
 async function openaiEmbed(text: string, apiKey?: string): Promise<number[]> {

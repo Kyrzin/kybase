@@ -220,11 +220,15 @@ something narrower than they sound:
   best hit — it's not a confidence score or a probability.
 - A hit found only by the semantic arm means "similar topic," not
   "confirms this fact." Read the excerpt before trusting it.
-- `unprofiled` (reported by `indexing_status`) means semantic search
-  still works on that embedding model, but nothing is guaranteed to be
-  rejected as "not close enough" — the automatic cutoff needs a model
-  Kybase has measured, or one you configure yourself (see [Switching
-  Embedding Providers](#switching-embedding-providers)).
+- `coverage` measures how much of the query is literally present in a
+  hit — a low or zero value doesn't mean the hit is wrong, since a
+  cross-language or paraphrased match can legitimately share no words
+  with the question.
+- Semantic search returns candidates by default, not verdicts — nothing
+  is filtered out for being "too dissimilar" unless you configure a
+  minimum similarity yourself (see [Switching Embedding
+  Providers](#switching-embedding-providers)); an empty result means
+  the index found nothing at all.
 
 When a hit's `section` is set, `get_note(section:)` reads just that part
 instead of the whole note.

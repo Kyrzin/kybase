@@ -564,23 +564,47 @@ async function computeTextCoverage(words: string[], ids: string[]): Promise<Map<
     const langExprs = languages.map((_, i) => `websearch_to_tsquery($${i + 2}::regconfig, unaccent(wt.word))`);
     const tsqExpr = [`websearch_to_tsquery('simple', unaccent(wt.word))`, ...langExprs].join(' || ');
     const idsParamIndex = languages.length + 2;
-    const rows = await dbQuery<{ id: string; matched: number; total: number }>(
+    // Words are weighted by how rare they are in THIS vault, not counted
+    // equally. Measured live 2026-08-20: "почему нельзя использовать cadvisor"
+    // returned notes matching only "почему"/"нельзя" at coverage 0.75, while
+    // the one note containing `cadvisor` — the only word in the query that
+    // says anything — sat below them. Counting terms equally hands a natural
+    // question to whichever of its filler words is most common in the vault.
+    //
+    // The weight is inverse document frequency, computed against this vault:
+    // ln(1 + N/(1+df)). A word in nearly every note contributes almost
+    // nothing; a word in three notes dominates. No stopword list is involved
+    // — which matters, because a stopword list is a language, and kybase does
+    // not get to assume one.
+    const rows = await dbQuery<{ id: string; matched_idf: number; total_idf: number }>(
       `with word_tsq as (
          select word, (${tsqExpr}) as tsq
          from unnest($1::text[]) as wt(word)
+       ),
+       corpus as (select count(*)::float as n from notes where deleted_at is null),
+       weighted as (
+         select wt.word, wt.tsq,
+                ln(1 + (select n from corpus) / (1 + (
+                  select count(*) from notes df
+                  where df.deleted_at is null and df.search_vector @@ wt.tsq
+                ))) as idf
+         from word_tsq wt
        )
        select n.id,
-         count(*) filter (where n.search_vector @@ wt.tsq)::int as matched,
-         (select count(*) from word_tsq)::int as total
+         coalesce(sum(w.idf) filter (where n.search_vector @@ w.tsq), 0) as matched_idf,
+         (select coalesce(sum(idf), 0) from weighted) as total_idf
        from notes n
-       cross join word_tsq wt
+       cross join weighted w
        where n.id = any($${idsParamIndex}::uuid[])
        group by n.id`,
       [significantWordList, ...languages, ids]
     );
 
     const coverage = new Map<string, number>();
-    for (const r of rows) coverage.set(r.id, r.total > 0 ? r.matched / r.total : 1);
+    for (const r of rows) {
+      const total = Number(r.total_idf);
+      coverage.set(r.id, total > 0 ? Number(r.matched_idf) / total : 1);
+    }
     return coverage;
   } catch (err) {
     console.warn('[search] coverage computation failed, no discount applied:', err instanceof Error ? err.message : err);
@@ -644,8 +668,16 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     orRows = orAll.filter((r) => !seen.has(r.id));
   }
 
+  // The exact/substring pass used to run ONLY when both FTS passes came back
+  // empty, which made it unreachable exactly when it matters most: measured
+  // live 2026-08-20, searching for the filename `cleanup-n8n-binary.sh`
+  // returned five notes matching the single token "n8n" and never reached the
+  // one note that literally contains the filename, because those five counted
+  // as "results found". An identifier query is not a fallback for failure — it
+  // is its own kind of match, and it now runs alongside rather than instead.
+  const exactHits = await substringSearch(query, limit, filters);
   if (rows.length === 0 && orRows.length === 0) {
-    return enrichResults(await substringSearch(query, limit, filters));
+    return enrichResults(exactHits);
   }
 
   // n.rank is Postgres's actual ts_rank for this query — a genuine
@@ -709,7 +741,11 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
       coverage,
     };
   };
-  const results = [...rows.map((n) => toResult(n, 'and')), ...orRows.map((n) => toResult(n, 'or'))]
+  // FTS rows win a duplicate: they carry a real ts_rank, while a substring hit
+  // only knows where in the document the literal appeared.
+  const ftsResults = [...rows.map((n) => toResult(n, 'and')), ...orRows.map((n) => toResult(n, 'or'))];
+  const ftsIds = new Set(ftsResults.map((r) => r.id));
+  const results = [...ftsResults, ...exactHits.filter((r) => !ftsIds.has(r.id))]
     // Relevance alone: the SQL returns 'and' rows before 'or' rows by raw
     // rank, but coverage can push an 'or' hit above an 'and' one, and the
     // caller reads top to bottom.

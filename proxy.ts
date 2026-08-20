@@ -78,5 +78,5 @@ export const config = {
   // hosted client can reach, which is the same as not having it — and the
   // endpoint is not therefore unguarded: it rate-limits itself and refuses any
   // callback the server wouldn't accept anyway (app/api/oauth/register).
-  matcher: ['/api/((?!auth/|mcp$|mcp/|oauth/token$|oauth/discovery$|oauth/register$|import$|notes/import-document$).*)'],
+  matcher: ['/api/((?!auth/|mcp$|mcp/|oauth/token$|oauth/discovery$|oauth/register$|oauth/protected-resource$|import$|notes/import-document$).*)'],
 };

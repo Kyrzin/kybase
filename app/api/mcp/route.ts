@@ -55,7 +55,22 @@ async function handle(req: NextRequest): Promise<Response> {
       );
     }
     recordAuthFailure(req, 'bearer');
-    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    // RFC 9728 §5.1: a 401 from a protected resource points at its own
+    // metadata, which is how a client discovers where to authenticate. Without
+    // this header the only thing an MCP client learns from a 401 is that it
+    // failed — measured live 2026-08-20: claude.ai's connector reported
+    // "Automatic client registration isn't supported", a complaint about a
+    // step it never reached, because it had no way to find the authorization
+    // server that offers the registration.
+    const host  = req.headers.get('x-forwarded-host') ?? new URL(req.url).host;
+    const proto = req.headers.get('x-forwarded-proto')?.split(',')[0] ?? 'https';
+    return NextResponse.json({ error: 'Unauthorized' }, {
+      status: 401,
+      headers: {
+        'WWW-Authenticate':
+          `Bearer resource_metadata="${proto}://${host}/.well-known/oauth-protected-resource"`,
+      },
+    });
   }
 
   // MCP SDK requires both application/json and text/event-stream in Accept.

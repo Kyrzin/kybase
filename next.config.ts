@@ -50,6 +50,25 @@ const nextConfig: NextConfig = {
         source: '/.well-known/oauth-authorization-server',
         destination: '/api/oauth/discovery',
       },
+      // RFC 8414 §3.1: when the issuer carries a path, the metadata lives
+      // under that path. Kybase's issuer is the bare origin, so the entry
+      // above is the correct one — but clients that build the path-aware URL
+      // from the MCP endpoint instead of from the issuer ask for this, and a
+      // 404 here reads to them as "no authorization server at all".
+      {
+        source: '/.well-known/oauth-authorization-server/:path*',
+        destination: '/api/oauth/discovery',
+      },
+      // RFC 9728: the document that tells a client which authorization server
+      // this resource trusts. An MCP client looks for it before anything else.
+      {
+        source: '/.well-known/oauth-protected-resource',
+        destination: '/api/oauth/protected-resource',
+      },
+      {
+        source: '/.well-known/oauth-protected-resource/:path*',
+        destination: '/api/oauth/protected-resource',
+      },
     ];
   },
 };

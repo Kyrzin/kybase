@@ -147,7 +147,7 @@ revocable OAuth token — see **Settings → Connected clients** in the web UI.
 
 | Tool | Category | What it does for the agent |
 |------|----------|------------------------------|
-| `search_notes` | Search | Hybrid RRF search (pgvector + bilingual FTS) with calibrated `relevance`/`confidence` per hit |
+| `search_notes` | Search | Hybrid RRF search (pgvector + bilingual FTS); per-model similarity cutoff decides when nothing is close enough |
 | `get_note` | Read | Fetch a note by id or fuzzy title; windowed for large notes, with a heading outline. `resolve_links:true` also resolves every `[[wikilink]]` inside it, one level deep, in the same round-trip |
 | `list_notes` | Read | Newest-first listing, filterable by folder/tag/updated date |
 | `list_tags` | Read | All tags in use with counts, so the agent reuses existing tags instead of coining duplicates |

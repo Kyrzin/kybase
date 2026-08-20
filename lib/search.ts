@@ -1,11 +1,9 @@
 // lib/search.ts — text (FTS + substring fallback), semantic (chunk-based), and hybrid (RRF) search
 import { query as dbQuery, toVector } from './db';
-import { getEmbedding, getMinSimilarity, getEmbeddingBand, type EmbeddingBand } from './embeddings';
+import { getEmbedding, getMinSimilarity } from './embeddings';
 import { getFtsLanguages, getTagWeights, type TagWeights, getFolderWeights, type FolderWeights } from './settings';
 import { escapeLike } from './sql';
 import { TABLE_ROW_RE, TABLE_SEPARATOR_RE, unpairedFenceIndex } from './markdown';
-
-export type Confidence = 'strong' | 'moderate' | 'weak';
 
 export type SearchResult = {
   id: string;
@@ -21,7 +19,6 @@ export type SearchResult = {
   // to actually act on. On hybrid results this is the MAX of the
   // contributing arms — arms corroborate a hit, they don't add up.
   relevance: number;
-  confidence: Confidence;
   // Present only on hybrid results, and only for the pass(es) that actually
   // matched this note — text_score is FTS ts_rank (or a positional fallback
   // score for substring matches), semantic_score is raw cosine similarity.
@@ -30,6 +27,14 @@ export type SearchResult = {
   // relevance/confidence for decisions and these raw fields for debugging.
   text_score?: number;
   semantic_score?: number;
+  // The semantic hit expressed in background units: how many IQRs above
+  // the median of what THIS query scores against a frozen sample of the
+  // vault's own chunks. Raw cosine is not
+  // comparable between queries -- measured live 2026-08-19, a correct
+  // answer scored 0.443 for one query and 0.686 for another on the same
+  // model and vault. Kept OUT of the default response for that reason: a
+  // raw cosine handed to a caller invites it to invent its own threshold,
+  // which is the mistake this project spent a day removing from its own code.
   // Which pass(es) actually matched this note — derivable from which of
   // text_score/semantic_score are present, but spelled out explicitly so an
   // agent doesn't have to infer it. A result present in only one pass lost
@@ -66,137 +71,21 @@ export type SearchResult = {
   content_length?: number;
 };
 
-// ── confidence ──────────────────────────────────────────────────────────
-//
-// confidence is the only field an agent is told to act on, and it answers an
-// ABSOLUTE question: "is this a real match?". relevance answers a RELATIVE
-// one: "how does this compare to the best hit in this same response".
-// Deriving the first from the second was a category error, and it showed:
-// a hit's verdict changed depending on who else happened to be in the
-// response (measured live 2026-08-17 — `Contabo VPS` read 1.00/strong alone
-// and 0.83/moderate next to a competitor; `host2` read 1.00/strong alone
-// and 0.84/weak next to one). Nothing was wrong with those matches. Only
-// their neighbours changed.
-//
-// So confidence is now computed from EVIDENCE each arm produces on its own,
-// and relevance is left to do the one job it is honest at — ordering.
-// The property that makes this correct, and the one to test for, is:
-//
-//     a hit's confidence must not change when other hits enter or leave
-//     the same response.
-//
-// Neither arm's evidence contains a number calibrated on any particular
-// vault:
-//
-//   text — structural, not numeric. Which cascade level matched is a fact
-//   about the query, not about the corpus: 'and' means the query as typed
-//   matched; 'or' means the strict pass found nothing and a looser one
-//   filled in; coverage is a fraction of the query's own words, in 0..1 by
-//   construction. None of it varies with language or vault size.
-//
-//   semantic — a raw cosine is meaningless across models (embeddinggemma
-//   separates noise ~0.08–0.18 from signal ~0.53–0.69; nomic-embed-text
-//   compresses the same distinction into ~0.02–0.05), so the question asked
-//   is not "is the cosine high" but "is it inside THIS model's signal band"
-//   — see getEmbeddingBand in lib/embeddings.ts. That band is a property of
-//   the model, measured once, overridable per install via the
-//   `embedding_bands` setting. An unmeasured model yields `partial` and
-//   never `full`: refusing to claim corroboration we cannot justify is
-//   visible (hits cap at `moderate`), inventing a plausible floor is not.
-export type TextEvidence = 'none' | 'partial' | 'loose' | 'strict';
-export type SemanticEvidence = 'none' | 'partial' | 'full';
-
-export function textEvidenceFor(
-  tier: SearchResult['text_tier'] | undefined,
-  coverage: number | undefined
-): TextEvidence {
-  if (!tier) return 'none';
-  if (tier === 'and') return 'strict';
-  // An OR hit that still contains EVERY significant word is not "recall
-  // filled in for a weak match" — it's websearch_to_tsquery's AND-tsquery
-  // not firing for some other reason (word order, cross-language stemming,
-  // the multi-config OR-combination search_notes_fts builds) while the
-  // content is genuinely all there. Kept distinct from 'strict' because it
-  // is not enough ON ITS OWN: reviewed live on an external 28-note corpus
-  // (2026-08-14), requiring strict-AND-only made `strong` unreachable for
-  // 11/11 real queries, while letting a lone loose hit stand as one real
-  // signal reopened the control-noise regression it was introduced to fix.
-  if (tier === 'or') return coverage === 1 ? 'loose' : 'partial';
-  return 'partial'; // substring: no rank at all, a fallback by construction
-}
-
-export function semanticEvidenceFor(cosine: number | undefined, band: EmbeddingBand): SemanticEvidence {
-  if (cosine === undefined || cosine <= band.gate) return 'none';
-  if (band.signalFloor === null) return 'partial';
-  return cosine >= band.signalFloor ? 'full' : 'partial';
-}
-
-/**
- * The whole ladder, in one table. Note what is NOT here: no threshold on
- * relevance, and so no way for a neighbour to change the answer.
- *
- *   strict|loose  + full     → strong    two arms, both convincing
- *   strict        + anything → moderate  the query as typed matched; one real signal
- *   anything      + full     → moderate  the model's own signal band; one real signal
- *   loose         + partial  → moderate  a full-coverage loose match, backed up
- *   everything else          → weak
- *
- * A lone `loose` stays weak on purpose (the 2026-08-14 control-noise
- * regression), and so does partial+partial: a substring hit next to a cosine
- * that clears noise but never reaches the model's signal band is exactly the
- * combination that reads plausible and is not.
- */
-export function confidenceFrom(text: TextEvidence, semantic: SemanticEvidence): Confidence {
-  const textConvincing = text === 'strict' || text === 'loose';
-  if (textConvincing && semantic === 'full') return 'strong';
-  if (text === 'strict' || semantic === 'full') return 'moderate';
-  if (text === 'loose' && semantic === 'partial') return 'moderate';
-  return 'weak';
-}
 
 // The substring fallback has no rank at all — an exact-substring hit on a
 // title is a decent match for identifier-ish queries, one buried in content
-// is weaker. Fixed levels, deliberately capped below "strong".
+// is weaker. Fixed levels, deliberately capped below a full-rank match.
 const SUBSTRING_RELEVANCE = { title: 0.65, content: 0.5 };
 
-// Degenerate-semantic-set guard (semanticSearch): how far above the
-// per-model junk-gate floor the top hit must land before it's treated as
-// real signal rather than "the least-noisy noise".
-//
-// A FRACTION of the floor's remaining headroom (1 - floor), not a flat
-// cosine number — found during pre-publication review: a flat margin is
-// itself an absolute cosine value, and models don't share a cosine scale
-// any more than they share a floor (that's the whole reason the floor
-// itself is per-model, lib/embeddings.ts). embeddinggemma's floor (0.30)
-// leaves 0.70 of headroom, so the old flat 0.05 was ~7% of it; nomic's
-// compressed range puts its floor at 0.65, leaving only 0.35 of headroom —
-// the same flat 0.05 there was ~14% of a MUCH smaller usable range, eating
-// disproportionately into the one model this margin exists to protect.
-// 0.07 reproduces the old, live-validated 0.05 almost exactly for
-// embeddinggemma (0.07 × 0.70 ≈ 0.049) while scaling down proportionally
-// for a compressed-range model (0.07 × 0.35 ≈ 0.025) instead of eating a
-// fixed slice regardless of how much range there is to eat from. Still
-// comfortably catches nomic's own measured degenerate gap (noise ~0.66 vs
-// floor 0.65, a 0.01 gap — well under 0.025).
-const MIN_SIGNAL_MARGIN_FRACTION = 0.07;
-
-function signalMargin(floor: number): number {
-  return MIN_SIGNAL_MARGIN_FRACTION * (1 - floor);
-}
-
-// What a caller actually needs to see to interpret an empty semantic/hybrid
-// result: getMinSimilarity() alone is necessary but not sufficient — a best
-// hit that clears the floor by less than signalMargin(floor) still gets
-// discarded by the degenerate-set guard below, so a raw best_score just
-// above the floor can still come back empty. Measured live 2026-08-14: floor
-// 0.30, best_score 0.305 → empty results, but the envelope reported
-// threshold: 0.3 — a caller had no way to tell "0.305 is still short" from
-// "the filter itself is broken", because the number shown wasn't the number
-// actually applied. mcp-server.ts's threshold field uses this instead of
-// getMinSimilarity() directly for exactly that reason.
+// The number a caller sees is the number actually applied. It used to be a
+// base floor plus a relative margin computed here, which meant the reported
+// threshold and the effective one lived in different files and drifted apart
+// twice: once when the margin was accidentally disabled, and once when the
+// two were merged into a per-model profile and the margin kept being added
+// on top of it (live: profile 0.349, effective 0.39, a hit at 0.35 silently
+// dropped). One number, one place.
 export async function effectiveSemanticThreshold(): Promise<number> {
-  const floor = await getMinSimilarity();
-  return floor + signalMargin(floor);
+  return getMinSimilarity();
 }
 
 const RRF_K = 60;
@@ -448,11 +337,10 @@ export type HybridSearchResult = Omit<SearchResult, 'score'> & { rrf_score: numb
  * `field` (text_score / semantic_score) so a caller can still tell "this
  * matched with cosine 0.72" from "this only showed up in the text pass".
  */
-export function rrfMerge(lists: NamedResultList[], band: EmbeddingBand): HybridSearchResult[] {
+export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
   const scoreMap = new Map<string, {
     result: SearchResult; rrfScore: number; relevance: number;
     extra: Partial<SearchResult>; textTier: SearchResult['text_tier'];
-    textCoverage: number | undefined;
   }>();
 
   // A single arm's own `results` can itself contain the same id twice —
@@ -475,20 +363,19 @@ export function rrfMerge(lists: NamedResultList[], band: EmbeddingBand): HybridS
         // single-arm penalty halves).
         existing.relevance = Math.max(existing.relevance, item.relevance);
         existing.extra[field] = item.score;
-        if (field === 'text_score') { existing.textTier = item.text_tier; existing.textCoverage = item.coverage; }
+        if (field === 'text_score') existing.textTier = item.text_tier;
       } else {
         scoreMap.set(item.id, {
           result: item, rrfScore, relevance: item.relevance,
           extra: { [field]: item.score },
           textTier: field === 'text_score' ? item.text_tier : undefined,
-          textCoverage: field === 'text_score' ? item.coverage : undefined,
         });
       }
     });
   }
 
   return [...scoreMap.values()]
-    .map(({ result, rrfScore, relevance, extra, textTier, textCoverage }) => {
+    .map(({ result, rrfScore, relevance, extra, textTier }) => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars -- drop `score`, forward everything else
       const { score: _score, ...rest } = result;
       const matched_by = Object.keys(extra) as ('text_score' | 'semantic_score')[];
@@ -509,46 +396,22 @@ export function rrfMerge(lists: NamedResultList[], band: EmbeddingBand): HybridS
       // (control-noise and an unrelated German-query resume both matched on
       // ONE word out of several — coverage well under 1 in both cases, so
       // neither would qualify here either).
-      const textEv = extra.text_score !== undefined ? textEvidenceFor(textTier, textCoverage) : 'none';
-      const semanticEv = semanticEvidenceFor(extra.semantic_score, band);
-      // Kept only to break ties inside a confidence tier below — how many
-      // arms produced convincing evidence, which is a different question
-      // from how many arms merely matched.
-      const corroboratingArms =
-        (textEv === 'strict' || textEv === 'loose' ? 1 : 0) + (semanticEv === 'full' ? 1 : 0);
       return {
         ...rest,
         ...extra,
         rrf_score: rrfScore,
         relevance,
-        confidence: confidenceFrom(textEv, semanticEv),
         matched_by,
         text_tier: textTier,
-        corroboratingArms,
       };
     })
-    // Sorting by rrf_score alone can rank a weak hit above a moderate one
-    // even with no tie at all — rrf_score only fuses rank position, it
-    // knows nothing about confidence (measured live, twice). The displayed
-    // order must never contradict the confidence label an agent is told to
-    // act on, so confidence tier is the primary key; within a tier, more
-    // corroborating arms first (not just how many fields are present —
-    // see corroboratingArms above), then relevance, then rrf_score as the
-    // final tiebreak for genuinely identical cases.
-    .sort((a, b) =>
-      CONFIDENCE_RANK[a.confidence] - CONFIDENCE_RANK[b.confidence] ||
-      b.corroboratingArms - a.corroboratingArms ||
-      b.relevance - a.relevance ||
-      b.rrf_score - a.rrf_score
-    )
-    // corroboratingArms was only needed to drive confidence/sort — not part
-    // of the public shape (matched_by + text_tier already expose the same
-    // information more precisely, per-arm rather than as one number).
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    .map(({ corroboratingArms: _corroboratingArms, ...rest }) => rest);
+    // Ordering is retrieval and fusion, nothing else. It used to be led by a
+    // confidence tier, which meant an unproven heuristic could move a
+    // well-retrieved document below a worse one; the tier is gone, and with it
+    // that right. relevance first (the normalized per-arm score, max across
+    // arms), rrf_score as the tiebreak for genuinely equal cases.
+    .sort((a, b) => b.relevance - a.relevance || b.rrf_score - a.rrf_score);
 }
-
-const CONFIDENCE_RANK: Record<Confidence, number> = { strong: 0, moderate: 1, weak: 2 };
 
 type FtsRow = { id: string; title: string; tags: string[]; folder_id: string | null; rank: number; headline: string };
 type NoteRow = { id: string; title: string; content: string; tags: string[] };
@@ -832,12 +695,9 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     const normalized = best > 0 ? weightedRank(n) / best : 0;
     const coverage = tier === 'and' ? 1 : (coverageMap?.get(n.id) ?? 1);
     const relevance = normalized * coverage;
-    // No semantic arm in this pass by construction — the verdict is whatever
-    // the text cascade alone can justify. An 'and' hit is one convincing
-    // signal (`moderate`); a lone 'or' or substring hit stays `weak` however
-    // high its own relevance reads, because that number is 'best of the
-    // loosened set', not 'best of a query that actually matched'.
-    const confidence = confidenceFrom(textEvidenceFor(tier, coverage), 'none');
+    // `tier` and `coverage` travel as observed facts — which cascade level
+    // matched and how much of the query it contained. They used to be folded
+    // into a verdict; the verdict is gone, the facts stay.
     return {
       id:      n.id,
       title:   n.title,
@@ -845,19 +705,15 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
       tags:    n.tags,
       score:   n.rank,
       relevance,
-      confidence,
       text_tier: tier,
       coverage,
     };
   };
   const results = [...rows.map((n) => toResult(n, 'and')), ...orRows.map((n) => toResult(n, 'or'))]
-    // confidence first, relevance only as the tiebreak within a tier — the
-    // SQL order (by raw rank, then 'and' rows before 'or' rows) no longer
-    // guarantees this once coverage can push an 'or' hit's relevance above
-    // an 'and' hit's, and a caller reading top-to-bottom must never see
-    // `weak` above `moderate` (the search-relevance overhaul step 2a's invariant, restated for
-    // this arm's own output, not just rrfMerge's).
-    .sort((a, b) => CONFIDENCE_RANK[a.confidence] - CONFIDENCE_RANK[b.confidence] || b.relevance - a.relevance);
+    // Relevance alone: the SQL returns 'and' rows before 'or' rows by raw
+    // rank, but coverage can push an 'or' hit above an 'and' one, and the
+    // caller reads top to bottom.
+    .sort((a, b) => b.relevance - a.relevance);
   const filtered = await applyFilters(results, limit, filters);
   await repairBrokenTableExcerpts(filtered);
   return enrichResults(filtered);
@@ -891,11 +747,6 @@ async function substringSearch(query: string, limit: number, filters?: SearchFil
       tags:    n.tags,
       score:   1 / (i + 1),
       relevance,
-      // The loosest tier — zero corroborating arms, same reasoning as an
-      // 'or' hit in textSearch: nothing solid behind it on its own.
-      // Substring is the fallback tier by construction: partial evidence,
-      // with no second arm in this pass to corroborate it.
-      confidence: confidenceFrom('partial', 'none'),
       text_tier: 'substring' as const,
     };
   });
@@ -928,35 +779,27 @@ async function substringSearch(query: string, limit: number, filters?: SearchFil
  * semantic pass would have dropped.
  */
 export async function semanticSearch(query: string, limit = 10, filters?: SearchFilters): Promise<SearchResult[]> {
-  const [embedding, floor, band] = await Promise.all([
+  const [embedding, floor] = await Promise.all([
     getEmbedding(query, 'query'),
     getMinSimilarity(),
-    getEmbeddingBand(),
   ]);
-
   const fetchLimit = overfetchLimit(limit, filters);
-  const data: Record<string, unknown>[] = await dbQuery(
-    'select * from match_chunks($1::vector, $2, $3)',
-    [toVector(embedding), fetchLimit, floor]
+  const vec = toVector(embedding);
+  // The gate is applied here rather than inside match_chunks. Identical
+  // result either way -- match_chunks orders by similarity, so top-N then
+  // filter equals filter then top-N -- and keeping it in one place with the
+  // margin below makes the whole abstention rule readable at once.
+  const rawData: Record<string, unknown>[] = await dbQuery(
+    'select * from match_chunks($1::vector, $2, 0)',
+    [vec, fetchLimit]
   );
+  const data = rawData.filter((n) => (n.similarity as number) >= floor);
 
   // match_chunks orders by similarity desc, so the first row is this
   // query's best hit — the reference point relevance is measured against.
   const best = (data[0]?.similarity as number | undefined) ?? 0;
 
   // Degenerate set: the top hit barely cleared the floor at all. On a
-  // model whose noise and signal cosines sit close together (measured live
-  // on nomic-embed-text: noise ~0.66, signal ~0.68 — a ~0.02 gap), the
-  // floor alone can't keep noise out, and the 0.75x-of-best cutoff below
-  // makes it worse, not better: it would call this "best" result 1.0
-  // relevance and hand it out as if it meant something. If nothing cleared
-  // the floor by a real margin, there's no genuine signal to rank — same
-  // "nothing relevant reads as empty" preference the floor itself already
-  // encodes (lib/embeddings.ts), just applied to the case a flat floor
-  // can't catch on its own.
-  if (best > 0 && best - floor < signalMargin(floor)) {
-    return [];
-  }
 
   const candidates = best > 0 ? data.filter((n) => (n.similarity as number) >= 0.75 * best) : data;
 
@@ -992,7 +835,6 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
       tags:    n.tags as string[],
       score:   n.similarity as number,
       relevance,
-      confidence: confidenceFrom('none', semanticEvidenceFor(n.similarity as number, band)),
     };
   });
   return enrichResults(await applyFilters(results, limit, filters));
@@ -1015,13 +857,12 @@ export async function bestSemanticScore(query: string): Promise<number | null> {
 
 export async function hybridSearch(query: string, limit = 10, filters?: SearchFilters): Promise<HybridSearchResult[]> {
   const candidateLimit = Math.min(RRF_CANDIDATE_CAP, limit * RRF_CANDIDATE_FACTOR);
-  const [text, semantic, band] = await Promise.all([
+  const [text, semantic] = await Promise.all([
     textSearch(query, candidateLimit, filters),
     semanticSearch(query, candidateLimit, filters),
-    getEmbeddingBand(),
   ]);
   return rrfMerge([
     { field: 'text_score', results: text },
     { field: 'semantic_score', results: semantic },
-  ], band).slice(0, limit);
+  ]).slice(0, limit);
 }

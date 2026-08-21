@@ -3,7 +3,7 @@ import { query as dbQuery, toVector } from './db';
 import { getEmbedding, getMinSimilarity } from './embeddings';
 import { getFtsLanguages, getTagWeights, type TagWeights, getFolderWeights, type FolderWeights } from './settings';
 import { escapeLike } from './sql';
-import { TABLE_ROW_RE, TABLE_SEPARATOR_RE, unpairedFenceIndex } from './markdown';
+import { TABLE_ROW_RE, TABLE_SEPARATOR_RE, unpairedFenceIndex, extractHeadings } from './markdown';
 
 export type SearchResult = {
   id: string;
@@ -368,6 +368,7 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
   const scoreMap = new Map<string, {
     result: SearchResult; rrfScore: number; relevance: number;
     extra: Partial<SearchResult>; textTier: SearchResult['text_tier'];
+    exact: boolean | undefined; textCoverage: number | undefined;
   }>();
 
   // A single arm's own `results` can itself contain the same id twice —
@@ -390,7 +391,35 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
         // single-arm penalty halves).
         existing.relevance = Math.max(existing.relevance, item.relevance);
         existing.extra[field] = item.score;
-        if (field === 'text_score') existing.textTier = item.text_tier;
+        if (field === 'text_score') {
+          existing.textTier = item.text_tier;
+          // exact/coverage are facts about how this note's own text matched
+          // the query — independent of which arm's excerpt/section ends up
+          // shown below. Tracked here, outside `result`, for the same reason
+          // textTier already is: `result` can still be swapped to the
+          // semantic arm's object (next block), which carries neither field
+          // at all (semanticSearch never sets `exact`) — without this, a
+          // verbatim identifier match would silently lose the one fact that
+          // proves it, right as it also picks up the semantic arm's
+          // normalized relevance and often a #1 rank. Measured live
+          // 2026-08-21: "KYBASE_SECRET" against a real vault — a note read
+          // `exact: true` from `type: text` and had no `exact` field at all
+          // from `type: hybrid`, despite outranking everything.
+          existing.exact = item.exact;
+          // Prefer the text arm's own coverage over whichever arm's object
+          // happens to win the swap below. For an 'and'/exact-tier hit it's
+          // fixed at 1 by construction (see toResult in textSearch — AND
+          // semantics already means every term matched); for an 'or' hit
+          // it's computeTextCoverage's own IDF-weighted number — the exact
+          // same function semanticSearch calls for the same note and query,
+          // so the two arms' values are expected to agree (spot-checked live
+          // 2026-08-21, "PostgreSQL backup and restore": text 0.70 vs
+          // semantic 0.70 on the same note — no divergence found). Taking
+          // the text arm's number is the documented, tier-consistent one;
+          // a semantic-only hit falls through to the winning result's own
+          // coverage below, since textCoverage stays undefined for it.
+          existing.textCoverage = item.coverage;
+        }
         // Two arms can hit the same note via genuinely different passages —
         // a text match in one section, a semantic match (match_chunks) in
         // another. Whichever arm ran first used to permanently own the
@@ -405,13 +434,15 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
           result: item, rrfScore, relevance: item.relevance,
           extra: { [field]: item.score },
           textTier: field === 'text_score' ? item.text_tier : undefined,
+          exact: field === 'text_score' ? item.exact : undefined,
+          textCoverage: field === 'text_score' ? item.coverage : undefined,
         });
       }
     });
   }
 
   return [...scoreMap.values()]
-    .map(({ result, rrfScore, relevance, extra, textTier }) => {
+    .map(({ result, rrfScore, relevance, extra, textTier, exact, textCoverage }) => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars -- drop `score`, forward everything else
       const { score: _score, ...rest } = result;
       const matched_by = Object.keys(extra) as ('text_score' | 'semantic_score')[];
@@ -439,6 +470,8 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
         relevance,
         matched_by,
         text_tier: textTier,
+        ...(exact !== undefined ? { exact } : {}),
+        ...(textCoverage !== undefined ? { coverage: textCoverage } : {}),
       };
     })
     // Ordering is retrieval and fusion, nothing else. It used to be led by a
@@ -523,26 +556,30 @@ async function repairBrokenTableExcerpts(results: SearchResult[]): Promise<void>
 const MIN_SECTION_MATCH_LEN = 8;
 
 /**
- * Attaches `section` to any result missing one, by joining against
- * note_chunks (lib/indexing.ts) rather than re-deriving a heading from raw
- * markdown: the chunker already split each note at its own headings and
- * stored each chunk's heading (migration 002) — reusing that can't disagree
- * with what the chunker (and semanticSearch's own `section`, sourced the
- * same way via match_chunks) already decided a heading is. Roadmap item 56's
- * option (a). Runs on textSearch's full result list — FTS and substring/exact
- * tiers alike, one code path, since neither has a chunk index of its own to
- * work from and both need the same excerpt-to-chunk lookup.
+ * Attaches `section` to any result missing one, by finding the excerpt's own
+ * position in the note's real content and reading the nearest `#` heading
+ * above it (extractHeadings) — not by joining note_chunks (lib/indexing.ts)
+ * as this used to. The chunk join named the wrong heading whenever the real
+ * one wasn't the FIRST section a chunk absorbed: chunking.ts merges adjacent
+ * small sections up to 2000 chars and keeps only the first section's heading
+ * for the whole merged chunk, so an excerpt from the second (or third)
+ * section inside that chunk got attributed to the first section's title
+ * instead of its own — measured live 2026-08-21 on the real vault:
+ * sectionCorrect for textSearch hits was 74.7%, i.e. roughly one in four
+ * reported headings didn't actually contain the excerpt shown under it.
+ * Reading straight from the note's own content and its own heading offsets
+ * can't make that mistake — there's no merged-chunk boundary to lose the
+ * heading behind. Roadmap item 56's option (a), revised.
  *
- * One batched query across every candidate via a paired unnest, zipping
- * (note_id, pattern) — same "single round trip over the whole limit-bounded
- * list" family as enrichResults and repairBrokenTableExcerpts. Verified
- * against a live 2-chunk note before wiring in (paired unnest + join isn't a
- * pattern used elsewhere in this file).
+ * One batched query across every candidate (same "single round trip over the
+ * whole limit-bounded list" family as enrichResults and
+ * repairBrokenTableExcerpts), then position lookup + heading walk in JS per
+ * candidate — content is already in hand, no further DB round trips needed.
  *
  * Silent no-op per candidate that doesn't resolve — pattern too short to
- * trust (MIN_SECTION_MATCH_LEN), or genuinely absent from any of its note's
- * chunks (chunk boundaries don't always land on the same words an excerpt
- * was cropped to). No section is no worse than before this ran.
+ * trust (MIN_SECTION_MATCH_LEN), the note was edited concurrently and the
+ * excerpt no longer appears verbatim, or it genuinely precedes every heading
+ * (the note's untitled lead-in). No section is no worse than before this ran.
  */
 async function attachSections(results: SearchResult[]): Promise<void> {
   const candidates = results
@@ -554,16 +591,26 @@ async function attachSections(results: SearchResult[]): Promise<void> {
     .filter((c) => c.pattern.length >= MIN_SECTION_MATCH_LEN);
   if (candidates.length === 0) return;
 
-  const rows = await dbQuery<{ note_id: string; heading: string | null }>(
-    `select distinct on (p.note_id) p.note_id, nc.heading
-     from unnest($1::uuid[], $2::text[]) as p(note_id, pattern)
-     join note_chunks nc on nc.note_id = p.note_id and nc.content ilike p.pattern
-     order by p.note_id, nc.chunk_index`,
-    [candidates.map((c) => c.r.id), candidates.map((c) => `%${escapeLike(c.pattern)}%`)]
+  const rows = await dbQuery<{ id: string; content: string }>(
+    'select id, content from notes where id = any($1)',
+    [candidates.map((c) => c.r.id)]
   );
-  const headingById = new Map(rows.map((r) => [r.note_id, r.heading]));
-  for (const { r } of candidates) {
-    const heading = headingById.get(r.id);
+  const contentById = new Map(rows.map((r) => [r.id, r.content]));
+
+  for (const { r, pattern } of candidates) {
+    const content = contentById.get(r.id);
+    if (!content) continue;
+    const idx = content.indexOf(pattern);
+    if (idx === -1) continue;
+    // Headings come back in document order; each one owns everything after
+    // it until the next heading regardless of level, so the last heading at
+    // or before the match's offset is always the one it sits under.
+    const headings = extractHeadings(content);
+    let heading: string | null = null;
+    for (const h of headings) {
+      if (h.offset > idx) break;
+      heading = h.text;
+    }
     if (heading) r.section = heading;
   }
 }

@@ -118,11 +118,35 @@ export async function getMinSimilarity(): Promise<number | null> {
   return (await getSemanticProfile()).minSimilarity;
 }
 
-/** Stable key for the active provider+model, used by the bands setting and drift detection. */
+/**
+ * How many times the TEXT SENT TO A PROVIDER has changed shape, per provider.
+ * Part of the model key below, so a change here reads as a new index
+ * generation: the startup drift check reindexes, and migration 028's
+ * generation filter stops the old vectors from answering in the meantime.
+ *
+ * Bump a provider's number whenever its request body changes in a way that
+ * moves the vectors — a new prompt prefix, a task type, a dimensionality.
+ * Not a general version counter: bumping a provider that did not change
+ * would cost every vault on it a full, pointless reindex.
+ *
+ * google 2 — taskType RETRIEVAL_QUERY/RETRIEVAL_DOCUMENT is now sent
+ *   (googleTaskType). Before that both sides went to the provider default.
+ */
+const INPUT_VERSION: Record<EmbeddingConfig['provider'], number> = {
+  ollama: 1,
+  google: 2,
+  openai: 1,
+};
+
+/** Stable key for the active provider+model+input shape, used by the bands setting, drift detection and the index generation stamp. */
 export function embeddingModelKey(cfg: EmbeddingConfig): string {
-  if (cfg.provider === 'ollama') return `ollama:${cfg.ollamaModel ?? 'embeddinggemma'}`;
-  if (cfg.provider === 'google') return `google:${process.env.GOOGLE_MODEL ?? 'text-embedding-004'}`;
-  return `openai:${process.env.OPENAI_MODEL ?? 'text-embedding-3-small'}`;
+  // Version 1 is written without a suffix so existing keys keep their exact
+  // stored form — an ollama vault must not reindex over a formatting change.
+  const v = INPUT_VERSION[cfg.provider] ?? 1;
+  const suffix = v > 1 ? `@v${v}` : '';
+  if (cfg.provider === 'ollama') return `ollama:${cfg.ollamaModel ?? 'embeddinggemma'}${suffix}`;
+  if (cfg.provider === 'google') return `google:${process.env.GOOGLE_MODEL ?? 'text-embedding-004'}${suffix}`;
+  return `openai:${process.env.OPENAI_MODEL ?? 'text-embedding-3-small'}${suffix}`;
 }
 
 // A reindex batch (lib/reindex.ts) can be stopped mid-run by the user. The
@@ -162,7 +186,7 @@ export async function getEmbedding(text: string, task: EmbedTask = 'document', i
   const cfg = await getEmbeddingConfig();
   switch (cfg.provider) {
     case 'ollama': return ollamaEmbed(text, cfg.ollamaModel, task);
-    case 'google': return googleEmbed(text, cfg.googleApiKey, isCancelled);
+    case 'google': return googleEmbed(text, cfg.googleApiKey, task, isCancelled);
     case 'openai': return openaiEmbed(text, cfg.openaiApiKey);
     default:       throw new Error(`Unknown embedding provider: ${cfg.provider}`);
   }
@@ -181,7 +205,7 @@ export async function getEmbeddings(
   if (texts.length === 0) return [];
   const cfg = await getEmbeddingConfig();
   if (cfg.provider === 'google') {
-    return googleBatchEmbed(texts, cfg.googleApiKey, isCancelled);
+    return googleBatchEmbed(texts, cfg.googleApiKey, task, isCancelled);
   }
   const { chunks: chunkConcurrency } = await getEmbedConcurrency();
   const results: number[][] = [];
@@ -395,7 +419,23 @@ function googlePace(isCancelled?: () => boolean): Promise<void> {
   return p;
 }
 
-async function googleEmbed(text: string, apiKey?: string, isCancelled?: () => boolean): Promise<number[]> {
+// Google's embedding models are asymmetric: a question and the passage that
+// answers it are meant to be embedded with different task types, and the API
+// takes that as an explicit parameter rather than inferring it. Kybase was
+// sending neither, so both sides landed in the provider's default space and
+// the query/document asymmetry the model was trained for was simply not used.
+//
+// Changing this changes the vectors, so it is an index generation change:
+// documents embedded before it are not comparable to queries embedded after.
+// That is what embeddingModelKey's `google:` stamp and migration 028's
+// generation filter are for — the stamp carries the task-type version, so a
+// vault upgrading past this point reindexes instead of mixing.
+// https://ai.google.dev/api/embeddings#TaskType
+function googleTaskType(task: EmbedTask): string {
+  return task === 'query' ? 'RETRIEVAL_QUERY' : 'RETRIEVAL_DOCUMENT';
+}
+
+async function googleEmbed(text: string, apiKey?: string, task: EmbedTask = 'document', isCancelled?: () => boolean): Promise<number[]> {
   if (!apiKey) throw new Error('Google API key is not configured');
   const model = process.env.GOOGLE_MODEL ?? 'text-embedding-004';
   const res = await fetchWithRetry(
@@ -403,7 +443,12 @@ async function googleEmbed(text: string, apiKey?: string, isCancelled?: () => bo
     {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: `models/${model}`, content: { parts: [{ text }] }, outputDimensionality: 768 }),
+      body: JSON.stringify({
+        model: `models/${model}`,
+        content: { parts: [{ text }] },
+        taskType: googleTaskType(task),
+        outputDimensionality: 768,
+      }),
     },
     {
       onRateLimited: () => { googleGapMs = Math.min(googleGapMs * 1.5, GOOGLE_MAX_GAP_MS); },
@@ -419,7 +464,7 @@ async function googleEmbed(text: string, apiKey?: string, isCancelled?: () => bo
 
 const GOOGLE_BATCH_MAX = 100;
 
-async function googleBatchEmbed(texts: string[], apiKey?: string, isCancelled?: () => boolean): Promise<number[][]> {
+async function googleBatchEmbed(texts: string[], apiKey?: string, task: EmbedTask = 'document', isCancelled?: () => boolean): Promise<number[][]> {
   if (!apiKey) throw new Error('Google API key is not configured');
   if (texts.length === 0) return [];
   const model = process.env.GOOGLE_MODEL ?? 'text-embedding-004';
@@ -431,6 +476,7 @@ async function googleBatchEmbed(texts: string[], apiKey?: string, isCancelled?: 
     const requests = batchTexts.map((text) => ({
       model: `models/${model}`,
       content: { parts: [{ text }] },
+      taskType: googleTaskType(task),
       outputDimensionality: 768,
     }));
 
@@ -463,10 +509,15 @@ async function googleBatchEmbed(texts: string[], apiKey?: string, isCancelled?: 
 
 async function openaiEmbed(text: string, apiKey?: string): Promise<number[]> {
   if (!apiKey) throw new Error('OpenAI API key is not configured');
+  // OPENAI_MODEL, not a literal: modelNameOf/embeddingModelKey already read
+  // it, so a vault with OPENAI_MODEL set was reporting (and keying its
+  // reindex-on-drift check and its threshold profile on) one model while
+  // every request went to another. The two names have to be the same name.
+  const model = process.env.OPENAI_MODEL ?? 'text-embedding-3-small';
   const res = await fetchWithRetry('https://api.openai.com/v1/embeddings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: 'text-embedding-3-small', input: text, dimensions: 768 }),
+    body: JSON.stringify({ model, input: text, dimensions: 768 }),
   });
   if (!res.ok) throw new Error(`OpenAI embed error (${res.status}): ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();

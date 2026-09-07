@@ -85,6 +85,18 @@ export type SearchResult = {
   // Same lookup as created_at — lets a caller tell a long note from a short
   // one before spending a get_note call on it (list_notes already does this).
   content_length?: number;
+  // textSearch only. This note contains the QUESTION, not an answer to it —
+  // several of its interrogative lines share the query's words and none of
+  // them is followed by an answer (see questionEcho). A fact about the note's
+  // structure, reported whether or not the ranking acts on it.
+  question_echo?: boolean;
+  // This note's semantic index is still being rebuilt: the excerpt above came
+  // from the previous version of the text, or the note has never been
+  // embedded. Read the note with get_note before quoting it as current —
+  // the note row itself always holds the newest text, only the vectors lag.
+  // Absent (rather than false) when the index is up to date, so a caller can
+  // ignore the field entirely on a healthy vault.
+  index_pending?: boolean;
 };
 
 
@@ -140,9 +152,59 @@ const RRF_K = 60;
 //   the holdout collections hold 12-16 notes each, so neither width is a
 //   test of what a large vault needs — this number is a floor chosen not to
 //   starve small `limit` values, not a tuned optimum.
+// KYBASE_SEARCH_TEXT_WEIGHT=coverage — MEASURED AND REJECTED, off by default.
+//   Scale the TEXT arm's rank contribution by how much of the query that hit
+//   actually contains. The idea is sound on its face — a note matching one
+//   filler word out of five casts the same vote as one matching all of them —
+//   and it wins on the oldest holdout (+3.4 points of Recall@1 there). It
+//   lost everywhere it had not been looked at first: on a fresh holdout it
+//   cost 4.9 points of Recall@1, 7.4 of ordering and 4.9 of excerpt quality.
+//
+//   The reason is structural, not tuning. Coverage is 1 BY CONSTRUCTION for
+//   the strict AND tier, so weighting by it does not demote weak hits — it
+//   promotes every AND hit over every OR hit. And the notes that match a
+//   user's question at the AND tier with coverage 1 are precisely the FAQ and
+//   agenda notes that list questions without answering them. The weight
+//   promotes exactly what this ranking stage exists to demote.
+//
+//   Kept as a switch rather than deleted so the measurement stays repeatable.
+//
+// KYBASE_SEARCH_QUESTION_ECHO=demote — NOT SHIPPED, off by default.
+//   Drops the text contribution of a note that contains the QUESTION rather
+//   than an answer to it. Independent of the weight above and not fixable by
+//   it: such a note matches at the strict AND tier with coverage 1, so it is
+//   already at full weight, and coverage-weighting only raises it further.
+//
+//   It won on synthetic holdouts — positive on two, neutral on the third,
+//   negative on none, with every question-and-answer note keeping its
+//   position — and then lost on a real vault, which is the case that decides.
+//   There, a note listing questions for an immigration office was the ONLY
+//   note in the collection on that subject. Demoting it moved an unrelated
+//   note matching a fifth of the query to first place and pushed the one
+//   on-topic note off the visible page.
+//
+//   The defect is in the remedy, not the signal: a weight of zero removes the
+//   note from fusion outright, when what is wanted is for it to rank below
+//   notes that ANSWER — and above notes that are merely elsewhere. A
+//   formulation that only demotes while a non-echo candidate is actually
+//   present would express that; it has not been built or measured, so nothing
+//   is enabled on a guess.
+//
+//   The signal itself is computed and reported regardless (`question_echo`
+//   on a hit) — a caller told "this note lists your question without
+//   answering it" can act on that without the ranking pre-empting the choice.
 const LEGACY_FUSION = process.env.KYBASE_SEARCH_FUSION === 'legacy';
 const SEMANTIC_TRIM = process.env.KYBASE_SEARCH_SEMANTIC_TRIM !== 'off';
 const SEMANTIC_TRIM_RATIO = 0.75;
+// KYBASE_SEARCH_EXCERPT=legacy — go back to opening the excerpt at the start
+//   of the passage when the query does not occur verbatim, instead of
+//   centring it on the passage's most query-relevant line, and go back to
+//   trusting a chunk's stored heading over the excerpt's real position.
+//   Presentation only: neither setting changes which documents are returned
+//   or in what order.
+const LEGACY_EXCERPT = process.env.KYBASE_SEARCH_EXCERPT === 'legacy';
+const TEXT_COVERAGE_WEIGHT = process.env.KYBASE_SEARCH_TEXT_WEIGHT === 'coverage';
+const DEMOTE_QUESTION_ECHO = process.env.KYBASE_SEARCH_QUESTION_ECHO === 'demote';
 
 // hybridSearch feeds each arm's results into RRF fusion. If each arm is
 // capped at the final output size, a note ranked just outside `limit` in
@@ -265,16 +327,24 @@ async function applyFilters(
  */
 async function enrichResults(results: SearchResult[]): Promise<SearchResult[]> {
   if (results.length === 0) return results;
-  const rows = await dbQuery<{ id: string; created_at: string; content_length: number }>(
-    'select id, created_at, length(content) as content_length from notes where id = any($1) and deleted_at is null',
+  const rows = await dbQuery<{ id: string; created_at: string; content_length: number; embedding_pending: boolean }>(
+    'select id, created_at, length(content) as content_length, embedding_pending from notes where id = any($1) and deleted_at is null',
     [results.map((r) => r.id)]
   );
   const byId = new Map(rows.map((r) => [r.id, r]));
-  return results.map((r) => ({
-    ...r,
-    created_at: byId.get(r.id)?.created_at,
-    content_length: byId.get(r.id)?.content_length,
-  }));
+  return results.map((r) => {
+    const row = byId.get(r.id);
+    return {
+      ...r,
+      created_at: row?.created_at,
+      content_length: row?.content_length,
+      // Per hit, not just per vault: a search response already reported how
+      // many notes were pending overall, which told an agent that something
+      // was stale but never whether THIS excerpt was. Free here — the same
+      // lookup was already fetching two other columns from the same row.
+      ...(row?.embedding_pending ? { index_pending: true } : {}),
+    };
+  });
 }
 
 function overfetchLimit(limit: number, filters: SearchFilters | undefined): number {
@@ -364,6 +434,76 @@ export function tableHeaderAbove(content: string, offset: number): { text: strin
  * table hit doesn't grow the excerpt budget — same maxLen, reallocated
  * toward the row that makes the rest of it readable.
  */
+/**
+ * Where in `content` the query's own words are densest — the line to centre an
+ * excerpt on when the query does not occur verbatim anywhere.
+ *
+ * Line-granular and purely lexical, on purpose. It is choosing which part of
+ * an ALREADY-CHOSEN passage to display, not what to retrieve, so it cannot
+ * move a document, change a rank, or cost a model call. Nothing here is a
+ * claim that the line answers the question; it is the part of the passage
+ * that has most to do with what was asked.
+ *
+ * Matching is plain case-insensitive substring on words of three characters
+ * or more. Deliberately no stemmer: the point is to survive inflection
+ * cheaply, and a Russian query word usually appears in the text in a form
+ * that contains it or is contained by it ("уборки" in "до уборки"). A
+ * stemmer here would have to agree with Postgres's, and two tokenizers that
+ * must agree is a bug this file has paid for before — this one is allowed to
+ * be approximate because the worst case is the excerpt we already showed.
+ *
+ * Ties go to the earlier line: with nothing to separate two passages, the one
+ * the author wrote first is the less surprising choice.
+ */
+export function bestPassageOffset(content: string, query: string): { start: number; end: number } | null {
+  const words = [...new Set(
+    query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= MIN_SIGNIFICANT_WORD_LEN)
+  )];
+  if (words.length === 0) return null;
+
+  const lines = content.split('\n');
+  const lower = lines.map((l) => l.toLowerCase());
+
+  // Distinct words, weighted by length: a long word matching is better
+  // evidence than a short one, and that is as much as this needs to know.
+  //
+  // Discounting words by how many lines of the passage contain them — the
+  // same idea as inverse document frequency, scoped locally — was built and
+  // measured, and lost: it fixed one case and broke another, ending level on
+  // sections and one worse on answers. Not kept. Whatever separates a
+  // repeated word like "archive" from a discriminating one, line counts
+  // inside a single note are too coarse to be it.
+  const scoreOf = (hay: string) => {
+    let score = 0;
+    for (const w of words) if (hay.includes(w)) score += w.length;
+    return score;
+  };
+
+  let best: { start: number; end: number; score: number } | null = null;
+  let bestHeading: { start: number; end: number; score: number } | null = null;
+  let offset = 0;
+  for (const [i, line] of lines.entries()) {
+    const score = scoreOf(lower[i]);
+    if (score > 0) {
+      const here = { start: offset, end: offset + line.length, score };
+      // A heading is a hint about which section, not the answer itself, so
+      // body text always wins over it. It is still kept as a fallback: when a
+      // question's only echo in the passage is the heading it lives under
+      // ("Следующий шаг" for "какой следующий шаг"), that heading is the one
+      // honest anchor available, and ignoring it drops the window back to the
+      // start of the passage — the failure this whole function replaces.
+      if (/^\s*#{1,6}\s/.test(line)) {
+        if (!bestHeading || score > bestHeading.score) bestHeading = here;
+      } else if (!best || score > best.score) {
+        best = here;
+      }
+    }
+    offset += line.length + 1;
+  }
+  const chosen = best ?? bestHeading;
+  return chosen ? { start: chosen.start, end: chosen.end } : null;
+}
+
 export function makeExcerpt(content: string, query?: string, maxLen = EXCERPT_LENGTH): string {
   if (content.length <= maxLen) return content;
 
@@ -374,6 +514,20 @@ export function makeExcerpt(content: string, query?: string, maxLen = EXCERPT_LE
     if (idx > 0) {
       start = Math.max(0, idx - Math.floor((maxLen - query.length) / 2));
       matchEnd = idx + query.length;
+    } else if (idx === -1 && !LEGACY_EXCERPT) {
+      // The whole query string is not in the text — the normal case for a
+      // question asked in the user's own words. This used to fall straight
+      // through to `start = 0` and show the opening of the passage, which for
+      // a multi-section note is its introduction: ask when the spraying
+      // happens, get "this regulation describes the protection system".
+      // Measured on holdout collections: three of forty-one queries ranked
+      // the right note first and then showed a part of it that answers
+      // nothing.
+      const anchor = bestPassageOffset(content, query);
+      if (anchor) {
+        start = Math.max(0, anchor.start - Math.floor((maxLen - (anchor.end - anchor.start)) / 2));
+        matchEnd = anchor.end;
+      }
     }
   }
   let end = Math.min(content.length, start + maxLen);
@@ -438,6 +592,7 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
     result: SearchResult; rrfScore: number; relevance: number;
     extra: Partial<SearchResult>; textTier: SearchResult['text_tier'];
     exact: boolean | undefined; textCoverage: number | undefined;
+    questionEcho: boolean | undefined;
   }>();
 
   // A single arm's own `results` can itself contain the same id twice —
@@ -450,7 +605,17 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
   // real corroboration) and can raise `relevance` via the max below.
   for (const { field, results } of lists) {
     results.forEach((item, rank) => {
-      const rrfScore = 1 / (RRF_K + rank + 1);
+      // Rank still sets the value; the weight only says how much of a vote
+      // this arm has earned for this hit. 1 for the semantic arm, 1 for an
+      // exact/AND-tier text hit, and the measured coverage for a loose one.
+      // An echo hit forfeits its text vote entirely: it does not stop being
+      // returned, it stops winning fusion on the strength of quoting the
+      // question back.
+      const weight = field !== 'text_score' ? 1
+        : (DEMOTE_QUESTION_ECHO && item.question_echo) ? 0
+        : TEXT_COVERAGE_WEIGHT ? (item.coverage ?? 1)
+        : 1;
+      const rrfScore = weight / (RRF_K + rank + 1);
       const existing = scoreMap.get(item.id);
       if (existing) {
         existing.rrfScore += rrfScore;
@@ -488,6 +653,9 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
           // a semantic-only hit falls through to the winning result's own
           // coverage below, since textCoverage stays undefined for it.
           existing.textCoverage = item.coverage;
+          // Same reasoning as exact/coverage: a fact about how this note's
+          // own text met the query, which must survive the excerpt swap below.
+          existing.questionEcho = item.question_echo;
         }
         // Two arms can hit the same note via genuinely different passages —
         // a text match in one section, a semantic match (match_chunks) in
@@ -505,13 +673,14 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
           textTier: field === 'text_score' ? item.text_tier : undefined,
           exact: field === 'text_score' ? item.exact : undefined,
           textCoverage: field === 'text_score' ? item.coverage : undefined,
+          questionEcho: field === 'text_score' ? item.question_echo : undefined,
         });
       }
     });
   }
 
   return [...scoreMap.values()]
-    .map(({ result, rrfScore, relevance, extra, textTier, exact, textCoverage }) => {
+    .map(({ result, rrfScore, relevance, extra, textTier, exact, textCoverage, questionEcho }) => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars -- drop `score`, forward everything else
       const { score: _score, ...rest } = result;
       const matched_by = Object.keys(extra) as ('text_score' | 'semantic_score')[];
@@ -541,6 +710,7 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
         text_tier: textTier,
         ...(exact !== undefined ? { exact } : {}),
         ...(textCoverage !== undefined ? { coverage: textCoverage } : {}),
+        ...(questionEcho ? { question_echo: true } : {}),
       };
     })
     // Ordering is retrieval and fusion, nothing else.
@@ -678,9 +848,17 @@ const MIN_SECTION_MATCH_LEN = 8;
  * excerpt no longer appears verbatim, or it genuinely precedes every heading
  * (the note's untitled lead-in). No section is no worse than before this ran.
  */
-async function attachSections(results: SearchResult[]): Promise<void> {
+async function attachSections(results: SearchResult[], query?: string): Promise<void> {
   const candidates = results
-    .filter((r) => !r.section)
+    // Every result, not only the ones with no section yet. The semantic arm
+    // pre-fills `section` from its chunk's stored heading, and a chunk that
+    // merged several small sections (lib/chunking.ts step 3) keeps only the
+    // FIRST one's heading for all of them — so a short multi-section note
+    // reports its opening heading for an excerpt taken from anywhere in it.
+    // Reading the heading from where the excerpt actually sits cannot make
+    // that mistake, so it decides; the stored heading stays as the fallback
+    // for a candidate this cannot locate.
+    .filter((r) => !LEGACY_EXCERPT || !r.section)
     .map((r) => ({
       r,
       pattern: r.excerpt.split('\n')[0].replace(/^(\.\.\.|…)/, '').replace(/(\.\.\.|…)$/, '').trim(),
@@ -699,16 +877,110 @@ async function attachSections(results: SearchResult[]): Promise<void> {
     if (!content) continue;
     const idx = content.indexOf(pattern);
     if (idx === -1) continue;
+    // The heading that belongs to the ANSWER, not to wherever the 300-char
+    // window happened to open. An excerpt centred on a matching line routinely
+    // starts inside the section above it, and taking the heading from the
+    // window's first character then reports that previous section — the
+    // excerpt shows the right text under the wrong label, which is worse than
+    // no label. Re-find the query-relevant line inside the excerpt's own span
+    // and take the heading above THAT.
+    const span = content.slice(idx, idx + r.excerpt.length);
+    const anchor = query && !LEGACY_EXCERPT ? bestPassageOffset(span, query) : null;
+    const target = idx + (anchor?.start ?? 0);
     // Headings come back in document order; each one owns everything after
     // it until the next heading regardless of level, so the last heading at
     // or before the match's offset is always the one it sits under.
     const headings = extractHeadings(content);
     let heading: string | null = null;
     for (const h of headings) {
-      if (h.offset > idx) break;
+      if (h.offset > target) break;
       heading = h.text;
     }
     if (heading) r.section = heading;
+  }
+}
+
+// Question marks across the scripts this can meet. Not an exhaustive list of
+// the world's interrogative punctuation (Greek uses `;`, which is far too
+// common in code and prose to test on), and deliberately so: a missed mark
+// means the note is simply not flagged, which is the safe direction.
+const QUESTION_MARK_RE = /[?？؟]\s*$/;
+
+/**
+ * Whether a note contains the QUESTION rather than an answer to it.
+ *
+ * The failure this exists for: an FAQ or seminar note that lists questions
+ * verbatim matches a user's question at the strict AND tier with coverage 1 —
+ * a true statement about the string and a false one about the note. Measured
+ * on holdout collections, a questions-list note outranked the note that
+ * actually answered, which is the single behavior this ranking stage is
+ * supposed to get right.
+ *
+ * The test is structural, not lexical, because the discriminator is not
+ * "does the note contain questions" — a real FAQ does too, and must keep its
+ * position. It is "is any of the matching questions FOLLOWED by an answer":
+ *
+ *   - a matching question line is an interrogative line sharing at least one
+ *     of the query's significant words;
+ *   - it counts as answered when the next non-empty line is not itself
+ *     interrogative — in a question-and-answer note that next line is the
+ *     answer, in a bare list it is the next question;
+ *   - the note echoes only when it has at least two matching question lines
+ *     and NONE of them is answered.
+ *
+ * Two guards, both deliberately conservative. Requiring two matching
+ * questions keeps a note that poses one rhetorical question and then answers
+ * it from ever being flagged. Requiring none to be answered means a single
+ * answered question in the note is enough to clear it — a real FAQ never
+ * trips this, at the cost of missing a mixed note that answers some of its
+ * questions but not the one asked. Missing a flag costs one badly ordered
+ * result; a false flag would demote a legitimate answer, which is worse.
+ *
+ * No language-specific vocabulary and no list-marker conventions: the only
+ * inputs are line breaks, a question mark, and the query's own words.
+ */
+export function questionEcho(content: string, words: string[]): boolean {
+  if (words.length === 0) return false;
+  const lower = words.map((w) => w.toLowerCase());
+  const lines = content.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+
+  let matching = 0;
+  let answered = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (!QUESTION_MARK_RE.test(lines[i])) continue;
+    const haystack = lines[i].toLowerCase();
+    if (!lower.some((w) => haystack.includes(w))) continue;
+    matching++;
+    const next = lines[i + 1];
+    if (next !== undefined && !QUESTION_MARK_RE.test(next)) answered++;
+  }
+  return matching >= 2 && answered === 0;
+}
+
+// A note is only worth fetching for the echo test when its own snippet shows
+// a question mark — the flag can't fire otherwise. Bounded like the table
+// repair pass: a query landing in many question-shaped notes must not turn
+// one search into N content fetches.
+const MAX_ECHO_FETCHES = 8;
+
+/**
+ * Sets `question_echo` on the candidates that could possibly carry it, using
+ * one batched content fetch (same shape as attachSections). Runs on the
+ * candidate list before fusion rather than on the final page, because the
+ * whole point is to change which candidates reach the top.
+ */
+async function attachQuestionEcho(results: SearchResult[], words: string[]): Promise<void> {
+  if (words.length === 0) return;
+  const candidates = results.filter((r) => /[?？؟]/.test(r.excerpt)).slice(0, MAX_ECHO_FETCHES);
+  if (candidates.length === 0) return;
+  const rows = await dbQuery<{ id: string; content: string }>(
+    'select id, content from notes where id = any($1)',
+    [candidates.map((r) => r.id)]
+  );
+  const contentById = new Map(rows.map((r) => [r.id, r.content]));
+  for (const r of candidates) {
+    const content = contentById.get(r.id);
+    if (content && questionEcho(content, words)) r.question_echo = true;
   }
 }
 
@@ -936,7 +1208,14 @@ function weightForFolder(folderId: string | null | undefined, weights: FolderWei
   return folderId ? (weights[folderId] ?? 1) : 1;
 }
 
-export async function textSearch(query: string, limit = 10, filters?: SearchFilters, allowedIds?: Set<string>): Promise<SearchResult[]> {
+/**
+ * `deferSections` is set by hybridSearch. Resolving a heading needs the note's
+ * full content, and an arm is called with the CANDIDATE limit, not the user's
+ * — so doing it per arm fetched up to thirty notes' bodies twice per search,
+ * which on a vault holding 60 KB notes cost more than the embedding call.
+ * Hybrid resolves them once, on the page it is actually going to return.
+ */
+export async function textSearch(query: string, limit = 10, filters?: SearchFilters, allowedIds?: Set<string>, deferSections = false): Promise<SearchResult[]> {
   const fetchLimit = overfetchLimit(limit, filters);
   const scope = await resolveScope(filters, allowedIds);
   const scopeIds = scopeParam(scope);
@@ -1087,7 +1366,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // one word out of N) sidesteps the disagreement entirely instead of
   // trying to make the two tokenizers consistent.
   const coverageMap = await computeTextCoverage(words, [...orRows, ...anchorRows].map((n) => n.id));
-  const toResult = (n: FtsRow, tier: 'and' | 'or') => {
+  const toResult = (n: FtsRow, tier: 'and' | 'or'): SearchResult => {
     // Order matters: coverage multiplies the ALREADY-normalized rank, never
     // the other way around. Applying it before dividing by the set's max
     // would cancel out whenever every hit in the set shares the same
@@ -1131,14 +1410,28 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     ...anchorRows.map((n) => toResult(n, 'or')),
   ];
   const ftsIds = new Set(ftsResults.map((r) => r.id));
-  const results = applyExactBand([...ftsResults, ...exactHits.filter((r) => !ftsIds.has(r.id))])
+  const results = applyExactBand([...ftsResults, ...exactHits.filter((r) => !ftsIds.has(r.id))]);
+  // Flagged BEFORE the sort below, and before applyFilters' slice: the flag
+  // has to be on the candidates the sort is about to order, not only on the
+  // page that survived it.
+  // Always computed, never conditional on the ranking switch: the flag is a
+  // reported fact an agent can act on, and it costs one batched fetch only
+  // when a candidate's own snippet contains a question mark.
+  await attachQuestionEcho(results, words);
+  results
     // Relevance alone: the SQL returns 'and' rows before 'or' rows by raw
     // rank, but coverage can push an 'or' hit above an 'and' one, and the
     // caller reads top to bottom.
-    .sort((a, b) => Number(b.exact ?? false) - Number(a.exact ?? false) || b.relevance - a.relevance);
+    // Echo demotion applies here too, not only in fusion: `type: text` is a
+    // caller-visible mode, and the candidate order this produces is what
+    // fusion reads ranks from.
+    .sort((a, b) =>
+      Number(b.exact ?? false) - Number(a.exact ?? false)
+      || (DEMOTE_QUESTION_ECHO ? Number(a.question_echo ?? false) - Number(b.question_echo ?? false) : 0)
+      || b.relevance - a.relevance);
   const filtered = await applyFilters(results, limit, filters, scope);
   await repairBrokenTableExcerpts(filtered);
-  await attachSections(filtered);
+  if (!deferSections) await attachSections(filtered, query);
   return enrichResults(filtered);
 }
 
@@ -1304,7 +1597,7 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
  * the run that produced the results instead: same embedding, same filters,
  * same index generation, no extra round trip.
  */
-async function semanticRun(query: string, limit = 10, filters?: SearchFilters, allowedIds?: Set<string>): Promise<{ results: SearchResult[]; best: number | null }> {
+async function semanticRun(query: string, limit = 10, filters?: SearchFilters, allowedIds?: Set<string>, deferSections = false): Promise<{ results: SearchResult[]; best: number | null }> {
   const [embedding, floor, scope, modelKey] = await Promise.all([
     getEmbedding(query, 'query'),
     getMinSimilarity(),
@@ -1403,6 +1696,16 @@ async function semanticRun(query: string, limit = 10, filters?: SearchFilters, a
       }
     }
   }
+  // The chunk's stored heading is only right when the chunk covers exactly
+  // one section. A short multi-section note merges into a single chunk that
+  // keeps the FIRST heading (lib/chunking.ts step 3), so every excerpt taken
+  // from it is labelled with the note's opening heading. Re-deriving the
+  // heading from where the excerpt actually sits fixes that, and it has to
+  // happen here rather than only in textSearch: a hybrid result usually
+  // shows the semantic arm's excerpt, so a section attached only on the text
+  // side never reaches it.
+  if (!deferSections) await attachSections(filtered, query);
+
   // `best` is the best similarity BEFORE the display limit and before the
   // relative trim, so it still answers "did anything come close" even when
   // the returned list is empty. Null when the index had nothing to compare
@@ -1464,8 +1767,8 @@ async function hybridRun(query: string, limit = 10, filters?: SearchFilters): Pr
   // get the same set, a redundant query on every filtered hybrid search.
   const allowedIds = hasFilters(filters) ? await filteredNoteIds(filters) : undefined;
   const [textOutcome, semanticOutcome] = await Promise.allSettled([
-    textSearch(query, candidateLimit, filters, allowedIds),
-    semanticRun(query, candidateLimit, filters, allowedIds),
+    textSearch(query, candidateLimit, filters, allowedIds, true),
+    semanticRun(query, candidateLimit, filters, allowedIds, true),
   ]);
 
   const failures: ArmFailure[] = [];
@@ -1490,7 +1793,10 @@ async function hybridRun(query: string, limit = 10, filters?: SearchFilters): Pr
 
   if (lists.length === 0) throw new SearchUnavailableError(failures);
 
-  return { results: rrfMerge(lists).slice(0, limit), bestSemantic, failures, armsUsed };
+  const merged = rrfMerge(lists).slice(0, limit);
+  // Once, on the returned page — see textSearch's deferSections note.
+  await attachSections(merged as unknown as SearchResult[], query);
+  return { results: merged, bestSemantic, failures, armsUsed };
 }
 
 export type SearchMode = 'hybrid' | 'text' | 'semantic';
@@ -1677,6 +1983,8 @@ function project(
     if (r.section !== undefined) base.section = r.section;
     if (r.content_length !== undefined) base.content_length = r.content_length;
     if (r.created_at !== undefined) base.created_at = r.created_at;
+    if (r.question_echo !== undefined) base.question_echo = r.question_echo;
+    if (r.index_pending !== undefined) base.index_pending = r.index_pending;
 
     if (explain) {
       if (r.text_score !== undefined) base.text_score = r.text_score;

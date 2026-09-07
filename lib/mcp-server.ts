@@ -1026,6 +1026,13 @@ export function createMcpServer(): McpServer {
     // Only ever shipped as true: `exact: false` on nearly every hit would be
     // noise, and its absence already means "not verbatim".
     if (r.exact) out.exact = true;
+    // Same "only ever true" rule: this note lists your question without
+    // answering it, so its match is about the string, not the content.
+    if (r.question_echo) out.question_echo = true;
+    // The note's own text is current; only its vectors are still rebuilding,
+    // so this excerpt may be from the previous version. get_note returns the
+    // live text.
+    if (r.index_pending) out.index_pending = true;
     if (r.section) out.section = r.section;
     if (r.content_length !== undefined) out.content_length = r.content_length;
     if (explain) {
@@ -1101,6 +1108,15 @@ export function createMcpServer(): McpServer {
     'Every semantic/hybrid response includes threshold/best_score/pending_embeddings so you can ' +
     'tell "nothing was found" from "a configured filter removed it" from "embeddings not generated ' +
     'yet", even when results came back non-empty. ' +
+    'Freshness: a hit carrying index_pending:true has an excerpt built from a PREVIOUS version of ' +
+    'that note — the note row itself always holds the current text, only its search vectors lag. ' +
+    'Call get_note on it (with section, if one is reported) and quote that, not the excerpt, before ' +
+    'telling the user what the note says. Response-level pending_embeddings counts how many notes ' +
+    'are in that state vault-wide, and stale_generation_chunks counts vectors left over from a ' +
+    'previous embedding model, which are excluded from semantic results until reindexed — a ' +
+    'non-zero value there explains a thin semantic arm rather than an empty vault. ' +
+    'question_echo:true means the note LISTS your question without answering it (an FAQ or agenda ' +
+    'of questions); treat it as a pointer to the topic, never as the answer. ' +
     'Pass explain:true to also see each hit\'s raw text_score/semantic_score/rrf_score and created_at ' +
     '— only useful for debugging the ranking itself, omitted by default to keep responses short.',
     {

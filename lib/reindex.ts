@@ -2,7 +2,7 @@
 // POST /api/admin/reindex, the hourly sweep (instrumentation.ts), and the
 // background pass fired after an import.
 import { query, getPool, REINDEX_LOCK_KEY } from './db';
-import { indexNote } from './indexing';
+import { indexNote, StaleIndexError } from './indexing';
 import { getEmbedConcurrency, EmbedCancelledError, isQuotaExhausted } from './embeddings';
 
 export type ReindexError = { id: string; title: string; message: string };
@@ -52,6 +52,10 @@ async function reindexRows(current: ReindexProgress, rows: { id: string; title: 
         return { ok: true as const };
       } catch (err) {
         if (err instanceof EmbedCancelledError) return { ok: 'cancelled' as const };
+        // The note was edited while this bulk pass was embedding it. Its own
+        // save already set embedding_pending = true and scheduled a fresh
+        // job, so this is neither a failure to report nor work to redo here.
+        if (err instanceof StaleIndexError) return { ok: 'cancelled' as const };
         return {
           ok: false as const,
           id: note.id,

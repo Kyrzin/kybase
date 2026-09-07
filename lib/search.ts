@@ -1,7 +1,7 @@
 // lib/search.ts — text (FTS + substring fallback), semantic (chunk-based), and hybrid (RRF) search
 import { query as dbQuery, toVector } from './db';
-import { getEmbedding, getMinSimilarity } from './embeddings';
-import { getFtsLanguages, getTagWeights, type TagWeights, getFolderWeights, type FolderWeights } from './settings';
+import { getEmbedding, getMinSimilarity, embeddingModelKey } from './embeddings';
+import { getEmbeddingConfig, getFtsLanguages, getTagWeights, type TagWeights, getFolderWeights, type FolderWeights } from './settings';
 import { escapeLike } from './sql';
 import { TABLE_ROW_RE, TABLE_SEPARATOR_RE, unpairedFenceIndex, extractHeadings } from './markdown';
 
@@ -106,13 +106,64 @@ export async function effectiveSemanticThreshold(): Promise<number | null> {
 
 const RRF_K = 60;
 
+// ── Retrieval behavior switches ────────────────────────────────────────────
+//
+// Three ranking questions that were argued on paper and then measured on
+// holdout collections never used to tune anything. Each default is the
+// variant that won; each switch exists so a deployment can go back without
+// downgrading the image. Two of the three defaults are the OPPOSITE of what
+// the design argument predicted, which is exactly why they are switches and
+// not silent constants.
+//
+// KYBASE_SEARCH_FUSION=legacy — sort by `relevance` first, RRF only as a
+//   tiebreak. `relevance` is each arm's own score over that arm's own best,
+//   so both arms put their best hit at exactly 1.0 however good it is, and
+//   the maximum of two such numbers is not a ranking function. Rank fusion
+//   is the fix, and it measured as a small strict win: same Recall@1 and
+//   MRR, ordering constraints 94.7% -> 100%. Defaults to rank fusion.
+//
+// KYBASE_SEARCH_SEMANTIC_TRIM=off — stop dropping semantic candidates that
+//   score under 0.75x this query's best hit. The argument against the trim
+//   is sound in principle (a ratio to the best result is not a probability,
+//   and nothing downstream can recover a candidate removed here) and it lost
+//   on measurement anyway: removing it cost 7 points of Recall@1 (86.2% ->
+//   79.3%) and 10 points of ordering, at both candidate widths, because
+//   every weak semantic candidate it used to drop still earns an RRF rank
+//   contribution. Kept ON, as a candidate-stage precision filter, with no
+//   claim that 0.75 means anything about relevance.
+//
+// KYBASE_SEARCH_CANDIDATES — per-arm candidate floor. 50 was the suggested
+//   starting point; measured against 30 it cost 3.4 points of Recall@1
+//   (86.2% -> 82.8%) and bought nothing, because candidate recall was
+//   already 100% at 30. Widening a pool that already contains the answer
+//   only feeds more weak single-arm hits into fusion. NOTE the limitation:
+//   the holdout collections hold 12-16 notes each, so neither width is a
+//   test of what a large vault needs — this number is a floor chosen not to
+//   starve small `limit` values, not a tuned optimum.
+const LEGACY_FUSION = process.env.KYBASE_SEARCH_FUSION === 'legacy';
+const SEMANTIC_TRIM = process.env.KYBASE_SEARCH_SEMANTIC_TRIM !== 'off';
+const SEMANTIC_TRIM_RATIO = 0.75;
+
 // hybridSearch feeds each arm's results into RRF fusion. If each arm is
 // capped at the final output size, a note ranked just outside `limit` in
 // BOTH arms never reaches rrfMerge at all — even though their combined rank
 // would place it in the fused top results. Overfetch a wider candidate pool
 // per arm, then slice down to `limit` only after fusion.
+// A floor, not just a multiple of `limit`: the caller's page size is a
+// display decision and says nothing about how deep retrieval has to go to
+// find the answer. At the MCP default of limit:5 the old `limit * 3` gave
+// each arm fifteen candidates to fuse, so a note that neither arm ranked in
+// its own top fifteen could not be recovered by the fusion that exists to
+// recover exactly that.
+//
+// 30, deliberately not the 50 that was proposed: 50 measured WORSE
+// (see KYBASE_SEARCH_CANDIDATES above). 30 is the width the winning holdout
+// run used at limit:10, so this floor changes only the small-`limit` regime
+// — the one that was starved and was never measured as good — and leaves the
+// measured-best case exactly as measured.
 const RRF_CANDIDATE_FACTOR = 3;
-const RRF_CANDIDATE_CAP = 50;
+const RRF_CANDIDATE_FLOOR = Number(process.env.KYBASE_SEARCH_CANDIDATES ?? 30);
+const RRF_CANDIDATE_CAP = 100;
 
 const EXCERPT_LENGTH = 300;
 
@@ -140,15 +191,17 @@ export type SearchFilters = {
   updatedBefore?: string;
 };
 
-// match_chunks doesn't carry folder_id or updated_at at all, and
-// search_notes_fts's folder_id (migration 021) exists only for the weight
-// multiply below, not for filtering — giving either RPC an exact-match
-// filter param would mean a second migration for what's a rarely-used,
-// small-vault filter. Instead: resolve the filter to an id set once, overfetch
-// candidates from the existing RPCs, then keep only ids in the set. Cheap and
-// exact as long as the vault is a few hundred notes, not exact at huge scale
-// (a heavily-filtered query against a huge unfiltered candidate pool could
-// still come back short) — acceptable for what this targets.
+// Filters are resolved to an id set once and handed to the RPCs, which apply
+// them BEFORE ORDER BY / LIMIT (migration 028). They used to be applied in JS
+// after the RPC had already ranked and truncated over the whole vault, which
+// had two consequences a caller could see: an out-of-scope hit consumed a
+// candidate slot that an in-scope note needed, and — worse — it set the
+// per-query best score that the in-scope notes were then measured against, so
+// a strong match in another folder could push a legitimate one out of
+// semanticSearch's relative trim entirely. The overfetch below is what made
+// the first problem merely unlikely instead of fixed; with the filter inside
+// the SQL neither problem exists, and the overfetch is kept only as a small
+// margin for the substring path, which still filters in JS.
 const OVERFETCH_FACTOR = 8;
 const OVERFETCH_CAP = 300;
 
@@ -227,6 +280,22 @@ async function enrichResults(results: SearchResult[]): Promise<SearchResult[]> {
 function overfetchLimit(limit: number, filters: SearchFilters | undefined): number {
   return hasFilters(filters) ? Math.min(OVERFETCH_CAP, limit * OVERFETCH_FACTOR) : limit;
 }
+
+/**
+ * The note ids a filtered call is allowed to see, resolved once. hybridSearch
+ * resolves it for both arms; a direct textSearch/semanticSearch call resolves
+ * it here. undefined means "no filter given", which the RPCs read as null and
+ * treat as the whole vault.
+ */
+async function resolveScope(
+  filters: SearchFilters | undefined,
+  allowedIds: Set<string> | undefined
+): Promise<Set<string> | undefined> {
+  if (allowedIds) return allowedIds;
+  return hasFilters(filters) ? filteredNoteIds(filters) : undefined;
+}
+
+const scopeParam = (scope: Set<string> | undefined): string[] | null => (scope ? [...scope] : null);
 
 /**
  * A chunk keeps its section's `# Heading` line as its first line (see
@@ -474,12 +543,40 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
         ...(textCoverage !== undefined ? { coverage: textCoverage } : {}),
       };
     })
-    // Ordering is retrieval and fusion, nothing else. It used to be led by a
-    // confidence tier, which meant an unproven heuristic could move a
-    // well-retrieved document below a worse one; the tier is gone, and with it
-    // that right. relevance first (the normalized per-arm score, max across
-    // arms), rrf_score as the tiebreak for genuinely equal cases.
-    .sort((a, b) => b.relevance - a.relevance || b.rrf_score - a.rrf_score);
+    // Ordering is retrieval and fusion, nothing else.
+    //
+    // Sorted by the RRF score, which is what RRF is for: rank is comparable
+    // between arms, score is not. The previous order led with `relevance` —
+    // each arm's own score divided by that arm's own best — and used RRF only
+    // to break ties, which is not rank fusion at all. Two arms' normalized
+    // scores are different quantities: ts_rank/max(ts_rank) and
+    // cosine/max(cosine) both put their own best hit at exactly 1.0 no matter
+    // how good it is, so leading with the maximum of the two systematically
+    // promotes whichever arm found the weaker field. Measured on holdout
+    // collections: ordering by relevance made hybrid WORSE than its own
+    // semantic arm alone — Recall@1 82.8% against 89.7%, MRR 0.914 against
+    // 0.948, which is not a defensible state for a fusion whose whole point
+    // is to beat both arms.
+    //
+    // The one exception is a verbatim match, kept as an explicit rule rather
+    // than a score nudge: a query that is a filename, a path or an identifier
+    // (see textSearch's two guards) and occurs literally in a note is a fact
+    // about the string that neither arm's rank can express — Postgres tokenizes
+    // `cleanup-n8n-binary.sh` differently in the query and in the document, so
+    // FTS structurally cannot rank it first. Verbatim hits sort above the rest
+    // and are ordered among themselves by RRF like everything else; `exact` is
+    // only ever set for the narrow identifier shapes textSearch tests for, never
+    // for a phrase or a question that a note happens to quote.
+    //
+    // Ties resolve on id, so two hits with identical scores keep a stable
+    // order across otherwise identical calls.
+    .sort((a, b) =>
+      Number(b.exact ?? false) - Number(a.exact ?? false)
+      || (LEGACY_FUSION
+        ? (b.relevance - a.relevance || b.rrf_score - a.rrf_score)
+        : (b.rrf_score - a.rrf_score || b.relevance - a.relevance))
+      || a.id.localeCompare(b.id)
+    );
 }
 
 type FtsRow = { id: string; title: string; tags: string[]; folder_id: string | null; rank: number; headline: string };
@@ -841,8 +938,10 @@ function weightForFolder(folderId: string | null | undefined, weights: FolderWei
 
 export async function textSearch(query: string, limit = 10, filters?: SearchFilters, allowedIds?: Set<string>): Promise<SearchResult[]> {
   const fetchLimit = overfetchLimit(limit, filters);
+  const scope = await resolveScope(filters, allowedIds);
+  const scopeIds = scopeParam(scope);
   const [rows, tagWeights, folderWeights] = await Promise.all([
-    dbQuery<FtsRow>('select * from search_notes_fts($1, $2)', [query, fetchLimit]),
+    dbQuery<FtsRow>('select * from search_notes_fts($1, $2, $3)', [query, fetchLimit, scopeIds]),
     getTagWeights(),
     getFolderWeights(),
   ]);
@@ -855,8 +954,8 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   if (rows.length < limit && words.length > 2) {
     const seen = new Set(rows.map((r) => r.id));
     const orAll = await dbQuery<FtsRow>(
-      'select * from search_notes_fts($1, $2)',
-      [words.join(' or '), fetchLimit]
+      'select * from search_notes_fts($1, $2, $3)',
+      [words.join(' or '), fetchLimit, scopeIds]
     );
     orRows = orAll.filter((r) => !seen.has(r.id));
   }
@@ -877,7 +976,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     const anchors = await rareAnchors(words, await getFtsLanguages());
     if (anchors.length > 0) {
       const seen = new Set(orRows.map((r) => r.id));
-      const anchorAll = await dbQuery<FtsRow>('select * from search_notes_fts($1, $2)', [anchors.join(' '), fetchLimit]);
+      const anchorAll = await dbQuery<FtsRow>('select * from search_notes_fts($1, $2, $3)', [anchors.join(' '), fetchLimit, scopeIds]);
       anchorRows = anchorAll.filter((r) => !seen.has(r.id));
     }
   }
@@ -945,7 +1044,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   const structured = asciiToken && q.length >= 4 && /[-_.:/\\]/.test(q);
   const opaque = asciiToken && q.length >= 8 && /[0-9]/.test(q) && /[A-Za-z]/.test(q);
   const verbatim = !/\s/.test(q) && (words.length > 1 || structured || opaque);
-  const exactHits = (await substringSearch(query, limit, filters, allowedIds))
+  const exactHits = (await substringSearch(query, limit, filters, scope))
     .map((r) => (verbatim ? { ...r, exact: true } : r));
   if (rows.length === 0 && orRows.length === 0 && anchorRows.length === 0) {
     return enrichResults(applyExactBand(exactHits));
@@ -1037,7 +1136,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     // rank, but coverage can push an 'or' hit above an 'and' one, and the
     // caller reads top to bottom.
     .sort((a, b) => Number(b.exact ?? false) - Number(a.exact ?? false) || b.relevance - a.relevance);
-  const filtered = await applyFilters(results, limit, filters, allowedIds);
+  const filtered = await applyFilters(results, limit, filters, scope);
   await repairBrokenTableExcerpts(filtered);
   await attachSections(filtered);
   return enrichResults(filtered);
@@ -1192,20 +1291,41 @@ export async function countNotes(query: string, mode: 'fts' | 'substring'): Prom
  * semantic pass would have dropped.
  */
 export async function semanticSearch(query: string, limit = 10, filters?: SearchFilters, allowedIds?: Set<string>): Promise<SearchResult[]> {
-  const [embedding, floor] = await Promise.all([
+  return (await semanticRun(query, limit, filters, allowedIds)).results;
+}
+
+/**
+ * semanticSearch's body, plus the best raw similarity it saw.
+ *
+ * That number used to be fetched by a SECOND call — lib/mcp-server.ts ran
+ * bestSemanticScore(q) after the search to report it, which re-embedded the
+ * same query against a different scope (no filters) and gave the provider a
+ * fresh chance to fail after the search had already succeeded. Reported from
+ * the run that produced the results instead: same embedding, same filters,
+ * same index generation, no extra round trip.
+ */
+async function semanticRun(query: string, limit = 10, filters?: SearchFilters, allowedIds?: Set<string>): Promise<{ results: SearchResult[]; best: number | null }> {
+  const [embedding, floor, scope, modelKey] = await Promise.all([
     getEmbedding(query, 'query'),
     getMinSimilarity(),
+    resolveScope(filters, allowedIds),
+    getEmbeddingConfig().then(embeddingModelKey),
   ]);
   const fetchLimit = overfetchLimit(limit, filters);
   const vec = toVector(embedding);
+  // Scope and model generation are both applied inside match_chunks, before
+  // it ranks and truncates (migration 028). Scope, because an out-of-folder
+  // hit used to set `best` below and take in-scope notes down with it.
+  // Generation, because a query embedded by the current model is not
+  // comparable to document vectors left behind by a previous one — during a
+  // model change those rows are excluded rather than mixed in, and the text
+  // arm carries hybrid search until the reindex catches up.
+  //
   // No cutoff unless the owner configured one (lib/embeddings.ts explains at
-  // length why the shipped per-model numbers were withdrawn). What survives
-  // is the relative trim below, which is a different kind of statement: it
-  // compares this query's hits to each other, and never claims that some
-  // absolute cosine means "unrelated".
+  // length why the shipped per-model numbers were withdrawn).
   const rawData: Record<string, unknown>[] = await dbQuery(
-    'select * from match_chunks($1::vector, $2, 0)',
-    [vec, fetchLimit]
+    'select * from match_chunks($1::vector, $2, 0, $3, $4)',
+    [vec, fetchLimit, scopeParam(scope), modelKey]
   );
   const data = floor === null ? rawData : rawData.filter((n) => (n.similarity as number) >= floor);
 
@@ -1213,7 +1333,9 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
   // query's best hit — the reference point relevance is measured against.
   const best = (data[0]?.similarity as number | undefined) ?? 0;
 
-  const candidates = best > 0 ? data.filter((n) => (n.similarity as number) >= 0.75 * best) : data;
+  const candidates = SEMANTIC_TRIM && best > 0
+    ? data.filter((n) => (n.similarity as number) >= SEMANTIC_TRIM_RATIO * best)
+    : data;
 
   // match_chunks can return up to 2 chunks per note (migration 017) — one
   // note can genuinely occupy 2 slots of `candidates`. Good for corroborating
@@ -1255,7 +1377,7 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
       ...(heading ? { section: heading } : {}),
     };
   });
-  const filtered = await applyFilters(results, limit, filters, allowedIds);
+  const filtered = await applyFilters(results, limit, filters, scope);
 
   // Coverage on a semantic hit answers the question the cosine cannot: does
   // the thing you asked about actually APPEAR in this note. Measured
@@ -1281,7 +1403,11 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
       }
     }
   }
-  return enrichResults(filtered);
+  // `best` is the best similarity BEFORE the display limit and before the
+  // relative trim, so it still answers "did anything come close" even when
+  // the returned list is empty. Null when the index had nothing to compare
+  // at all, which is a different statement from a low number.
+  return { results: await enrichResults(filtered), best: data.length > 0 ? best : null };
 }
 
 /**
@@ -1290,29 +1416,81 @@ export async function semanticSearch(query: string, limit = 10, filters?: Search
  * "just under the threshold" when a real semantic/hybrid search came back
  * empty — a bare [] can't tell those apart.
  */
-export async function bestSemanticScore(query: string): Promise<number | null> {
-  const embedding = await getEmbedding(query, 'query');
+export async function bestSemanticScore(query: string, filters?: SearchFilters): Promise<number | null> {
+  const [embedding, scope, modelKey] = await Promise.all([
+    getEmbedding(query, 'query'),
+    resolveScope(filters, undefined),
+    getEmbeddingConfig().then(embeddingModelKey),
+  ]);
   const [row] = await dbQuery<{ similarity: number }>(
-    'select similarity from match_chunks($1::vector, 1, 0)',
-    [toVector(embedding)]
+    'select similarity from match_chunks($1::vector, 1, 0, $2, $3)',
+    [toVector(embedding), scopeParam(scope), modelKey]
   );
   return row?.similarity ?? null;
 }
 
+/** An arm that could not run, and why — surfaced rather than silently dropped. */
+export type ArmFailure = { arm: 'text' | 'semantic'; reason: string };
+
+/** Every arm failed. A caller must be able to tell this from an empty result. */
+export class SearchUnavailableError extends Error {
+  constructor(public readonly failures: ArmFailure[]) {
+    super(`Search unavailable: ${failures.map((f) => `${f.arm} (${f.reason})`).join(', ')}`);
+  }
+}
+
+const reasonOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
 export async function hybridSearch(query: string, limit = 10, filters?: SearchFilters): Promise<HybridSearchResult[]> {
-  const candidateLimit = Math.min(RRF_CANDIDATE_CAP, limit * RRF_CANDIDATE_FACTOR);
+  return (await hybridRun(query, limit, filters)).results;
+}
+
+/**
+ * hybridSearch plus what happened while producing it.
+ *
+ * allSettled, not all: the arms are independent, and a hybrid search whose
+ * embedding provider is down should degrade to the text arm rather than
+ * failing outright — a stopped Ollama container used to take the whole
+ * hybrid search with it, including the FTS half that was working fine. Both
+ * arms failing is a genuine outage and throws, because returning [] there
+ * would tell the caller the vault holds nothing.
+ */
+async function hybridRun(query: string, limit = 10, filters?: SearchFilters): Promise<{
+  results: HybridSearchResult[]; bestSemantic: number | null; failures: ArmFailure[]; armsUsed: ('text' | 'semantic')[];
+}> {
+  const candidateLimit = Math.min(RRF_CANDIDATE_CAP, Math.max(RRF_CANDIDATE_FLOOR, limit * RRF_CANDIDATE_FACTOR));
   // Resolved once here rather than separately inside each arm — both would
   // otherwise independently call filteredNoteIds() for the same filters and
   // get the same set, a redundant query on every filtered hybrid search.
   const allowedIds = hasFilters(filters) ? await filteredNoteIds(filters) : undefined;
-  const [text, semantic] = await Promise.all([
+  const [textOutcome, semanticOutcome] = await Promise.allSettled([
     textSearch(query, candidateLimit, filters, allowedIds),
-    semanticSearch(query, candidateLimit, filters, allowedIds),
+    semanticRun(query, candidateLimit, filters, allowedIds),
   ]);
-  return rrfMerge([
-    { field: 'text_score', results: text },
-    { field: 'semantic_score', results: semantic },
-  ]).slice(0, limit);
+
+  const failures: ArmFailure[] = [];
+  const lists: NamedResultList[] = [];
+  const armsUsed: ('text' | 'semantic')[] = [];
+
+  if (textOutcome.status === 'fulfilled') {
+    lists.push({ field: 'text_score', results: textOutcome.value });
+    armsUsed.push('text');
+  } else {
+    failures.push({ arm: 'text', reason: reasonOf(textOutcome.reason) });
+  }
+
+  let bestSemantic: number | null = null;
+  if (semanticOutcome.status === 'fulfilled') {
+    lists.push({ field: 'semantic_score', results: semanticOutcome.value.results });
+    bestSemantic = semanticOutcome.value.best;
+    armsUsed.push('semantic');
+  } else {
+    failures.push({ arm: 'semantic', reason: reasonOf(semanticOutcome.reason) });
+  }
+
+  if (lists.length === 0) throw new SearchUnavailableError(failures);
+
+  return { results: rrfMerge(lists).slice(0, limit), bestSemantic, failures, armsUsed };
 }
 
 export type SearchMode = 'hybrid' | 'text' | 'semantic';
@@ -1323,6 +1501,112 @@ export interface SearchOptions {
   offset?: number;
   filters?: SearchFilters;
   explain?: boolean;
+}
+
+/**
+ * What the run itself observed. Every field is a fact about THIS execution —
+ * same filters, same model, same index generation as the results above it.
+ *
+ * Exists so an empty result can be read correctly. Three different things
+ * produce zero hits and a caller has to tell them apart: nothing matched
+ * (`index.pending` 0, both arms used), the answer is not indexed yet
+ * (`index.pending` > 0, or `index.stale_generation` > 0 during a model
+ * change), or retrieval itself is degraded (`arms_unavailable` non-empty).
+ * No confidence percentage: none of these numbers has been calibrated into
+ * one, and inventing one is the mistake this project already removed once.
+ */
+export type SearchDiagnostics = {
+  mode: SearchMode;
+  arms_used: ('text' | 'semantic')[];
+  arms_unavailable: ArmFailure[];
+  /** Best raw similarity this query reached, from the run that produced the results. */
+  best_semantic_score: number | null;
+  semantic_threshold: number | null;
+  embedding_model: string;
+  index: {
+    total: number;
+    pending: number;
+    /** Chunks whose vectors came from a different model generation — excluded from semantic results until reindexed. */
+    stale_generation: number;
+  };
+  /** Whether folder/tag/date filters narrowed the searched set. */
+  scoped: boolean;
+  took_ms: number;
+};
+
+async function indexHealth(modelKey: string): Promise<SearchDiagnostics['index']> {
+  const [notes] = await dbQuery<{ total: number; pending: number }>(
+    `select count(*)::int as total, (count(*) filter (where embedding_pending))::int as pending
+     from notes where deleted_at is null`
+  );
+  const [chunks] = await dbQuery<{ stale: number }>(
+    `select count(*)::int as stale from note_chunks c
+     join notes n on n.id = c.note_id
+     where n.deleted_at is null and c.embedding_model is not null and c.embedding_model <> $1`,
+    [modelKey]
+  );
+  return { total: notes?.total ?? 0, pending: notes?.pending ?? 0, stale_generation: chunks?.stale ?? 0 };
+}
+
+/**
+ * The one search entry point that UI, REST and MCP all go through, with the
+ * diagnostics of the same execution attached.
+ *
+ * MCP used to call textSearch/semanticSearch/hybridSearch directly and then
+ * assemble its own diagnostics from separate queries — including a second
+ * embedding of the same query, run unfiltered, which could report a best
+ * score from outside the folder the caller had asked about (and fail after
+ * the search had already succeeded). One run, one set of numbers.
+ */
+export async function searchWithDiagnostics(
+  query: string,
+  options: SearchOptions = {}
+): Promise<{ results: SearchResult[]; diagnostics: SearchDiagnostics }> {
+  const { mode = 'hybrid', limit = 10, offset = 0, filters, explain = false } = options;
+  const started = Date.now();
+  const fetchLimit = limit + offset;
+
+  const modelKey = embeddingModelKey(await getEmbeddingConfig());
+  let raw: (SearchResult | HybridSearchResult)[] = [];
+  let bestSemantic: number | null = null;
+  let armsUsed: ('text' | 'semantic')[] = [];
+  let failures: ArmFailure[] = [];
+
+  if (mode === 'text') {
+    raw = await textSearch(query, fetchLimit, filters);
+    armsUsed = ['text'];
+  } else if (mode === 'semantic') {
+    const run = await semanticRun(query, fetchLimit, filters);
+    raw = run.results;
+    bestSemantic = run.best;
+    armsUsed = ['semantic'];
+  } else {
+    const run = await hybridRun(query, fetchLimit, filters);
+    raw = run.results;
+    bestSemantic = run.bestSemantic;
+    armsUsed = run.armsUsed;
+    failures = run.failures;
+  }
+
+  const [threshold, index] = await Promise.all([
+    mode === 'text' ? Promise.resolve(null) : effectiveSemanticThreshold(),
+    indexHealth(modelKey),
+  ]);
+
+  return {
+    results: project(raw, limit, offset, explain),
+    diagnostics: {
+      mode,
+      arms_used: armsUsed,
+      arms_unavailable: failures,
+      best_semantic_score: bestSemantic,
+      semantic_threshold: threshold,
+      embedding_model: modelKey,
+      index,
+      scoped: hasFilters(filters),
+      took_ms: Date.now() - started,
+    },
+  };
 }
 
 /**
@@ -1359,12 +1643,20 @@ export async function universalSearch(
     rawResults = await hybridSearch(query, fetchLimit, filters);
   }
 
-  // Apply offset pagination if requested
+  return project(rawResults, limit, offset, explain);
+}
+
+/** Offset slice + the strict output whitelist, shared by both entry points. */
+function project(
+  rawResults: (SearchResult | HybridSearchResult)[],
+  limit: number,
+  offset: number,
+  explain: boolean
+): SearchResult[] {
   const sliced = offset > 0
     ? rawResults.slice(offset, offset + limit)
     : rawResults.slice(0, limit);
 
-  // Map to SearchResult[] with strict whitelist
   return sliced.map((r): SearchResult => {
     const isHybrid = 'rrf_score' in r;
     const rawScore = isHybrid ? r.rrf_score : r.score;

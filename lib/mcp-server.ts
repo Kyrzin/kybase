@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { query, queryOne, withTransaction, isUniqueViolation, FOLDER_REPARENT_LOCK_KEY } from './db';
 import { softDeleteNote, restoreNote, trashFolderNotes, TRASH_RETENTION_DAYS } from './trash';
 import { escapeLike } from './sql';
-import { textSearch, semanticSearch, hybridSearch, makeExcerpt, bestSemanticScore, effectiveSemanticThreshold, type SearchResult, type HybridSearchResult } from './search';
+import { makeExcerpt, searchWithDiagnostics, SearchUnavailableError, type SearchResult, type HybridSearchResult, type SearchDiagnostics } from './search';
 import { indexNoteAsync } from './indexing';
 import { extractAllWikilinks } from './wikilinks';
 import { rewriteBacklinks } from './rename-links';
@@ -1121,10 +1121,30 @@ export function createMcpServer(): McpServer {
         createdAfter: created_after, createdBefore: created_before,
         updatedAfter: updated_after, updatedBefore: updated_before,
       };
-      let results: SearchResult[] | HybridSearchResult[];
-      if      (type === 'semantic') results = await semanticSearch(q, limit, filters);
-      else if (type === 'hybrid')   results = await hybridSearch(q, limit, filters);
-      else                          results = await textSearch(q, limit, filters);
+      // One run through the same entry point the UI and REST use, with the
+      // diagnostics of that same execution — rather than three direct calls
+      // plus a second embedding of the query (bestSemanticScore) that ran
+      // unfiltered and could report a best score from outside the folder the
+      // caller asked about.
+      let results: SearchResult[];
+      let diagnostics: SearchDiagnostics;
+      try {
+        ({ results, diagnostics } = await searchWithDiagnostics(q, { mode: type, limit, filters, explain }));
+      } catch (err) {
+        // Every arm is down. An empty result list here would be a claim about
+        // the vault; this is a claim about the service.
+        if (err instanceof SearchUnavailableError) {
+          return {
+            isError: true,
+            content: [{ type: 'text' as const, text: JSON.stringify({
+              error: 'search_unavailable',
+              message: 'No search backend is currently answering — this is a service failure, not an empty vault.',
+              arms_unavailable: err.failures,
+            }, null, 2) }],
+          };
+        }
+        throw err;
+      }
 
       const displayResults = results.map((r) => toDisplayResult(r, explain));
 
@@ -1132,10 +1152,7 @@ export function createMcpServer(): McpServer {
         // Always {results: [...]}, same top-level shape as hybrid/semantic
         // below — a caller no longer needs a type-keyed branch just to read
         // the hit list (found live 2026-08-17, independently by both an
-        // external audit and an independent-agent test). text has no
-        // threshold/best_score/pending_embeddings of its own (those are
-        // semantic-search concepts — cosine floor, embedding backlog), so it
-        // just omits them rather than sending meaningless zeros.
+        // external audit and an independent-agent test).
         return { content: [{ type: 'text' as const, text: JSON.stringify({ results: displayResults }, null, 2) }] };
       }
 
@@ -1144,11 +1161,6 @@ export function createMcpServer(): McpServer {
       // (semanticSearch/rrfMerge), so an agent has no way to tell "a
       // confident 0.85 cosine" from "the least-bad of a weak field" without
       // this number to compare against (2026-08-14 search-relevance overhaul, step 2).
-      const [threshold, bestScore, pendingRows] = await Promise.all([
-        effectiveSemanticThreshold(),
-        bestSemanticScore(q),
-        query<{ count: number }>('select count(*)::int as count from notes where embedding_pending = true and deleted_at is null'),
-      ]);
       return {
         content: [{
           type: 'text' as const,
@@ -1158,9 +1170,23 @@ export function createMcpServer(): McpServer {
             // means the index returned nothing — not that something was
             // filtered out. Reported as null rather than 0 because zero reads
             // like a measured boundary that happens to admit everything.
-            threshold: threshold === null ? null : round2(threshold),
-            best_score: bestScore === null ? null : round3(bestScore),
-            pending_embeddings: pendingRows[0]?.count ?? 0,
+            threshold: diagnostics.semantic_threshold === null ? null : round2(diagnostics.semantic_threshold),
+            best_score: diagnostics.best_semantic_score === null ? null : round3(diagnostics.best_semantic_score),
+            pending_embeddings: diagnostics.index.pending,
+            // Chunks still holding vectors from a previous embedding model.
+            // They are excluded from semantic results (migration 028) rather
+            // than compared against a query from a different geometry, so a
+            // non-zero value here explains a thin semantic arm without the
+            // agent having to guess.
+            stale_generation_chunks: diagnostics.index.stale_generation,
+            embedding_model: diagnostics.embedding_model,
+            // Which arms actually answered. A semantic/hybrid response built
+            // from the text arm alone is a degraded result, not a verdict
+            // about the vault.
+            arms_used: diagnostics.arms_used,
+            ...(diagnostics.arms_unavailable.length > 0
+              ? { arms_unavailable: diagnostics.arms_unavailable }
+              : {}),
           }, null, 2),
         }],
       };

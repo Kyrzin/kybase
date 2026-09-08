@@ -1,9 +1,10 @@
 // lib/search.ts — text (FTS + substring fallback), semantic (chunk-based), and hybrid (RRF) search
 import { query as dbQuery, toVector } from './db';
 import { getEmbedding, getMinSimilarity, embeddingModelKey } from './embeddings';
-import { getEmbeddingConfig, getFtsLanguages, getTagWeights, type TagWeights, getFolderWeights, type FolderWeights } from './settings';
+import { getEmbeddingConfig, getFtsLanguages, getTagWeights, type TagWeights, getFolderWeights, type FolderWeights, getRerankMinScore } from './settings';
 import { escapeLike } from './sql';
 import { TABLE_ROW_RE, TABLE_SEPARATOR_RE, unpairedFenceIndex, extractHeadings } from './markdown';
+import { rerankConfig, rerankAvailable, selectPassages, scorePassages, windowsOf, EXCERPT_CHUNK_CAP, type RerankConfig } from './rerank';
 
 export type SearchResult = {
   id: string;
@@ -97,6 +98,13 @@ export type SearchResult = {
   // Absent (rather than false) when the index is up to date, so a caller can
   // ignore the field entirely on a healthy vault.
   index_pending?: boolean;
+  // Cross-encoder score for this note's best passage, present only when
+  // reranking ran (lib/rerank.ts, off by default). Like `relevance` it orders
+  // this response and nothing more: it is the model's opinion about one
+  // passage, not a verdict that the note answers the question, and it is not
+  // comparable across queries. Reported so a caller can see WHY the order
+  // differs from rank fusion's, not so it can be thresholded.
+  rerank_score?: number;
 };
 
 
@@ -1763,7 +1771,8 @@ export async function hybridSearch(query: string, limit = 10, filters?: SearchFi
  * would tell the caller the vault holds nothing.
  */
 async function hybridRun(query: string, limit = 10, filters?: SearchFilters): Promise<{
-  results: HybridSearchResult[]; bestSemantic: number | null; failures: ArmFailure[]; armsUsed: ('text' | 'semantic')[];
+  results: HybridSearchResult[]; bestSemantic: number | null; failures: ArmFailure[];
+  armsUsed: ('text' | 'semantic')[]; reranked: boolean;
 }> {
   const candidateLimit = Math.min(RRF_CANDIDATE_CAP, Math.max(RRF_CANDIDATE_FLOOR, limit * RRF_CANDIDATE_FACTOR));
   // Resolved once here rather than separately inside each arm — both would
@@ -1797,10 +1806,194 @@ async function hybridRun(query: string, limit = 10, filters?: SearchFilters): Pr
 
   if (lists.length === 0) throw new SearchUnavailableError(failures);
 
-  const merged = rrfMerge(lists).slice(0, limit);
+  let fused = rrfMerge(lists);
+  const rr = await applyRerank(query, fused);
+  fused = rr.results;
+  const merged = fused.slice(0, limit);
   // Once, on the returned page — see textSearch's deferSections note.
   await attachSections(merged as unknown as SearchResult[], query);
-  return { results: merged, bestSemantic, failures, armsUsed };
+  return { results: merged, bestSemantic, failures, armsUsed, reranked: rr.reranked };
+}
+
+/**
+ * Reorders the fused list in place by cross-encoder score, when reranking is
+ * configured (lib/rerank.ts — off unless KYBASE_RERANK_URL is set).
+ *
+ * Runs BEFORE the page is cut to `limit`, which is the whole point: a note
+ * that fusion ranked 12th can only be promoted if it is still in hand when
+ * the reranker speaks. It reads the top `topN` of the fused list, so what it
+ * can fix is bounded by what retrieval already found — reranking reorders
+ * candidates, it never adds one.
+ *
+ * Verbatim matches are reordered only among themselves. `exact` outranking
+ * everything else is a retrieval guarantee this project makes deliberately
+ * (an identifier, a filename, a quoted phrase), and a model that has never
+ * seen a codebase should not be able to push a literal match below a passage
+ * that merely reads as more relevant. Same reason ties still fall through to
+ * the id: order stays reproducible.
+ *
+ * Returns false when nothing was rescored — service off, unreachable, or it
+ * declined to answer — and the caller reports that as-is rather than implying
+ * an order the reranker never produced.
+ */
+async function applyRerank(
+  query: string,
+  fused: HybridSearchResult[]
+): Promise<{ results: HybridSearchResult[]; reranked: boolean }> {
+  const unchanged = { results: fused, reranked: false };
+  if (fused.length < 2) return unchanged;
+  const cfg = await rerankConfig();
+  if (!cfg) return unchanged;
+
+  const head = fused.slice(0, cfg.topN);
+  const chunks = await dbQuery<{ note_id: string; heading: string | null; content: string }>(
+    `select note_id, heading, content from note_chunks
+     where note_id = any($1::uuid[]) order by note_id, chunk_index`,
+    [head.map((r) => r.id)]
+  );
+  const byNote = new Map<string, { heading: string | null; content: string }[]>();
+  for (const c of chunks) {
+    const list = byNote.get(c.note_id);
+    if (list) list.push(c); else byNote.set(c.note_id, [c]);
+  }
+
+  const passages = head.flatMap((r) => selectPassages(r.id, byNote.get(r.id) ?? [], query, cfg.perNote));
+  const scores = await scorePassages(query, passages, cfg);
+  if (!scores) return unchanged;
+
+  for (const r of head) {
+    const hit = scores.get(r.id);
+    if (!hit) continue;
+    r.rerank_score = hit.score;
+    // Show the passage that earned the rank. Without this a note can be
+    // promoted for a paragraph deep inside it and still display its own
+    // introduction — the reader then sees a preamble where the reason for
+    // the ranking was somewhere else entirely. Same construction the semantic
+    // arm uses on its own chunk, so the two produce comparable excerpts.
+    r.excerpt = makeExcerpt(stripLeadingHeading(hit.content), query);
+  }
+
+  // A note the reranker never saw a passage for (no chunks yet — never
+  // embedded, or indexing in flight) keeps its place rather than sinking to
+  // the bottom on a score it was never given.
+  const seen = head.filter((r) => r.rerank_score !== undefined);
+  const order = new Map(head.map((r, i) => [r.id, i]));
+  seen.sort((a, b) =>
+    Number(b.exact) - Number(a.exact) ||
+    (b.rerank_score! - a.rerank_score!) ||
+    (order.get(a.id)! - order.get(b.id)!) ||
+    a.id.localeCompare(b.id)
+  );
+  let next = 0;
+  for (let i = 0; i < head.length; i++) {
+    if (head[i].rerank_score !== undefined) fused[i] = seen[next++];
+  }
+
+  // relevance means "how close to the best hit in THIS response" (see
+  // SearchResult). Once a cross-encoder has decided the order, fusion's
+  // number no longer answers that question about the list the caller is
+  // holding: it produced first hits reading 0.05 above second hits reading
+  // 0.87, which is not a subtle inconsistency but a field contradicting the
+  // order printed next to it. Recomputed against the score that actually
+  // ordered them, keeping the definition and fixing the input.
+  const top = seen[0]?.rerank_score;
+  if (top !== undefined && top > 0) {
+    for (const r of seen) r.relevance = r.rerank_score! / top;
+  }
+
+  // Optional floor, absent unless someone measured one for their own model
+  // and vault (lib/settings.ts explains why there is no shipped default).
+  //
+  // It keeps ONLY what the reranker scored at or above it — sparing the
+  // candidates it never looked at would invert the whole point. `fused` runs
+  // deeper than topN, so exempting unscored hits promoted the tail of the
+  // candidate pool over notes the reranker had explicitly judged too weak:
+  // a query with no answer in the vault came back with five results the
+  // reranker had never seen, each one worse than the fifteen it had just
+  // rejected.
+  //
+  // A note inside topN that has no chunks yet (never embedded) is dropped
+  // here too. That is a real loss and the honest one: with a floor set, the
+  // response promises "the reranker vouched for these", and it cannot vouch
+  // for a note it was given nothing to read. index.pending in the
+  // diagnostics is what says an empty result may be an unfinished index.
+  const floor = await getRerankMinScore();
+  if (floor === null) {
+    await refineTopExcerpts(query, fused, byNote, cfg);
+    return { results: fused, reranked: true };
+  }
+  const kept = fused.filter((r) => r.rerank_score !== undefined && r.rerank_score >= floor);
+  await refineTopExcerpts(query, kept, byNote, cfg);
+  return { results: kept, reranked: true };
+}
+
+/**
+ * Picks the shown excerpt with the reranker instead of with word overlap, for
+ * the first `excerptTop` results.
+ *
+ * The main pass already ranks NOTES well; what it cannot fix is which part of
+ * the winning note is displayed, and that is decided by the same lexical
+ * heuristic the reranker exists to replace. Measured live 2026-09-08 on a real
+ * vault, all four failures were the FIRST hit: an excerpt that stopped four
+ * words before the token it was asked for, a passage taken from the section
+ * next to the answer, and twice a note's introduction shown instead of its
+ * content. The note was right every time.
+ *
+ * Two passes, because they answer different questions and merging them is
+ * unaffordable: which chunk holds the answer (the main pass only ever saw
+ * `perNote` of them), then which window inside that chunk to show. Both are
+ * capped per note, and both are skipped entirely when there is nothing to
+ * choose between.
+ *
+ * Best-effort throughout: a failure here leaves the excerpt the earlier stage
+ * produced. The results are already ordered, and a worse excerpt is not a
+ * reason to fail a search.
+ */
+async function refineTopExcerpts(
+  query: string,
+  results: HybridSearchResult[],
+  byNote: Map<string, { heading: string | null; content: string }[]>,
+  cfg: RerankConfig
+): Promise<void> {
+  const top = results.slice(0, cfg.excerptTop).filter((r) => r.rerank_score !== undefined);
+  if (top.length === 0) return;
+
+  // Which chunk. Skipped for a note whose chunks the main pass already saw in
+  // full — re-asking the same question of the same texts buys nothing.
+  const needChunkPass = top.filter((r) => (byNote.get(r.id)?.length ?? 0) > cfg.perNote);
+  const best = new Map<string, string>();
+  if (needChunkPass.length > 0) {
+    // Chosen by query overlap, not by document order. Taking the first N
+    // chunks silently excluded the answer whenever a note ran longer than the
+    // cap: the excerpt then came back from whichever passage happened to sit
+    // earlier in the file. Same selection the main pass uses, only wider.
+    const passages = needChunkPass.flatMap((r) =>
+      selectPassages(r.id, byNote.get(r.id) ?? [], query, EXCERPT_CHUNK_CAP)
+    );
+    const scored = await scorePassages(query, passages, cfg);
+    if (scored) for (const [id, hit] of scored) best.set(id, hit.content);
+  }
+  for (const r of top) {
+    if (!best.has(r.id)) {
+      // Everything this note has was already judged; recover the chunk the
+      // current excerpt came from rather than guessing a different one.
+      const own = byNote.get(r.id) ?? [];
+      const from = own.find((c) => c.content.includes(r.excerpt.slice(0, 40)));
+      if (from) best.set(r.id, from.content);
+    }
+  }
+  if (best.size === 0) return;
+
+  // Which window inside it.
+  const windows = [...best].flatMap(([noteId, content]) =>
+    windowsOf(content).map((w) => ({ noteId, text: w, content: w }))
+  );
+  const scored = await scorePassages(query, windows, cfg);
+  for (const r of top) {
+    const win = scored?.get(r.id);
+    const content = win?.content ?? best.get(r.id);
+    if (content) r.excerpt = makeExcerpt(stripLeadingHeading(content), query);
+  }
 }
 
 export type SearchMode = 'hybrid' | 'text' | 'semantic';
@@ -1841,6 +2034,22 @@ export type SearchDiagnostics = {
   };
   /** Whether folder/tag/date filters narrowed the searched set. */
   scoped: boolean;
+  /**
+   * Whether a cross-encoder reordered this page (lib/rerank.ts, hybrid only).
+   * False covers both "not configured" and "configured but did not answer" —
+   * a reranker that timed out must not leave the caller believing the order
+   * was reranked. Says nothing about the results being better, only about
+   * which component decided their order.
+   */
+  reranked: boolean;
+  /**
+   * Why `reranked` is what it is. Three states a caller has to tell apart:
+   * no service installed (`available: false` — nothing to switch on), a
+   * service switched off in settings, and a service switched on that did not
+   * answer. Only the last one is a fault, and without these two flags
+   * `reranked: false` looks identical in all three.
+   */
+  rerank: { available: boolean; enabled: boolean; min_score: number | null };
   took_ms: number;
 };
 
@@ -1881,6 +2090,9 @@ export async function searchWithDiagnostics(
   let bestSemantic: number | null = null;
   let armsUsed: ('text' | 'semantic')[] = [];
   let failures: ArmFailure[] = [];
+  // Only hybrid fuses arms, so only hybrid has an order for a reranker to
+  // improve; text and semantic report false rather than omitting the field.
+  let reranked = false;
 
   if (mode === 'text') {
     raw = await textSearch(query, fetchLimit, filters);
@@ -1896,6 +2108,7 @@ export async function searchWithDiagnostics(
     bestSemantic = run.bestSemantic;
     armsUsed = run.armsUsed;
     failures = run.failures;
+    reranked = run.reranked;
   }
 
   const [threshold, index] = await Promise.all([
@@ -1914,6 +2127,14 @@ export async function searchWithDiagnostics(
       embedding_model: modelKey,
       index,
       scoped: hasFilters(filters),
+      reranked,
+      rerank: {
+        available: rerankAvailable(),
+        enabled: (await rerankConfig()) !== null,
+        // Non-null means results BELOW it were removed — an empty response
+        // then says "nothing cleared the bar", not "the vault holds nothing".
+        min_score: await getRerankMinScore(),
+      },
       took_ms: Date.now() - started,
     },
   };
@@ -1989,6 +2210,11 @@ function project(
     if (r.created_at !== undefined) base.created_at = r.created_at;
     if (r.question_echo !== undefined) base.question_echo = r.question_echo;
     if (r.index_pending !== undefined) base.index_pending = r.index_pending;
+    // Kept outside the explain gate, unlike the raw arm scores: when a
+    // reranker moved a hit, the caller is looking at an order rank fusion did
+    // not produce, and hiding the reason for it makes the response harder to
+    // read rather than shorter. Absent entirely when reranking did not run.
+    if (r.rerank_score !== undefined) base.rerank_score = r.rerank_score;
 
     if (explain) {
       if (r.text_score !== undefined) base.text_score = r.text_score;

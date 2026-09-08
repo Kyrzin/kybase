@@ -50,6 +50,33 @@ services:
       timeout: 5s
       retries: 12
 
+  # Optional cross-encoder reranker. Not started by default — bring it up with
+  #   docker compose --profile rerank up -d
+  # and point the app at it with KYBASE_RERANK_URL. Search works without it;
+  # see lib/rerank.ts for what it changes and what it costs (a full model pass
+  # per passage, on CPU measured in hundreds of milliseconds EACH).
+  reranker:
+    profiles: ["rerank"]
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+    restart: unless-stopped
+    mem_limit: 2048m
+    volumes:
+      - kybase-rerank:/data
+    environment:
+      HF_HOME: /data
+    # --auto-truncate: passages longer than the model's window are cut rather
+    # than rejected — without it the service answers 413 and reranking is off
+    # for exactly the long notes that need reordering most.
+    command:
+      - --model-id
+      - ${RERANK_MODEL:-cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
+      - --auto-truncate
+      - --max-client-batch-size
+      - "64"
+    healthcheck:
+      test: ["CMD-SHELL", "exit 0"]
+      interval: 30s
+
   kybase:
     # Prebuilt multi-arch image (amd64/arm64) from GitHub Packages.
     # `docker compose pull` fetches it; `--build` rebuilds from source instead.
@@ -72,6 +99,13 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       GOOGLE_MODEL: ${GOOGLE_MODEL:-text-embedding-004}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Empty = reranking off, which is the default. Set it to the reranker
+      # service (http://reranker:80) to have a cross-encoder decide the order
+      # of the results rank fusion found.
+      KYBASE_RERANK_URL: ${KYBASE_RERANK_URL:-}
+      KYBASE_RERANK_TOP_N: ${KYBASE_RERANK_TOP_N:-}
+      KYBASE_RERANK_PASSAGES_PER_NOTE: ${KYBASE_RERANK_PASSAGES_PER_NOTE:-}
+      KYBASE_RERANK_TIMEOUT_MS: ${KYBASE_RERANK_TIMEOUT_MS:-}
     depends_on:
       db:
         condition: service_healthy
@@ -79,3 +113,4 @@ services:
 volumes:
   kybase-db:
   kybase-ollama:
+  kybase-rerank:

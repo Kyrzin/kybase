@@ -109,6 +109,8 @@ export async function setSetting(key: string, value: string): Promise<void> {
   cachedEmbeddingConfig = null;
   cachedTagWeights = null;
   cachedFolderWeights = null;
+  cachedRerankEnabled = null;
+  cachedRerankMinScore = null;
 }
 
 // Which text search configs notes_search_vector_trigger/search_notes_fts
@@ -132,6 +134,66 @@ export async function getFtsLanguages(): Promise<string[]> {
 // itself (it must not be able to break every note write on a typo).
 export async function setFtsLanguages(languages: string[]): Promise<void> {
   await setSetting('fts_languages', languages.map((s) => s.trim()).filter(Boolean).join(','));
+}
+
+// Whether the configured reranker is actually used (lib/rerank.ts). The
+// service URL stays an env var — that is infrastructure, "is a reranker
+// installed" — while this is the decision to use it, which belongs where a
+// user can change it: no redeploy, and it applies to MCP and the REST API at
+// once, not just the browser tab that flipped it.
+//
+// Defaults to ON when a URL is configured. Setting the URL is already the
+// deliberate act; making someone then find a second switch to get any effect
+// would just look broken.
+//
+// Cached on the same short TTL and for the same reason as the weights below:
+// every hybrid search reads it.
+const RERANK_CACHE_TTL_MS = 5_000;
+let cachedRerankEnabled: { value: boolean; expiresAt: number } | null = null;
+
+export async function getRerankEnabled(): Promise<boolean> {
+  if (cachedRerankEnabled && Date.now() < cachedRerankEnabled.expiresAt) {
+    return cachedRerankEnabled.value;
+  }
+  const raw = await getSetting('rerank_enabled');
+  const value = raw === null ? true : raw === 'true';
+  cachedRerankEnabled = { value, expiresAt: Date.now() + RERANK_CACHE_TTL_MS };
+  return value;
+}
+
+export async function setRerankEnabled(enabled: boolean): Promise<void> {
+  await setSetting('rerank_enabled', enabled ? 'true' : 'false');
+}
+
+// Optional floor on the reranker's score, below which a hit is dropped.
+//
+// Absent by default, and deliberately not given a shipped constant. A cross
+// encoder's output is not a calibrated probability: the scale belongs to the
+// model, so a number measured against one model on one vault is meaningless
+// against another. This is the same conclusion the semantic cutoff reached
+// (lib/embeddings.ts records why that one was withdrawn), and the same shape
+// of answer: no default, and a place to put a number you measured yourself.
+//
+// It is a real filter — under it a search can legitimately return nothing —
+// which is what makes it useful and why it must be a deliberate choice.
+let cachedRerankMinScore: { value: number | null; expiresAt: number } | null = null;
+
+export async function getRerankMinScore(): Promise<number | null> {
+  if (cachedRerankMinScore && Date.now() < cachedRerankMinScore.expiresAt) {
+    return cachedRerankMinScore.value;
+  }
+  const raw = await getSetting('rerank_min_score');
+  const n = raw === null ? NaN : Number(raw);
+  // Re-validated on read, like the weights: a bad stored value degrades to
+  // "no floor", never to a filter that silently empties every search.
+  const value = Number.isFinite(n) && n > 0 && n < 1 ? n : null;
+  cachedRerankMinScore = { value, expiresAt: Date.now() + RERANK_CACHE_TTL_MS };
+  return value;
+}
+
+/** null clears the floor. */
+export async function setRerankMinScore(score: number | null): Promise<void> {
+  await setSetting('rerank_min_score', score === null ? '' : String(score));
 }
 
 export type BandOverride = { gate?: number };

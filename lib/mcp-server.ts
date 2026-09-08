@@ -1035,6 +1035,11 @@ export function createMcpServer(): McpServer {
     if (r.index_pending) out.index_pending = true;
     if (r.section) out.section = r.section;
     if (r.content_length !== undefined) out.content_length = r.content_length;
+    // Shipped without explain, unlike the raw arm scores: when a cross-encoder
+    // reordered the page, this is the number that decided the order the
+    // caller is reading, and the order is not explainable from the other
+    // fields. Absent whenever reranking did not run.
+    if (r.rerank_score !== undefined) out.rerank_score = round3(r.rerank_score);
     if (explain) {
       // Hybrid results carry text_score/semantic_score directly (rrfMerge
       // sets them per contributing arm). A plain (non-hybrid) result has no
@@ -1122,6 +1127,20 @@ export function createMcpServer(): McpServer {
     'non-zero value there explains a thin semantic arm rather than an empty vault. ' +
     'question_echo:true means the note LISTS your question without answering it (an FAQ or agenda ' +
     'of questions); treat it as a pointer to the topic, never as the answer. ' +
+    'When reranked:true, prefer type="text" for a term you already know is written in your notes ' +
+    'verbatim — an identifier, a filename, a code symbol, a product name. Reranking judges a ' +
+    'passage by meaning, and a model that has never seen your vault can rank a passage that reads ' +
+    'as more on-topic above the note that literally contains your term — a hit carrying most of ' +
+    'your query\'s words can end up below one carrying far fewer. Only ' +
+    'exact:true hits are protected from this. So hybrid remains the right default when you do not ' +
+    'know the wording, and text is the better tool when you do — check `coverage` on a hybrid ' +
+    'response to see whether the top hit actually contains what you typed. ' +
+    'When the response carries reranked:true, a cross-encoder chose this order instead of rank ' +
+    'fusion, and each hit\'s rerank_score is its best passage\'s score. That score is a model\'s ' +
+    'opinion about ONE passage of the note, ordering this response only — it is not a confidence ' +
+    'value, not comparable between queries, and not evidence the note answers you. reranked:false ' +
+    'alongside it means the reranker was asked and did not answer, so you are reading the ordinary ' +
+    'fused order. Read the text either way. ' +
     'Pass explain:true to also see each hit\'s raw text_score/semantic_score/rrf_score and created_at ' +
     '— only useful for debugging the ranking itself, omitted by default to keep responses short.',
     {
@@ -1208,6 +1227,12 @@ export function createMcpServer(): McpServer {
             ...(diagnostics.arms_unavailable.length > 0
               ? { arms_unavailable: diagnostics.arms_unavailable }
               : {}),
+            // Whether a cross-encoder decided this order instead of rank
+            // fusion. Absent on a vault with no reranker installed, so those
+            // responses stay the size they were. Present and false only when
+            // one is switched on and did not answer — a fault worth seeing,
+            // because the results are then the un-reranked ones.
+            ...(diagnostics.rerank.enabled ? { reranked: diagnostics.reranked } : {}),
           }, null, 2),
         }],
       };

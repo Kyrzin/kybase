@@ -447,7 +447,8 @@ export function tableHeaderAbove(content: string, offset: number): { text: strin
  * Matching is plain case-insensitive substring on words of three characters
  * or more. Deliberately no stemmer: the point is to survive inflection
  * cheaply, and a Russian query word usually appears in the text in a form
- * that contains it or is contained by it ("уборки" in "до уборки"). A
+ * that contains it or is contained by it — an inflected form and the form
+ * in the text usually share a prefix long enough to connect them. A
  * stemmer here would have to agree with Postgres's, and two tokenizers that
  * must agree is a bug this file has paid for before — this one is allowed to
  * be approximate because the worst case is the excerpt we already showed.
@@ -489,7 +490,8 @@ export function bestPassageOffset(content: string, query: string): { start: numb
       // A heading is a hint about which section, not the answer itself, so
       // body text always wins over it. It is still kept as a fallback: when a
       // question's only echo in the passage is the heading it lives under
-      // ("Следующий шаг" for "какой следующий шаг"), that heading is the one
+      // (a "Next steps" heading answering "what are the next steps"), that
+      // heading is the one
       // honest anchor available, and ignoring it drops the window back to the
       // start of the passage — the failure this whole function replaces.
       if (/^\s*#{1,6}\s/.test(line)) {
@@ -1126,8 +1128,9 @@ async function computeTextCoverage(words: string[], ids: string[]): Promise<Map<
     const tsqExpr = [`websearch_to_tsquery('simple', unaccent(wt.word))`, ...langExprs].join(' || ');
     const idsParamIndex = languages.length + 2;
     // Words are weighted by how rare they are in THIS vault, not counted
-    // equally. Measured live 2026-08-20: "почему нельзя использовать cadvisor"
-    // returned notes matching only "почему"/"нельзя" at coverage 0.75, while
+    // equally. Measured live 2026-08-20: a natural-language question about
+    // cadvisor returned notes matching only its two filler words at coverage
+    // 0.75, while
     // the one note containing `cadvisor` — the only word in the query that
     // says anything — sat below them. Counting terms equally hands a natural
     // question to whichever of its filler words is most common in the vault.
@@ -1242,8 +1245,8 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // A natural question that the strict pass could not satisfy: instead of
   // leaving the answer to whichever filler word is commonest here, search the
   // query's rarest words as a strict query of their own. Measured live
-  // 2026-08-20: "почему нельзя использовать cadvisor" returned notes matching
-  // only "почему"/"нельзя" while the note containing `cadvisor` never entered
+  // 2026-08-20: a natural-language question about cadvisor returned notes
+  // matching only its filler words, while the note containing `cadvisor` never entered
   // the candidate set — and the bare word `cadvisor` found it instantly. The
   // agent had learned to strip its own questions down to keywords before
   // asking; that is work the search should be doing.
@@ -1295,8 +1298,8 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // `Log Rotation einrichten` were already ordered right before any of this).
   //
   // Without the second guard the rule reaches queries it has no business
-  // deciding. Counter-test, measured live: for `как добавить новый инструмент
-  // MCP`, a note that merely QUOTES that question in a list of test prompts
+  // deciding. Counter-test, measured live: for `how do I add a new MCP
+  // tool`, a note that merely QUOTES that question in a list of test prompts
   // beat the runbook that answers it — despite the runbook's ts_rank being
   // 4.4x higher. Containing a sentence is not the same as being about it;
   // containing a filename essentially is.
@@ -1313,7 +1316,8 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   //     of a generated id, which no prose word has.
   //
   // Both restricted to printable ASCII, and that is a deliberate, narrow
-  // limitation rather than an oversight: `какой-то` and `well-known` carry a
+  // limitation rather than an oversight: an ordinary hyphenated word in any
+  // language, `well-known` among them, carries a
   // delimiter too, and promoting an ordinary hyphenated word would hand the
   // top band to every note that happens to use it. Identifiers are ASCII in
   // practice; the multi-word rule above stays language-neutral and is what

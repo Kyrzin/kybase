@@ -78,7 +78,7 @@ export type IndexedGraph = {
  * A node's own array position IS the index edges reference — an `i` field
  * repeating that position inside each node object added ~1000 chars (~6% of
  * a live get_graph response) for a value a consumer never needs to read
- * (found live 2026-08-17, roadmap "мелочи" item).
+ * (found live 2026-08-17, roadmap's small-fixes item).
  */
 export function indexedForm(graph: {
   nodes: GraphNode[];

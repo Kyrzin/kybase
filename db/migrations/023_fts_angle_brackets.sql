@@ -21,12 +21,12 @@
 -- line matched at the 'and' tier.
 --
 -- Latin script only. The parser needs ASCII-ish content to recognize a tag,
--- so «сделал робастнее» survives unaccent intact — which is why the symptom
+-- so Cyrillic inside guillemets survives unaccent intact — which is why the symptom
 -- shows up in the German and English notes and not in the Russian ones.
 --
 -- Fixing this also fixes an OLDER, independent defect that has nothing to do
 -- with unaccent: anything inside angle brackets was already being dropped.
--- 'Promise<void> и <div> и Array<T>' indexed as promise/array/и/… — void,
+-- 'Promise<void> and <div> and Array<T>' indexed as promise/array/and/… — void,
 -- div and T were never findable. In a vault this full of TypeScript and n8n
 -- notes that is not a corner case.
 --

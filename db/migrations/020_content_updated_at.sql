@@ -20,8 +20,8 @@
 -- string inside it". A vault where one note has 23 backlinks makes every
 -- rename of that note claim 23 unrelated notes were "updated" — pure noise
 -- for anyone trying to reconstruct what actually happened (2026-08-17,
--- discussed with the owner against the roadmap's earlier "Отклонено
--- сознательно" rejection of a separate column — that rejection assumed
+-- discussed with the owner against the roadmap's earlier deliberate
+-- rejection of a separate column — that rejection assumed
 -- updated_at's six consumers all wanted the same semantics; they split
 -- into two groups with genuinely different needs, so the rejection's own
 -- premise doesn't hold. restore_note was checked the same day and does not

@@ -54,8 +54,9 @@ export type EmbedTask = 'query' | 'document';
 // Set against real use, the shipped number failed in both directions at once:
 //
 //   Recall it cost — measured 2026-08-20 on a separate 32-note ru/de/fr/en
-//   corpus, embeddinggemma at 0.349: "оркестрация контейнеров" returned
-//   NOTHING while the vault held both a Kubernetes and a Docker Compose note;
+//   corpus, embeddinggemma at 0.349: a Russian query for "container
+//   orchestration" returned NOTHING while the vault held both a Kubernetes
+//   and a Docker Compose note;
 //   "wine tasting notes" returned NOTHING while a German note on Mosel
 //   viticulture sat there. Two false negatives in four probes, and both were
 //   cross-language — the exact case semantic search exists to serve, since a

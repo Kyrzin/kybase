@@ -1,0 +1,205 @@
+// lib/rerank.ts — optional cross-encoder reranking of the fused result page.
+//
+// Retrieval decides WHICH notes come back; this decides which of them goes
+// first. The two are different problems, and rank fusion is weak at the
+// second one: it can only see how each arm ranked a note, never whether the
+// note's text actually answers the question. A cross-encoder reads the query
+// and the passage together and scores that pair directly.
+//
+// Off unless KYBASE_RERANK_URL is set. With it unset nothing here runs and
+// search behaves exactly as it did before — the frozen baseline stays the
+// default until reranking is shown to earn its place, on the owner's own
+// vault, against the queries it actually gets asked.
+//
+// Cost is the reason for that caution, not caution for its own sake. A
+// cross-encoder scores every (query, passage) pair through a full transformer
+// pass, so its cost is linear in the number of passages and paid on EVERY
+// search — measured 2026-09-08 on the deployment this was built for (4 shared
+// cores, no GPU, mmarco-mMiniLMv2-L12 behind text-embeddings-inference):
+// roughly 190 ms per passage, i.e. ~1.9 s for ten. Search itself runs in
+// ~280 ms. The defaults below are chosen to keep that bounded, and a caller
+// that wants more passages is choosing to wait for them.
+//
+// Wire protocol is text-embeddings-inference's /rerank: POST {query, texts}
+// -> [{index, score}]. Any service answering that shape works.
+import { getRerankEnabled } from './settings';
+
+export type RerankConfig = {
+  url: string;
+  /** How many of the fused page's notes are rescored. The rest keep their order below them. */
+  topN: number;
+  /** Passages sent per note. More costs a full model pass each; see the timing note above. */
+  perNote: number;
+  timeoutMs: number;
+  /** How many top results get their excerpt chosen by the model too. 0 disables it. */
+  excerptTop: number;
+};
+
+const num = (v: string | undefined, fallback: number) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+/**
+ * Whether a reranker service is installed at all — env only, no database
+ * read. Separate from rerankConfig so a caller can tell "nothing to turn on"
+ * from "turned off", which is the difference between a missing feature and a
+ * deliberate choice, and the settings UI has to show them differently.
+ */
+export function rerankAvailable(): boolean {
+  return !!process.env.KYBASE_RERANK_URL?.trim();
+}
+
+/**
+ * null = do not rerank: either no service is configured (the shipped default,
+ * where nothing here runs at all) or the setting turns it off.
+ */
+export async function rerankConfig(): Promise<RerankConfig | null> {
+  const url = process.env.KYBASE_RERANK_URL?.trim();
+  if (!url) return null;
+  if (!(await getRerankEnabled())) return null;
+  return {
+    url: url.replace(/\/+$/, ''),
+    topN: Math.min(50, num(process.env.KYBASE_RERANK_TOP_N, 10)),
+    perNote: Math.min(5, num(process.env.KYBASE_RERANK_PASSAGES_PER_NOTE, 2)),
+    // Deliberately longer than any other outbound call in this codebase: on
+    // CPU the model genuinely takes seconds, and a timeout tuned for a fast
+    // service would abort every real request and silently disable the thing
+    // it was meant to protect.
+    timeoutMs: num(process.env.KYBASE_RERANK_TIMEOUT_MS, 20000),
+    excerptTop: Math.min(5, Math.max(0, Number(process.env.KYBASE_RERANK_EXCERPT_TOP ?? 1) || 0)),
+  };
+}
+
+// Excerpt refinement budget. Both are per note and paid only for the first
+// `excerptTop` results, because the cost is another model pass each and the
+// hit a reader actually opens is the first one.
+export const EXCERPT_CHUNK_CAP = 8;
+const EXCERPT_WINDOW_CAP = 6;
+const EXCERPT_WINDOW_CHARS = 450;
+
+/**
+ * Overlapping slices of a passage, so the excerpt can be chosen by the model
+ * rather than by word overlap.
+ *
+ * Overlap is half a window: a fact that straddles a boundary would otherwise
+ * be split across two windows and score poorly in both — which is the failure
+ * being fixed here, one level down (a shown excerpt that stopped four words
+ * before the token it was asked for).
+ */
+export function windowsOf(text: string, size = EXCERPT_WINDOW_CHARS, cap = EXCERPT_WINDOW_CAP): string[] {
+  if (text.length <= size) return [text];
+  const out: string[] = [];
+  const stride = Math.floor(size / 2);
+  for (let i = 0; i < text.length && out.length < cap; i += stride) out.push(text.slice(i, i + size));
+  return out;
+}
+
+// A passage longer than the model's window is truncated by the model anyway
+// (text-embeddings-inference needs --auto-truncate for that, and returns 413
+// without it). Cutting here first keeps the request small and makes the
+// truncation point ours rather than a deployment flag's.
+const MAX_PASSAGE_CHARS = 1200;
+
+export type RerankPassage = {
+  noteId: string;
+  /** What is sent to the model: heading prefixed, truncated to its window. */
+  text: string;
+  /** The chunk's own body, kept verbatim so the winning passage can become the excerpt. */
+  content: string;
+};
+
+/**
+ * Which passages represent a note to the reranker.
+ *
+ * The shown excerpt is NOT used: it is a ~300-character window built for a
+ * human to read, and the fact that answers the query is routinely outside it.
+ * Reranking that window would score the excerpt, not the note. Chunks are the
+ * note's own source text, which is what the question has to be judged against.
+ *
+ * Selection is by query-word overlap because the alternative — sending every
+ * chunk — is unaffordable: the top ten notes of a real vault carry 100-230
+ * chunks between them, which at CPU speed is minutes, not seconds. The cost
+ * of choosing is a real one and worth stating plainly: if the answer sits in
+ * a chunk that shares no words with the question, this hands the reranker a
+ * passage that cannot answer it, and the note loses on a text it was never
+ * asked about. Raising perNote widens that net at a full model pass each.
+ */
+export function selectPassages(
+  noteId: string,
+  chunks: { heading: string | null; content: string }[],
+  query: string,
+  perNote: number
+): RerankPassage[] {
+  // \p{L}\p{N} with /u, not \w: JavaScript's \w is ASCII-only, so splitting a
+  // Cyrillic query on \W+ shatters it into empty strings and every chunk
+  // scores zero — the selection would silently degrade to "always the first
+  // chunk" on exactly the languages this reranker is here to serve.
+  const words = [...new Set(query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 3))];
+  const scored = chunks.map((c) => {
+    const hay = ((c.heading ?? '') + '\n' + c.content).toLowerCase();
+    return { c, hits: words.filter((w) => hay.includes(w)).length };
+  });
+  // Ties keep document order, so a note whose chunks all score zero is
+  // represented by its opening rather than by an arbitrary one.
+  scored.sort((a, b) => b.hits - a.hits);
+  return scored.slice(0, perNote).map(({ c }) => ({
+    noteId,
+    text: ((c.heading ? c.heading + '\n' : '') + c.content).slice(0, MAX_PASSAGE_CHARS),
+    content: c.content,
+  }));
+}
+
+/**
+ * A note's verdict: its best passage's score, and that passage itself — the
+ * caller shows it, because the passage that earned the rank is the one the
+ * reader needs to see. Without it a note can be promoted for a paragraph deep
+ * inside it and still display its own introduction.
+ */
+export type RerankHit = { score: number; content: string };
+
+/**
+ * Scores passages against the query and returns the best score per note.
+ *
+ * Returns null on any failure — an unreachable service, a timeout, a
+ * malformed response. Null means "no opinion", and the caller keeps the order
+ * fusion produced. Reranking is an improvement to ordering, never a
+ * dependency of search: the same rule the text and semantic arms already
+ * follow (see hybridRun's allSettled).
+ */
+export async function scorePassages(
+  query: string,
+  passages: RerankPassage[],
+  cfg: RerankConfig
+): Promise<Map<string, RerankHit> | null> {
+  if (passages.length === 0) return null;
+  try {
+    const res = await fetch(`${cfg.url}/rerank`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, texts: passages.map((p) => p.text) }),
+      signal: AbortSignal.timeout(cfg.timeoutMs),
+    });
+    if (!res.ok) {
+      console.warn(`[rerank] ${res.status} from ${cfg.url}, keeping fusion order`);
+      return null;
+    }
+    const scored: unknown = await res.json();
+    if (!Array.isArray(scored)) return null;
+    const best = new Map<string, RerankHit>();
+    for (const row of scored as { index?: number; score?: number }[]) {
+      const p = typeof row?.index === 'number' ? passages[row.index] : undefined;
+      if (!p || typeof row.score !== 'number') continue;
+      const prior = best.get(p.noteId);
+      // A note is as good as its best passage. Averaging would punish long
+      // notes for the chunks that merely aren't about the question.
+      if (prior === undefined || row.score > prior.score) {
+        best.set(p.noteId, { score: row.score, content: p.content });
+      }
+    }
+    return best.size > 0 ? best : null;
+  } catch (err) {
+    console.warn(`[rerank] unavailable (${err instanceof Error ? err.message : String(err)}), keeping fusion order`);
+    return null;
+  }
+}

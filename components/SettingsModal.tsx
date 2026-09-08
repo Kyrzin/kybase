@@ -48,6 +48,13 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   const [importRunning, setImportRunning]     = useState(false);
   const [settingsTab, setSettingsTab]         = useState<'embeddings' | 'access'>('embeddings');
   const [keyStatus, setKeyStatus] = useState<{ google: string; openai: string } | null>(null);
+  // null until /api/settings answers — the toggle must not flicker through a
+  // guessed state, because it changes how every search behaves.
+  const [rerank, setRerank] = useState<{ available: boolean; enabled: boolean } | null>(null);
+  const [rerankSaving, setRerankSaving] = useState(false);
+  // Text, not number: the field has to be able to be empty (= no floor), and
+  // an empty number input is indistinguishable from a zero.
+  const [rerankMinScore, setRerankMinScore] = useState('');
   const [oauthClients, setOauthClients]       = useState<OAuthClient[]>([]);
   const [shares, setShares]                   = useState<ShareItem[]>([]);
   const [trash, setTrash]                     = useState<TrashedNote[]>([]);
@@ -59,6 +66,8 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
       setSettingsOllamaModel(data.ollamaModel ?? 'embeddinggemma');
       setSettingsStatus(null);
       setKeyStatus({ google: data.googleKeyStatus ?? 'unset', openai: data.openaiKeyStatus ?? 'unset' });
+      setRerank({ available: !!data.rerankAvailable, enabled: !!data.rerankEnabled });
+      setRerankMinScore(data.rerankMinScore === null || data.rerankMinScore === undefined ? '' : String(data.rerankMinScore));
     });
     apiFetch('/api/oauth/clients')
       .then(r => (r.ok ? r.json() : []))
@@ -73,6 +82,38 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
       .then(d => { if (Array.isArray(d)) setTrash(d); })
       .catch(() => {});
   }, [apiFetch]);
+
+  // Saved on click, not on the modal's Save button: this is a switch, and a
+  // switch that needs a second confirmation to take effect reads as broken.
+  // Optimistic, then corrected from the server on failure.
+  const toggleRerank = async (next: boolean) => {
+    const prev = rerank;
+    setRerank(r => (r ? { ...r, enabled: next } : r));
+    setRerankSaving(true);
+    const res = await apiFetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rerankEnabled: next }),
+    }).catch(() => null);
+    setRerankSaving(false);
+    if (!res || !res.ok) setRerank(prev);
+  };
+
+  // Blank clears the floor. Anything outside (0,1) is rejected by the API
+  // and the field reverts, rather than being silently stored as "no floor".
+  const saveRerankMinScore = async () => {
+    const raw = rerankMinScore.trim();
+    const value = raw === '' ? null : Number(raw);
+    if (value !== null && !(Number.isFinite(value) && value > 0 && value < 1)) return;
+    setRerankSaving(true);
+    const res = await apiFetch('/api/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rerankMinScore: value }),
+    }).catch(() => null);
+    setRerankSaving(false);
+    if (!res || !res.ok) setRerankMinScore('');
+  };
 
   const revokeClient = async (id: string) => {
     const res = await apiFetch(`/api/oauth/clients/${id}`, { method: 'DELETE' });
@@ -306,6 +347,50 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
                 <label style={{ fontSize: 12, color: '#a6adc8', display: 'block', marginBottom: 6 }}>OpenAI API Key</label>
                 <input type="password" value={settingsOpenaiKey} onChange={e => setSettingsOpenaiKey(e.target.value)} placeholder="sk-… (leave blank to keep current)" style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', marginBottom: 16, outline: 'none' }} />
               </>
+            )}
+
+            {rerank?.available && (
+              <div style={{ background: '#11111b', border: '1px solid #313244', borderRadius: 6, padding: '10px 12px', marginBottom: 16 }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: rerankSaving ? 'wait' : 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={rerank.enabled}
+                    disabled={rerankSaving}
+                    onChange={e => toggleRerank(e.target.checked)}
+                    style={{ width: 15, height: 15, accentColor: '#89b4fa', cursor: 'inherit', flexShrink: 0 }}
+                  />
+                  <span style={{ fontSize: 13, color: '#cdd6f4' }}>Rerank search results</span>
+                </label>
+                <div style={{ fontSize: 11, color: '#6c7086', marginTop: 6, lineHeight: 1.5 }}>
+                  A cross-encoder reads your question together with each candidate passage and
+                  reorders the results. It changes their ORDER only — it cannot find a note the
+                  search missed. Costs seconds per search on CPU. Applies to the API and connected
+                  agents too, not just this window.
+                </div>
+                {rerank.enabled && (
+                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #313244' }}>
+                    <label style={{ fontSize: 12, color: '#a6adc8', display: 'block', marginBottom: 6 }}>
+                      Minimum score (optional)
+                    </label>
+                    <input
+                      value={rerankMinScore}
+                      onChange={e => setRerankMinScore(e.target.value)}
+                      onBlur={saveRerankMinScore}
+                      placeholder="empty = keep every result"
+                      inputMode="decimal"
+                      style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', outline: 'none' }}
+                    />
+                    <div style={{ fontSize: 11, color: '#6c7086', marginTop: 6, lineHeight: 1.5 }}>
+                      Results the reranker scores below this are dropped, so a question your notes
+                      don&apos;t answer can come back empty instead of returning the nearest
+                      unrelated thing. Left empty by default on purpose: the scale belongs to the
+                      reranker model, so there is no number that is right for every vault. Look at
+                      the scores on a question you know the answer to and one you know is absent,
+                      then pick something between them.
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
 
             <div style={{ fontSize: 11, color: '#6c7086', background: '#11111b', borderRadius: 6, padding: '8px 10px', marginBottom: 16 }}>

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
-import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages, getTagWeights, setTagWeights, getFolderWeights, setFolderWeights, getEmbeddingBands, setEmbeddingBands, getProviderKeyHealth } from '@/lib/settings';
+import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages, getTagWeights, setTagWeights, getFolderWeights, setFolderWeights, getEmbeddingBands, setEmbeddingBands, getProviderKeyHealth, getRerankEnabled, setRerankEnabled, getRerankMinScore, setRerankMinScore } from '@/lib/settings';
+import { rerankAvailable } from '@/lib/rerank';
 import { z } from 'zod';
 
 const UpdateSettingsSchema = z.object({
@@ -35,6 +36,16 @@ const UpdateSettingsSchema = z.object({
     gate:        z.number().min(0).max(0.999).optional(),
     signalFloor: z.number().min(0.001).max(0.999).optional(),
   })).optional(),
+  // Use the configured reranker, or don't. Whether one EXISTS is an env var
+  // (lib/rerank.ts) — this is only the decision to use it, and it is a
+  // setting rather than a redeploy because it is the kind of thing you want
+  // to switch off the moment a search feels wrong.
+  rerankEnabled: z.boolean().optional(),
+  // Drop reranked hits scoring below this. null clears it. No shipped
+  // default and no suggested value: the scale belongs to the reranker model,
+  // so a number that separates signal from noise on one vault says nothing
+  // about another (lib/settings.ts).
+  rerankMinScore: z.number().gt(0).lt(1).nullable().optional(),
 });
 
 // Auth is proxy.ts.ts (session cookie or master-secret bearer) — this
@@ -43,8 +54,8 @@ const UpdateSettingsSchema = z.object({
 // stopped sending it (see the session-cookie change): the browser started
 // getting 401s here even though proxy.ts had already let it through.
 export async function GET() {
-  const [cfg, ftsLanguages, tagWeights, folderWeights, embeddingBands, keyHealth] = await Promise.all([
-    getEmbeddingConfig(), getFtsLanguages(), getTagWeights(), getFolderWeights(), getEmbeddingBands(), getProviderKeyHealth(),
+  const [cfg, ftsLanguages, tagWeights, folderWeights, embeddingBands, keyHealth, rerankEnabled, rerankMinScore] = await Promise.all([
+    getEmbeddingConfig(), getFtsLanguages(), getTagWeights(), getFolderWeights(), getEmbeddingBands(), getProviderKeyHealth(), getRerankEnabled(), getRerankMinScore(),
   ]);
   return NextResponse.json({
     provider: cfg.provider,
@@ -63,6 +74,12 @@ export async function GET() {
     tagWeights,
     folderWeights,
     embeddingBands,
+    // Shipped as a pair: the toggle means nothing without a service behind
+    // it, and the UI has to say "not installed" rather than showing a switch
+    // that changes nothing.
+    rerankAvailable: rerankAvailable(),
+    rerankEnabled,
+    rerankMinScore,
   });
 }
 
@@ -88,6 +105,11 @@ export async function PUT(req: NextRequest) {
   if (body.folderWeights) await setFolderWeights(body.folderWeights);
   // Merge, not replace: a vault that has measured two models keeps both.
   if (body.embeddingBands) await setEmbeddingBands({ ...(await getEmbeddingBands()), ...body.embeddingBands });
+  // Explicit undefined check, not truthiness: `false` is the value that
+  // actually matters here, and `if (body.rerankEnabled)` would silently
+  // refuse to ever turn it off.
+  if (body.rerankEnabled !== undefined) await setRerankEnabled(body.rerankEnabled);
+  if (body.rerankMinScore !== undefined) await setRerankMinScore(body.rerankMinScore);
 
   // Mark all live notes for reindex when provider changes. Used to also
   // kick off /api/admin/reindex itself right here — a single Save click

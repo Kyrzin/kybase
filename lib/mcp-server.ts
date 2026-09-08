@@ -540,7 +540,7 @@ export function createMcpServer(): McpServer {
       content:     z.string().max(MAX_NOTE_CONTENT_CHARS).default(''),
       folder_id:   z.string().uuid().nullable().optional(),
       folder_path: z.string().optional()
-        .describe('Folder path (e.g. "02. Личные Проекты/Kybase") as alternative to folder_id'),
+        .describe('Folder path (e.g. "Projects/Kybase") as alternative to folder_id'),
       tags:        z.array(z.string()).default([]),
     },
     async ({ title, content: rawContent, folder_id: rawFolderId, folder_path, tags }) => {
@@ -1105,6 +1105,11 @@ export function createMcpServer(): McpServer {
     'Filters: folder_id, tag, created_after/before (when a note was made), updated_after/before ' +
     '(when its own content/title/folder/tags last actually changed — a rename elsewhere rewriting ' +
     'a [[link]] to this note does not count) — these are NOT interchangeable. ' +
+    'Dates filter, they do not rank: a note edited an hour ago and one untouched for months ' +
+    'compete on relevance alone, and nothing here prefers the fresher one. So for "what is the ' +
+    'LATEST state of X" this is the wrong first call — list_notes already sorts by recency, ' +
+    'newest first, and takes updated_after. Search finds a topic; list_notes finds what changed. ' +
+    'A question about the current state of something usually needs both. ' +
     'Every semantic/hybrid response includes threshold/best_score/pending_embeddings so you can ' +
     'tell "nothing was found" from "a configured filter removed it" from "embeddings not generated ' +
     'yet", even when results came back non-empty. ' +

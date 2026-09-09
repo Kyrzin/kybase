@@ -5,7 +5,8 @@ import { z } from 'zod';
 import { query, queryOne, withTransaction, isUniqueViolation, FOLDER_REPARENT_LOCK_KEY } from './db';
 import { softDeleteNote, restoreNote, trashFolderNotes, TRASH_RETENTION_DAYS } from './trash';
 import { escapeLike } from './sql';
-import { makeExcerpt, searchWithDiagnostics, SearchUnavailableError, type SearchResult, type HybridSearchResult, type SearchDiagnostics } from './search';
+import { backlinksTo, neighborsOf } from './note-links';
+import { searchWithDiagnostics, SearchUnavailableError, type SearchResult, type HybridSearchResult, type SearchDiagnostics } from './search';
 import { indexNoteAsync } from './indexing';
 import { extractAllWikilinks } from './wikilinks';
 import { rewriteBacklinks } from './rename-links';
@@ -1450,37 +1451,37 @@ export function createMcpServer(): McpServer {
       // real title — findNoteByTitle gives a partial/fuzzy title the same
       // exact->prefix->substring forgiveness get_note already has (and
       // throws its own "matches N notes"/"not found" error on the way).
-      const resolvedTitle = id
-        ? (await queryOne<{ title: string }>('select title from notes where id = $1 and deleted_at is null', [id]))?.title
-        : (await findNoteByTitle<{ title: string }>(title!, 'title')).title;
-      if (!resolvedTitle) throw new Error('Note not found');
+      const noteId = id
+        ? (await queryOne<{ id: string }>('select id from notes where id = $1 and deleted_at is null', [id]))?.id
+        : (await findNoteByTitle<{ id: string }>(title!, 'id')).id;
+      if (!noteId) throw new Error('Note not found');
 
-      const [data, paths] = await Promise.all([
-        query<{ id: string; title: string; content: string; folder_id: string | null }>(
-          'select id, title, content, folder_id from notes where content ilike $1 and deleted_at is null',
-          [`%[[${escapeLike(resolvedTitle)}%`]
-        ),
-        folderPathMap(),
-      ]);
+      // Link occurrences come from the stored index (migration 031), so this
+      // no longer loads and re-parses the content of every note that happens
+      // to contain the bracket text. Several links from the same note are
+      // collapsed to one result carrying the first one's surrounding text —
+      // the previous shape, which callers page through.
+      const [links, paths] = await Promise.all([backlinksTo(noteId), folderPathMap()]);
+      const firstPerNote = new Map<string, string | null>();
+      for (const l of links) {
+        if (!firstPerNote.has(l.source_note_id)) firstPerNote.set(l.source_note_id, l.context);
+      }
 
-      // Precise filter: ilike is approximate, extractAllWikilinks is exact.
-      // Pass the title itself as the known-titles set so a link written as
-      // the literal title "closed CodeQL #3" isn't cut at the '#' before
-      // the comparison — see extractWikilinkTarget's comment.
-      const knownTitles = new Set([resolvedTitle.toLowerCase()]);
-      const backlinks = data.filter((n) =>
-        extractAllWikilinks(n.content, knownTitles).some(
-          (t) => t.toLowerCase() === resolvedTitle.toLowerCase()
-        )
+      const total = firstPerNote.size;
+      const pageIds = [...firstPerNote.keys()].slice(offset, offset + limit);
+      const notes = pageIds.length === 0 ? [] : await query<{ id: string; title: string; content: string; folder_id: string | null }>(
+        `select id, title, ${include_content ? 'content' : "'' as content"}, folder_id
+         from notes where id = any($1::uuid[]) and deleted_at is null`,
+        [pageIds]
       );
-
-      const total = backlinks.length;
-      const page = backlinks.slice(offset, offset + limit);
-      const results = page.map((n) => {
+      const byId = new Map(notes.map((n) => [n.id, n]));
+      const results = pageIds.flatMap((nid) => {
+        const n = byId.get(nid);
+        if (!n) return [];
         const base = withFolderPath({ id: n.id, title: n.title, folder_id: n.folder_id }, paths);
-        return include_content
+        return [include_content
           ? { ...base, content: n.content }
-          : { ...base, snippet: makeExcerpt(n.content, `[[${resolvedTitle}`, 200) };
+          : { ...base, snippet: firstPerNote.get(nid) ?? '' }];
       });
 
       return {
@@ -1490,6 +1491,55 @@ export function createMcpServer(): McpServer {
             results,
             total,
             ...(offset + limit < total ? { next_offset: offset + limit } : {}),
+          }),
+        }],
+      };
+    }
+  );
+
+  // ── get_neighbors ─────────────────────────────────────────────────────────
+  server.tool(
+    'get_neighbors',
+    'What is around ONE note in the [[wikilink]] graph, out to depth hops. Answers "what is this ' +
+    'connected to" with a flat list of titles — no node indices to decode, no whole-vault payload. ' +
+    'For the shape of that neighbourhood — which notes link to each other, not just which are near ' +
+    '— use get_graph with root_title and depth instead; it scopes the same way and keeps the edges. ' +
+    '\n\nTraversal is undirected: a note linking HERE is a neighbour just as much as one linked ' +
+    'FROM here, because "what is this connected to" means both. `links_out` and `links_in` describe ' +
+    'the direct relation to the note you asked about, and are sent only when true — so a depth-2 ' +
+    'row carries neither. That is not a missing value: "which way does the arrow point" has no ' +
+    'answer two hops away. Each ' +
+    'note appears once, at the shortest depth that reaches it, and `depth: 1` means directly linked. ' +
+    '\n\nThese are LINKS people wrote, not similarity — a note about the same subject that nobody ' +
+    'linked is not here. get_graph\'s semantic_edges cover that, and search covers finding it at all. ' +
+    'An empty result means nothing links to or from this note, which is a fact about the writing, ' +
+    'not about the topic.',
+    {
+      id:    z.string().uuid().optional(),
+      title: z.string().optional(),
+      depth: z.number().int().min(1).max(3).default(1)
+        .describe('Hops to walk. 1 = directly linked notes; each extra hop widens the set fast'),
+    },
+    async ({ id, title, depth }) => {
+      if (!id && !title) throw new Error('Provide either id or title');
+      const noteId = id
+        ? (await queryOne<{ id: string }>('select id from notes where id = $1 and deleted_at is null', [id]))?.id
+        : (await findNoteByTitle<{ id: string }>(title!, 'id')).id;
+      if (!noteId) throw new Error('Note not found');
+
+      const neighbors = await neighborsOf(noteId, depth);
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            neighbors: neighbors.map((n) => ({
+              id: n.id, title: n.title, depth: n.depth,
+              // Only ever shipped when true — "false" on both flags is the
+              // ordinary state at depth 2 and says nothing worth the bytes.
+              ...(n.links_out ? { links_out: true } : {}),
+              ...(n.links_in ? { links_in: true } : {}),
+            })),
+            total: neighbors.length,
           }),
         }],
       };

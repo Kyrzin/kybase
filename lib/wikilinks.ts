@@ -58,7 +58,24 @@ export function maskCode(text: string): string {
  * two passes ends up fixed and the other forgotten.
  */
 export function rawWikilinks(text: string): string[] {
-  return [...maskCode(text).matchAll(WIKILINK_RE)].map(m => m[1]);
+  return wikilinkOccurrences(text).map(o => o.raw);
+}
+
+/**
+ * Every [[wikilink]] with the offset it sits at in the ORIGINAL text, in
+ * document order, code excluded.
+ *
+ * The offset is usable because maskCode replaces code with spaces rather
+ * than removing it — every character position still lines up. That is what
+ * lets a caller quote the sentence around a link without re-finding it.
+ *
+ * rawWikilinks is this function with the offsets dropped, so both share one
+ * regular expression and one masking pass. lib/graph.ts once carried its own
+ * copy of the pattern, which is precisely how one of two passes gets fixed
+ * and the other forgotten.
+ */
+export function wikilinkOccurrences(text: string): { raw: string; index: number }[] {
+  return [...maskCode(text).matchAll(WIKILINK_RE)].map(m => ({ raw: m[1], index: m.index }));
 }
 
 /**

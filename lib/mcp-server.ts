@@ -1072,6 +1072,10 @@ export function createMcpServer(): McpServer {
     if (r.index_pending) out.index_pending = true;
     if (r.section) out.section = r.section;
     if (r.content_length !== undefined) out.content_length = r.content_length;
+    // Where the excerpt sits, for a note long enough that reading it whole is
+    // not an option. Absent on short notes and whenever the position could not
+    // be established exactly.
+    if (r.excerpt_offset !== undefined) out.excerpt_offset = r.excerpt_offset;
     // Shipped without explain, unlike the raw arm scores: when a cross-encoder
     // reordered the page, this is the number that decided the order the
     // caller is reading, and the order is not explainable from the other
@@ -1110,6 +1114,10 @@ export function createMcpServer(): McpServer {
     'for a small vault; read the next page with the `next_offset` it comes with. It is deliberately ' +
     'a flag and not a total — the only number available here is a capped candidate pool, and for ' +
     'meaning-based matching "how many match" has no answer at all. ' +
+    '\n\nA hit in a long note may carry `excerpt_offset` — where that excerpt sits in the text. ' +
+    'Pass it to get_note as `offset` with a small `limit` to read around the answer in one call. ' +
+    'That is how you read a book or a log: prose with no markdown headings has no outline and no ' +
+    '`section`, so the position is the only way in short of paging from the top. ' +
     '\n\nRead the SECTION, not the note. When a hit carries `section`, that is the markdown ' +
     'heading its excerpt came from — pass that exact string to get_note\'s `section` and you get ' +
     'that part alone (measured on a real 13000-character note: 681 characters). When a hit has no ' +

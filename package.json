@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "mcp:stdio": "tsx scripts/mcp-stdio.ts",
     "reindex": "tsx scripts/reindex.ts",
     "reindex:all": "tsx scripts/reindex.ts --all",
     "smoke-test": "tsx scripts/smoke-test.mts"

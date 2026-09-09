@@ -86,6 +86,12 @@ export type SearchResult = {
   // Same lookup as created_at — lets a caller tell a long note from a short
   // one before spending a get_note call on it (list_notes already does this).
   content_length?: number;
+  // Where this excerpt sits in the note, in the same character units get_note's
+  // `offset` takes — so a hit inside a long note can be read in one call
+  // instead of paged toward. Present only on long notes, and only when the
+  // excerpt was located exactly; a guessed position would send the reader to
+  // the wrong page and look like a bug in the note, not in the number.
+  excerpt_offset?: number;
   // textSearch only. This note contains the QUESTION, not an answer to it —
   // several of its interrogative lines share the query's words and none of
   // them is followed by an answer (see questionEcho). A fact about the note's
@@ -333,6 +339,53 @@ async function applyFilters(
  * spread, so a third lookup on the merged/sliced set would just re-fetch
  * data already present.
  */
+/**
+ * Below this a note is simply read whole, so its excerpt's position says
+ * nothing worth a lookup. It is get_note's own default window, which is the
+ * point where a caller starts having to page.
+ */
+const OFFSET_WORTH_IT_ABOVE = 20_000;
+/** Enough of the excerpt to identify one place in a note, not a common phrase. */
+const NEEDLE_CHARS = 60;
+
+/**
+ * Tell a caller where in a long note its excerpt came from.
+ *
+ * A book has no markdown headings, so it has no outline and no `section` to
+ * jump to — the mechanism the rest of the tooling leans on does not exist for
+ * plain prose. Without a position, reading a hit inside a 400,000-character
+ * note means paging through it 20,000 characters at a time. With one it is a
+ * single get_note call.
+ *
+ * Runs last, on the page actually being returned, because reranking rewrites
+ * the excerpt after fusion — a position computed earlier would point at text
+ * the caller never sees. Content is fetched only for the long notes on that
+ * page, so this stays a handful of rows, not a pass over the vault.
+ *
+ * The position is omitted rather than approximated. An excerpt is assembled
+ * (ellipses, a table header pulled down from above) and cannot always be
+ * found verbatim; a near-miss offset would look authoritative and land the
+ * reader somewhere else entirely.
+ */
+async function attachExcerptOffsets(results: SearchResult[]): Promise<void> {
+  const long = results.filter((r) => (r.content_length ?? 0) > OFFSET_WORTH_IT_ABOVE && r.excerpt);
+  if (long.length === 0) return;
+  const rows = await dbQuery<{ id: string; content: string }>(
+    'select id, content from notes where id = any($1) and deleted_at is null',
+    [long.map((r) => r.id)]
+  );
+  const byId = new Map(rows.map((r) => [r.id, r.content]));
+  for (const r of long) {
+    const content = byId.get(r.id);
+    if (!content) continue;
+    const needle = r.excerpt.replace(/^[…\s]+/, '').replace(/[…\s]+$/, '').slice(0, NEEDLE_CHARS);
+    // A needle this short matches too much to be a position.
+    if (needle.length < 20) continue;
+    const at = content.indexOf(needle);
+    if (at !== -1) r.excerpt_offset = at;
+  }
+}
+
 async function enrichResults(results: SearchResult[]): Promise<SearchResult[]> {
   if (results.length === 0) return results;
   const rows = await dbQuery<{ id: string; created_at: string; content_length: number; embedding_pending: boolean }>(
@@ -2147,8 +2200,11 @@ export async function searchWithDiagnostics(
     indexHealth(modelKey),
   ]);
 
+  const page = project(raw, limit, offset, explain);
+  await attachExcerptOffsets(page);
+
   return {
-    results: project(raw, limit, offset, explain),
+    results: page,
     diagnostics: {
       mode,
       arms_used: armsUsed,

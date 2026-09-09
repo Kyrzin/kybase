@@ -168,9 +168,30 @@ export async function indexNote(id: string, title: string, content: string, isCa
   }
 }
 
-/** Fire-and-forget variant — note saving must not block on the embedding provider. */
+/**
+ * How long a note has to be before its indexing is announced. Ordinary notes
+ * finish in under a second and would only fill the log; a book takes minutes,
+ * during which nothing else says anything at all.
+ */
+const ANNOUNCE_ABOVE_CHARS = 50_000;
+
+/**
+ * Fire-and-forget variant — note saving must not block on the embedding
+ * provider.
+ *
+ * A long note is announced when it starts and when it finishes, because
+ * until it commits there is nothing to look at: chunks are written in one
+ * transaction at the end, so a job ten minutes from finishing and a job that
+ * died look identical from the outside — no rows, no output, embedding_pending
+ * still true. That ambiguity cost a full investigation of a working import.
+ */
 export function indexNoteAsync(id: string, title: string, content: string): void {
-  indexNote(id, title, content).catch(err => {
+  const long = content.length >= ANNOUNCE_ABOVE_CHARS;
+  const started = Date.now();
+  if (long) console.info(`[index] note ${id}: started, ${content.length} chars`);
+  indexNote(id, title, content).then(() => {
+    if (long) console.info(`[index] note ${id}: done in ${Math.round((Date.now() - started) / 1000)}s`);
+  }).catch(err => {
     // A superseded job is the guard working, not a failure: the newer edit
     // set embedding_pending = true and scheduled its own run.
     if (err instanceof StaleIndexError) {

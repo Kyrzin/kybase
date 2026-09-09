@@ -1185,9 +1185,10 @@ export function createMcpServer(): McpServer {
     'value, not comparable between queries, and not evidence the note answers you. reranked:false ' +
     'alongside it means the reranker was asked and did not answer, so you are reading the ordinary ' +
     'fused order. Read the text either way. ' +
-    'That model is by far the slowest part of a search, so pass rerank:false when you want an ' +
-    'answer rather than a better ORDER — checking whether a term appears at all, or finding the ' +
-    'note that holds a value you already know the shape of. Keep it on for a real question. ' +
+    'That model is by far the slowest part of a search, and reranking is off unless an owner ' +
+    'turned it on — it is optional and unproven, not an upgrade you are missing. Where it is on, ' +
+    'pass rerank:false whenever you want an answer rather than a better ORDER: checking whether a ' +
+    'term appears at all, or finding the note holding a value whose shape you already know. ' +
     'Pass explain:true to also see each hit\'s raw text_score/semantic_score/rrf_score and created_at ' +
     '— only useful for debugging the ranking itself, omitted by default to keep responses short.',
     {
@@ -1208,7 +1209,7 @@ export function createMcpServer(): McpServer {
       updated_after:  z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or after this'),
       updated_before: z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or before this'),
       rerank:         z.boolean().default(true)
-        .describe('Set false to skip the cross-encoder and answer from the fused order — much faster, worse ordering'),
+        .describe('Set false to skip the cross-encoder and answer from the fused order — several times faster, and not measurably worse'),
       explain:        z.boolean().default(false).describe('Include raw per-arm scores and created_at for debugging ranking'),
     },
     async ({ query: q, type, limit, offset, folder_id, folder_path, tag, created_after, created_before, updated_after, updated_before, rerank, explain }) => {

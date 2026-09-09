@@ -99,12 +99,28 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
     if (!res || !res.ok) setRerank(prev);
   };
 
-  // Blank clears the floor. Anything outside (0,1) is rejected by the API
-  // and the field reverts, rather than being silently stored as "no floor".
+  /** The stored floor, back into the field — the server is the truth here. */
+  const reloadRerankMinScore = async () => {
+    const data = await apiFetch('/api/settings').then(r => r.json()).catch(() => null);
+    if (data) setRerankMinScore(data.rerankMinScore == null ? '' : String(data.rerankMinScore));
+  };
+
+  // Blank clears the floor, and so does 0 — that is what someone types to
+  // mean "no floor", and it used to hit the range check and return without
+  // saving or saying anything. The field then showed 0 while the old floor
+  // stayed in force, which is the worst possible answer: it cost a round of
+  // live measurements that were all silently run against the previous value.
+  // Anything else out of range now reverts the field instead of pretending.
   const saveRerankMinScore = async () => {
     const raw = rerankMinScore.trim();
-    const value = raw === '' ? null : Number(raw);
-    if (value !== null && !(Number.isFinite(value) && value > 0 && value < 1)) return;
+    const parsed = Number(raw);
+    const value = raw === '' || parsed === 0 ? null : parsed;
+    if (value !== null && !(Number.isFinite(value) && value > 0 && value < 1)) {
+      // Back to what is actually stored — blanking it here would claim the
+      // floor was cleared when it was not, the same lie in the other direction.
+      await reloadRerankMinScore();
+      return;
+    }
     setRerankSaving(true);
     const res = await apiFetch('/api/settings', {
       method: 'PUT',
@@ -364,8 +380,12 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
                 <div style={{ fontSize: 11, color: '#6c7086', marginTop: 6, lineHeight: 1.5 }}>
                   A cross-encoder reads your question together with each candidate passage and
                   reorders the results. It changes their ORDER only — it cannot find a note the
-                  search missed. Costs seconds per search on CPU. Applies to the API and connected
-                  agents too, not just this window.
+                  search missed. Costs seconds per search on CPU, and applies to the API and
+                  connected agents too, not just this window. Measure before trusting it: on the
+                  vault it was developed against it did not move a single correct note higher, and
+                  moved two lower (docs/experiments). Whether it helps yours is a question about
+                  your notes, your language and your hardware — so treat it as an experiment to
+                  run, not an improvement to switch on.
                 </div>
                 {rerank.enabled && (
                   <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #313244' }}>
@@ -376,7 +396,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
                       value={rerankMinScore}
                       onChange={e => setRerankMinScore(e.target.value)}
                       onBlur={saveRerankMinScore}
-                      placeholder="empty = keep every result"
+                      placeholder="empty or 0 = keep every result"
                       inputMode="decimal"
                       style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', outline: 'none' }}
                     />

@@ -123,11 +123,24 @@ export function windowsOf(text: string, size = EXCERPT_WINDOW_CHARS, cap = EXCER
   return out;
 }
 
-// A passage longer than the model's window is truncated by the model anyway
-// (text-embeddings-inference needs --auto-truncate for that, and returns 413
-// without it). Cutting here first keeps the request small and makes the
-// truncation point ours rather than a deployment flag's.
-const MAX_PASSAGE_CHARS = 1200;
+/**
+ * How much of a chunk the model is shown.
+ *
+ * Small on purpose. A cross-encoder scores the passage as a whole, so a
+ * relevant sentence buried in unrelated text scores far below the same
+ * sentence on its own — measured against this deployment's model: a sentence
+ * alone 0.129, the same sentence after 1100 characters of unrelated text
+ * 0.0065, the unrelated text alone 0.000075. It reads the sentence either
+ * way; dilution costs a factor of twenty regardless.
+ *
+ * That is why this used to be the wrong shape. Sending the first 1200
+ * characters of a chunk both diluted the passage and, since chunks here
+ * average well over that, dropped the tail of a typical one — so a note was
+ * judged on a padded opening while its answer sat unread further down. Short
+ * documents and lists of links, which are naturally undiluted, beat real
+ * documents on that arrangement.
+ */
+const PASSAGE_CHARS = 450;
 
 export type RerankPassage = {
   noteId: string;
@@ -153,6 +166,28 @@ export type RerankPassage = {
  * passage that cannot answer it, and the note loses on a text it was never
  * asked about. Raising perNote widens that net at a full model pass each.
  */
+/** Enough windows to sweep a whole chunk; chunks are bounded, so is this. */
+const WINDOW_SCAN_CAP = 16;
+
+/**
+ * The window of a chunk that carries most of the query, rather than its first
+ * PASSAGE_CHARS characters. Overlapping windows mean a phrase on a boundary
+ * still lands whole in one of them. Ties keep the earliest window, so a chunk
+ * that matches nothing is represented by its opening as before.
+ */
+function bestWindow(content: string, words: string[]): string {
+  const windows = windowsOf(content, PASSAGE_CHARS, WINDOW_SCAN_CAP);
+  if (windows.length === 1 || words.length === 0) return windows[0];
+  let best = windows[0];
+  let bestHits = -1;
+  for (const w of windows) {
+    const hay = w.toLowerCase();
+    const hits = words.filter((x) => hay.includes(x)).length;
+    if (hits > bestHits) { bestHits = hits; best = w; }
+  }
+  return best;
+}
+
 export function selectPassages(
   noteId: string,
   chunks: { heading: string | null; content: string }[],
@@ -173,7 +208,7 @@ export function selectPassages(
   scored.sort((a, b) => b.hits - a.hits);
   return scored.slice(0, perNote).map(({ c }) => ({
     noteId,
-    text: ((c.heading ? c.heading + '\n' : '') + c.content).slice(0, MAX_PASSAGE_CHARS),
+    text: (c.heading ? c.heading + '\n' : '') + bestWindow(c.content, words),
     content: c.content,
   }));
 }

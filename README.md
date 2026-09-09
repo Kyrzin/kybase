@@ -5,6 +5,7 @@
 <p align="center">
   <a href="https://github.com/Kyrzin/kybase/actions/workflows/ci.yml"><img src="https://github.com/Kyrzin/kybase/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/Kyrzin/kybase/releases"><img src="https://img.shields.io/github/v/release/Kyrzin/kybase" alt="Release"></a>
+  <a href="https://glama.ai/mcp/servers/Kyrzin/kybase"><img src="https://glama.ai/mcp/servers/Kyrzin/kybase/badges/score.svg" alt="Kybase MCP server – quality and maintenance score on Glama"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License"></a>
   <img src="https://img.shields.io/badge/MCP-Streamable%20HTTP-8B5CF6" alt="MCP: Streamable HTTP">
   <img src="https://img.shields.io/badge/private-by%20default-success" alt="private by default">
@@ -122,7 +123,7 @@ Everything below goes in `.env` (copied from `.env.example`). `KYBASE_SECRET` an
 
 ## Connect an MCP Client
 
-The app exposes a Streamable HTTP MCP endpoint at `/api/mcp`. Any MCP client that speaks Streamable HTTP can connect — not just Claude.
+The app exposes a Streamable HTTP MCP endpoint at `/api/mcp`. Any MCP client that speaks Streamable HTTP can connect — not just Claude. Clients that only speak stdio have a [local entrypoint](#stdio-local-process) instead.
 
 **Claude Code** — add to `.mcp.json` (or `claude mcp add`):
 
@@ -181,7 +182,32 @@ callback this server accepts, so registration cannot point one somewhere else.
 }
 ```
 
-### MCP tools (17)
+<a id="stdio-local-process"></a>
+**stdio (local process)** — for clients that can't speak HTTP, run the server as a
+child process against the database directly. Needs a checkout and the same
+`DATABASE_URL` the app uses; there is no bearer token, since access is whatever
+the process itself can reach.
+
+```json
+{
+  "mcpServers": {
+    "kybase": {
+      "command": "npx",
+      "args": ["tsx", "scripts/mcp-stdio.ts"],
+      "cwd": "/path/to/kybase",
+      "env": {
+        "DATABASE_URL": "postgres://kybase:kybase@localhost:5432/kybase"
+      }
+    }
+  }
+}
+```
+
+Or `npm run mcp:stdio` from the checkout. The HTTP endpoint is the better choice
+whenever it's an option — it's the one with authentication, revocable tokens, and
+no local checkout to keep in sync.
+
+### MCP tools (18)
 
 | Tool | Category | What it does for the agent |
 |------|----------|------------------------------|
@@ -191,6 +217,7 @@ callback this server accepts, so registration cannot point one somewhere else.
 | `list_tags` | Read | All tags in use with counts, so the agent reuses existing tags instead of coining duplicates |
 | `list_folders` | Read | Flat folder list for reconstructing the tree |
 | `get_backlinks` | Graph | Notes that link to a given note via `[[wikilinks]]` |
+| `get_neighbors` | Graph | What one note is connected to in the `[[wikilink]]` graph, out to `depth` hops — a flat list of titles, no whole-vault payload |
 | `get_graph` | Graph | The knowledge graph — wikilink edges plus semantic edges — scoped by folder or by hop count from a root note |
 | `create_note` | Write | Create a note; embedding is generated automatically in the background |
 | `update_note` | Write | Update fields; supports `expected_updated_at` to refuse a stale overwrite instead of silently clobbering a concurrent edit |

@@ -4,7 +4,8 @@
 // use lib/graph.ts for the pure edge builder instead.
 import { query } from './db';
 import { getSemanticEdges, type SemanticEdge } from './semantic-edges';
-import { buildWikilinkEdges, dedupeEdges, type GraphNode, type GraphEdge } from './graph';
+import { dedupeEdges, type GraphNode, type GraphEdge } from './graph';
+import { wikilinkEdges } from './note-links';
 
 // Semantic edges: undirected embedding-similarity pairs. Same parameters the
 // API route and MCP tool used before this was unified.
@@ -59,8 +60,12 @@ function resolveRootTitle<T extends TitledNote>(notes: T[], rootTitle: string, f
 export async function buildGraph(opts: BuildGraphOptions = {}): Promise<Graph> {
   const { folderId, rootTitle, depth = 2, includeSemantic = true, minScore = SEMANTIC_THRESHOLD } = opts;
 
-  let notes = await query<{ id: string; title: string; content: string; folder_id: string | null }>(
-    'select id, title, content, folder_id from notes where deleted_at is null'
+  // Content is no longer selected here: links come from the stored index
+  // (lib/note-links.ts), so rendering a graph stops costing a full read of
+  // every note's text. On the live vault that was 1.2 MB fetched and
+  // re-parsed per call to produce a few hundred edges.
+  let notes = await query<{ id: string; title: string; folder_id: string | null }>(
+    'select id, title, folder_id from notes where deleted_at is null'
   );
 
   if (folderId) {
@@ -80,7 +85,7 @@ export async function buildGraph(opts: BuildGraphOptions = {}): Promise<Graph> {
   }
 
   let nodes = notes.map((n) => ({ id: n.id, title: n.title }));
-  const built = buildWikilinkEdges(notes);
+  const built = await wikilinkEdges(nodes);
   // Dedupe to one edge per (from, to) pair — the server graph has always been
   // unique-per-pair (it built edges from unique wikilink targets per note).
   let edges = dedupeEdges(built.edges);

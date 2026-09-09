@@ -29,6 +29,16 @@ function stripHead(html: string): string {
   return html.replace(/<head\b[^>]*>[\s\S]*?<\/head>/i, '');
 }
 
+// turndown has no concept of "not rendered": an element it has no rule for
+// contributes its text, so a <script> or <style> in the BODY arrives as a
+// line of source code in the note. Measured: a page with `body{color:red}`
+// and `var a=1;alert(2)` produced exactly that text ahead of its heading. In
+// a saved web page that is most of the file. Removed for every format that
+// goes through here — an EPUB chapter's script is not content either.
+function stripCode(html: string): string {
+  return html.replace(/<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
+}
+
 export function htmlToMarkdown(html: string): string {
-  return demoteHeadings(turndown.turndown(stripHead(html)));
+  return demoteHeadings(turndown.turndown(stripCode(stripHead(html))));
 }

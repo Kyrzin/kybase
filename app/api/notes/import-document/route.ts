@@ -1,4 +1,4 @@
-// POST /api/notes/import-document?folder_id=... — upload a PDF/EPUB/DOCX,
+// POST /api/notes/import-document?folder_id=... — upload a PDF/EPUB/DOCX/HTML,
 // convert it to structured Markdown, and create a note via the same insert
 // path as POST /api/notes. Body is the raw file bytes (Content-Type set to
 // the format's MIME type) — matches /api/import's raw-body convention for
@@ -7,10 +7,11 @@
 // Dispatch is by filename extension, not Content-Type: browsers are
 // inconsistent about what MIME type they attach to a given file, but the
 // extension the user picked is reliable. Each format gets its own module
-// (lib/pdf-import.ts, lib/epub-import.ts, lib/docx-import.ts) because each
-// needs an entirely different strategy for finding headings — font size for
+// (lib/pdf-import.ts, lib/epub-import.ts, lib/docx-import.ts,
+// lib/html-import.ts) because each needs a different strategy for headings —
+// font size for
 // PDF (it has no semantic structure to read), real <h1>-<h6>/Heading-styles
-// for EPUB/DOCX (they already carry it, nothing to guess).
+// for EPUB/DOCX/HTML (they already carry it, nothing to guess).
 //
 // Excluded from proxy.ts's matcher and authenticates itself instead (see
 // lib/route-auth.ts) so an unauthenticated caller's body is never buffered
@@ -21,6 +22,7 @@ import { indexNoteAsync } from '@/lib/indexing';
 import { importPdf } from '@/lib/pdf-import';
 import { importEpub } from '@/lib/epub-import';
 import { importDocx } from '@/lib/docx-import';
+import { importHtml } from '@/lib/html-import';
 import { MAX_NOTE_CONTENT_CHARS, stripNulBytes } from '@/lib/types';
 import { requireAuth } from '@/lib/route-auth';
 import { readRequestBodyCapped } from '@/lib/request-body';
@@ -36,11 +38,12 @@ const NOTE_SELECT = 'id, title, content, folder_id, tags, embedding_pending, cre
 // Content-Length header.
 const MAX_FILE_BYTES = 80 * 1024 * 1024;
 
-type Format = 'pdf' | 'epub' | 'docx';
+type Format = 'pdf' | 'epub' | 'docx' | 'html';
 
 function formatFromFilename(filename: string): Format | null {
   const ext = filename.split('.').pop()?.toLowerCase();
-  if (ext === 'pdf' || ext === 'epub' || ext === 'docx') return ext;
+  if (ext === 'pdf' || ext === 'epub' || ext === 'docx' || ext === 'html') return ext;
+  if (ext === 'htm') return 'html';
   return null;
 }
 
@@ -55,6 +58,12 @@ async function convert(format: Format, bytes: Buffer, filename: string): Promise
   const fallbackTitle = titleFromFilename(filename);
   if (format === 'pdf') return { title: fallbackTitle, content: await importPdf(bytes) };
   if (format === 'docx') return { title: fallbackTitle, content: await importDocx(bytes) };
+  // A saved page names itself in <title>; the filename a browser gave it is
+  // usually the page title with the punctuation mangled, so prefer the document.
+  if (format === 'html') {
+    const html = importHtml(bytes);
+    return { title: html.title?.trim() || fallbackTitle, content: html.content };
+  }
   const epub = await importEpub(bytes);
   // EPUB carries its own title in metadata — prefer it over the filename
   // (PDF/DOCX have no equivalent field this pipeline reads), but a missing
@@ -75,7 +84,7 @@ export async function POST(req: NextRequest) {
   const filename = rawFilename ? decodeURIComponent(rawFilename) : '';
 
   const format = formatFromFilename(filename);
-  if (!format) return NextResponse.json({ error: 'Unsupported file type — use .pdf, .epub, or .docx' }, { status: 400 });
+  if (!format) return NextResponse.json({ error: 'Unsupported file type — use .pdf, .epub, .docx, or .html' }, { status: 400 });
 
   const bytes = await readRequestBodyCapped(req, MAX_FILE_BYTES);
   if (bytes === null) {

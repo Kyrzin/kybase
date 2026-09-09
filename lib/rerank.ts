@@ -79,6 +79,27 @@ const EXCERPT_WINDOW_CAP = 6;
 const EXCERPT_WINDOW_CHARS = 450;
 
 /**
+ * How far a window edge may move to land between words. Same distance
+ * makeExcerpt allows itself; kept here rather than imported because search.ts
+ * imports this module, not the other way round.
+ */
+const SNAP_WINDOW = 24;
+
+/** The slice from `from` to `to` with neither edge splitting a word. */
+function snapToWords(text: string, from: number, to: number): string {
+  if (from > 0) {
+    const ws = text.slice(from, from + SNAP_WINDOW).search(/\s/);
+    if (ws !== -1) from += ws + 1;
+  }
+  if (to < text.length) {
+    const back = Math.max(from + 1, to - SNAP_WINDOW);
+    const ws = text.slice(back, to).search(/\s\S*$/); // start of the last, partial word
+    if (ws !== -1) to = back + ws;
+  }
+  return text.slice(from, to);
+}
+
+/**
  * Overlapping slices of a passage, so the excerpt can be chosen by the model
  * rather than by word overlap.
  *
@@ -86,12 +107,19 @@ const EXCERPT_WINDOW_CHARS = 450;
  * be split across two windows and score poorly in both — which is the failure
  * being fixed here, one level down (a shown excerpt that stopped four words
  * before the token it was asked for).
+ *
+ * Edges land between words. A winning window becomes the shown excerpt, and
+ * makeExcerpt only trims a start it had to move itself — so a window opening
+ * mid-word reached the reader as a severed one, with no ellipsis to admit it.
+ * The model reads these too, and half a word is noise to it as well.
  */
 export function windowsOf(text: string, size = EXCERPT_WINDOW_CHARS, cap = EXCERPT_WINDOW_CAP): string[] {
   if (text.length <= size) return [text];
   const out: string[] = [];
   const stride = Math.floor(size / 2);
-  for (let i = 0; i < text.length && out.length < cap; i += stride) out.push(text.slice(i, i + size));
+  for (let i = 0; i < text.length && out.length < cap; i += stride) {
+    out.push(snapToWords(text, i, Math.min(text.length, i + size)));
+  }
   return out;
 }
 

@@ -1770,9 +1770,9 @@ export async function hybridSearch(query: string, limit = 10, filters?: SearchFi
  * arms failing is a genuine outage and throws, because returning [] there
  * would tell the caller the vault holds nothing.
  */
-async function hybridRun(query: string, limit = 10, filters?: SearchFilters): Promise<{
+async function hybridRun(query: string, limit = 10, filters?: SearchFilters, rerank = true): Promise<{
   results: HybridSearchResult[]; bestSemantic: number | null; failures: ArmFailure[];
-  armsUsed: ('text' | 'semantic')[]; reranked: boolean;
+  armsUsed: ('text' | 'semantic')[]; reranked: boolean; hasMore: boolean;
 }> {
   const candidateLimit = Math.min(RRF_CANDIDATE_CAP, Math.max(RRF_CANDIDATE_FLOOR, limit * RRF_CANDIDATE_FACTOR));
   // Resolved once here rather than separately inside each arm — both would
@@ -1807,12 +1807,12 @@ async function hybridRun(query: string, limit = 10, filters?: SearchFilters): Pr
   if (lists.length === 0) throw new SearchUnavailableError(failures);
 
   let fused = rrfMerge(lists);
-  const rr = await applyRerank(query, fused);
+  const rr = rerank ? await applyRerank(query, fused) : { results: fused, reranked: false };
   fused = rr.results;
   const merged = fused.slice(0, limit);
   // Once, on the returned page — see textSearch's deferSections note.
   await attachSections(merged as unknown as SearchResult[], query);
-  return { results: merged, bestSemantic, failures, armsUsed, reranked: rr.reranked };
+  return { results: merged, bestSemantic, failures, armsUsed, reranked: rr.reranked, hasMore: fused.length > limit };
 }
 
 /**
@@ -2004,6 +2004,14 @@ export interface SearchOptions {
   offset?: number;
   filters?: SearchFilters;
   explain?: boolean;
+  /**
+   * Set false to skip the cross-encoder for this one query and take the fused
+   * order as it stands. The model is the slowest step by far, and a caller
+   * checking whether a term appears anywhere does not need a better ORDER —
+   * it needs an answer. Settings still decide whether reranking happens at
+   * all; this can only decline it, never turn it on.
+   */
+  rerank?: boolean;
 }
 
 /**
@@ -2035,6 +2043,21 @@ export type SearchDiagnostics = {
   /** Whether folder/tag/date filters narrowed the searched set. */
   scoped: boolean;
   /**
+   * Whether hits exist past the page just returned.
+   *
+   * Deliberately a flag and not a count. The only number this search could
+   * produce is the size of its own candidate pool, which is capped
+   * (RRF_CANDIDATE_CAP) and, for the semantic arm, not a count of anything —
+   * every note has a vector, so "how many match" has no answer there. A
+   * capped pool size labelled `total_hits` would be read as a fact about the
+   * vault, and this codebase has already paid once for a measured-looking
+   * number that was an artifact of its own limit.
+   *
+   * What a caller actually needs is whether five results were five of five or
+   * five of many, and that is exactly this.
+   */
+  has_more: boolean;
+  /**
    * Whether a cross-encoder reordered this page (lib/rerank.ts, hybrid only).
    * False covers both "not configured" and "configured but did not answer" —
    * a reranker that timed out must not leave the caller believing the order
@@ -2043,13 +2066,14 @@ export type SearchDiagnostics = {
    */
   reranked: boolean;
   /**
-   * Why `reranked` is what it is. Three states a caller has to tell apart:
+   * Why `reranked` is what it is. Four states a caller has to tell apart:
    * no service installed (`available: false` — nothing to switch on), a
-   * service switched off in settings, and a service switched on that did not
-   * answer. Only the last one is a fault, and without these two flags
-   * `reranked: false` looks identical in all three.
+   * service switched off in settings, a service the caller declined for this
+   * one query (`skipped`), and a service switched on that did not answer.
+   * Only the last one is a fault, and without these flags `reranked: false`
+   * looks identical in all of them.
    */
-  rerank: { available: boolean; enabled: boolean; min_score: number | null };
+  rerank: { available: boolean; enabled: boolean; skipped: boolean; min_score: number | null };
   took_ms: number;
 };
 
@@ -2081,7 +2105,7 @@ export async function searchWithDiagnostics(
   query: string,
   options: SearchOptions = {}
 ): Promise<{ results: SearchResult[]; diagnostics: SearchDiagnostics }> {
-  const { mode = 'hybrid', limit = 10, offset = 0, filters, explain = false } = options;
+  const { mode = 'hybrid', limit = 10, offset = 0, filters, explain = false, rerank = true } = options;
   const started = Date.now();
   const fetchLimit = limit + offset;
 
@@ -2094,21 +2118,28 @@ export async function searchWithDiagnostics(
   // improve; text and semantic report false rather than omitting the field.
   let reranked = false;
 
+  // One row past the page, so "there is more" is an observation rather than a
+  // guess. The extra row is dropped by project() and never reaches a caller.
+  let hasMore = false;
+
   if (mode === 'text') {
-    raw = await textSearch(query, fetchLimit, filters);
+    raw = await textSearch(query, fetchLimit + 1, filters);
+    hasMore = raw.length > fetchLimit;
     armsUsed = ['text'];
   } else if (mode === 'semantic') {
-    const run = await semanticRun(query, fetchLimit, filters);
+    const run = await semanticRun(query, fetchLimit + 1, filters);
     raw = run.results;
+    hasMore = raw.length > fetchLimit;
     bestSemantic = run.best;
     armsUsed = ['semantic'];
   } else {
-    const run = await hybridRun(query, fetchLimit, filters);
+    const run = await hybridRun(query, fetchLimit, filters, rerank);
     raw = run.results;
     bestSemantic = run.bestSemantic;
     armsUsed = run.armsUsed;
     failures = run.failures;
     reranked = run.reranked;
+    hasMore = run.hasMore;
   }
 
   const [threshold, index] = await Promise.all([
@@ -2127,10 +2158,14 @@ export async function searchWithDiagnostics(
       embedding_model: modelKey,
       index,
       scoped: hasFilters(filters),
+      has_more: hasMore,
       reranked,
       rerank: {
         available: rerankAvailable(),
         enabled: (await rerankConfig()) !== null,
+        // The caller declined it for this query. Distinct from "off" — the
+        // service is there and the next query gets it.
+        skipped: !rerank,
         // Non-null means results BELOW it were removed — an empty response
         // then says "nothing cleared the bar", not "the vault holds nothing".
         min_score: await getRerankMinScore(),

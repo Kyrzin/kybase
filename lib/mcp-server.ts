@@ -116,6 +116,48 @@ async function folderPathMap(): Promise<Map<string, string>> {
   return buildFolderPathMap(folders);
 }
 
+/**
+ * The folder id for a human-written path like "Projects/Kybase", matched
+ * case-insensitively and forgiving of leading/trailing slashes.
+ *
+ * Exists so a caller with a path in hand does not have to fetch the whole
+ * folder tree just to translate it into a UUID — the round-trip every
+ * folder-scoped search used to start with. Throws with real examples rather
+ * than returning null: a mistyped path that silently searched the whole vault
+ * would look like a working search with wrong results.
+ */
+async function folderIdFromPath(folderPath: string): Promise<string> {
+  const paths = await folderPathMap();
+  const norm = (p: string) => p.trim().replace(/^\/+|\/+$/g, '').toLowerCase();
+  const wanted = norm(folderPath);
+  for (const [id, p] of paths.entries()) if (norm(p) === wanted) return id;
+  const available = Array.from(paths.values()).filter(Boolean).slice(0, 10).join('", "');
+  throw new Error(`Folder path "${folderPath}" not found. Available folders include: "${available}"`);
+}
+
+/**
+ * What search_notes says when its query is missing or empty. The rule is not
+ * the interesting part — where to go instead is, and an agent that wanted
+ * "every note tagged X" would otherwise read a type error and give up on the
+ * whole idea rather than move one tool over.
+ */
+const QUERY_REQUIRED =
+  'query is required — search ranks text against text. To list or filter notes by folder, tag or ' +
+  'recency with no keywords, use list_notes instead.';
+
+/**
+ * Whether more hits exist past this page, and where the next one starts.
+ *
+ * Shipped as a flag rather than a total: the only number a hybrid search
+ * could give is its own capped candidate pool, and for the semantic arm
+ * "how many match" has no answer at all — every note has a vector. A capped
+ * pool size named total_hits would be read as a fact about the vault. What a
+ * caller needs is whether five hits were five of five or five of many.
+ */
+function morePage(hasMore: boolean, limit: number, offset: number) {
+  return hasMore ? { has_more: true, next_offset: offset + limit } : { has_more: false };
+}
+
 function withFolderPath<T extends { folder_id: string | null }>(
   row: T,
   paths: Map<string, string>
@@ -551,19 +593,13 @@ export function createMcpServer(): McpServer {
       const paths = await folderPathMap();
       let folder_id = rawFolderId ?? null;
       if (folder_path) {
-        const normalized = folder_path.trim().replace(/^\/+|\/+$/g, '').toLowerCase();
-        let foundId: string | null = null;
-        for (const [id, p] of paths.entries()) {
-          if (p.trim().replace(/^\/+|\/+$/g, '').toLowerCase() === normalized) {
-            foundId = id;
-            break;
-          }
+        try {
+          folder_id = await folderIdFromPath(folder_path);
+        } catch (err) {
+          // A writer that names a folder which does not exist can simply make
+          // it, which a reader cannot — so this path keeps that hint.
+          throw new Error(`${(err as Error).message} (or create it with create_folder)`);
         }
-        if (!foundId) {
-          const available = Array.from(paths.values()).filter(Boolean).slice(0, 10).join('", "');
-          throw new Error(`Folder path "${folder_path}" not found. Available folders include: "${available}" (or create it with create_folder)`);
-        }
-        folder_id = foundId;
       }
       const content = stripNulBytes(rawContent);
       // Echoing the content back would double its cost for nothing — the
@@ -1068,6 +1104,12 @@ export function createMcpServer(): McpServer {
     'Hybrid is the right default; prefer type=text for exact identifiers, code fragments, or quoted ' +
     'phrases, where FTS beats meaning-matching. ' +
     'Returns short excerpts, not full notes — call get_note on the top 1-2 hits to read them. ' +
+    'A query is required, because this ranks text against text: to list or filter notes by folder, ' +
+    'tag or recency with no keywords, use list_notes instead. ' +
+    '`has_more` says whether hits exist past the page you got, so a short result is never mistaken ' +
+    'for a small vault; read the next page with the `next_offset` it comes with. It is deliberately ' +
+    'a flag and not a total — the only number available here is a capped candidate pool, and for ' +
+    'meaning-based matching "how many match" has no answer at all. ' +
     '\n\nRead the SECTION, not the note. When a hit carries `section`, that is the markdown ' +
     'heading its excerpt came from — pass that exact string to get_note\'s `section` and you get ' +
     'that part alone (measured on a real 13000-character note: 681 characters). When a hit has no ' +
@@ -1108,7 +1150,8 @@ export function createMcpServer(): McpServer {
     'question is not a note answering it. Such hits take the top half of the relevance scale, ' +
     'ranked among themselves by their own text score. Neither tier nor coverage is comparable ' +
     'across different queries, only within one response. ' +
-    'Filters: folder_id, tag, created_after/before (when a note was made), updated_after/before ' +
+    'Filters: folder_id (or folder_path, the same folder written as a path — no need to look the ' +
+    'UUID up first), tag, created_after/before (when a note was made), updated_after/before ' +
     '(when its own content/title/folder/tags last actually changed — a rename elsewhere rewriting ' +
     'a [[link]] to this note does not count) — these are NOT interchangeable. ' +
     'Dates filter, they do not rank: a note edited an hour ago and one untouched for months ' +
@@ -1142,23 +1185,37 @@ export function createMcpServer(): McpServer {
     'value, not comparable between queries, and not evidence the note answers you. reranked:false ' +
     'alongside it means the reranker was asked and did not answer, so you are reading the ordinary ' +
     'fused order. Read the text either way. ' +
+    'That model is by far the slowest part of a search, so pass rerank:false when you want an ' +
+    'answer rather than a better ORDER — checking whether a term appears at all, or finding the ' +
+    'note that holds a value you already know the shape of. Keep it on for a real question. ' +
     'Pass explain:true to also see each hit\'s raw text_score/semantic_score/rrf_score and created_at ' +
     '— only useful for debugging the ranking itself, omitted by default to keep responses short.',
     {
-      query:          z.string().min(1),
+      // The message matters more than the rule: an agent that wanted "every
+      // note tagged X" hits this and needs to be told where that lives, not
+      // that a string was expected.
+      query:          z.string({ error: QUERY_REQUIRED }).min(1, QUERY_REQUIRED),
       type:           z.enum(['text', 'semantic', 'hybrid']).default('hybrid'),
       limit:          z.number().int().min(1).max(50).default(5),
+      offset:         z.number().int().min(0).default(0)
+        .describe('Skip this many hits — with has_more in the response, how you read past the first page'),
       folder_id:      z.string().uuid().optional().describe('Restrict to notes in this folder'),
+      folder_path:    z.string().optional()
+        .describe('Same restriction by path (e.g. "Projects/Kybase") instead of UUID — that folder itself, not its subfolders'),
       tag:            z.string().optional().describe('Restrict to notes with this tag'),
       created_after:  z.string().optional().describe('ISO timestamp — only notes created at or after this'),
       created_before: z.string().optional().describe('ISO timestamp — only notes created at or before this'),
       updated_after:  z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or after this'),
       updated_before: z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or before this'),
+      rerank:         z.boolean().default(true)
+        .describe('Set false to skip the cross-encoder and answer from the fused order — much faster, worse ordering'),
       explain:        z.boolean().default(false).describe('Include raw per-arm scores and created_at for debugging ranking'),
     },
-    async ({ query: q, type, limit, folder_id, tag, created_after, created_before, updated_after, updated_before, explain }) => {
+    async ({ query: q, type, limit, offset, folder_id, folder_path, tag, created_after, created_before, updated_after, updated_before, rerank, explain }) => {
+      if (folder_id && folder_path) throw new Error('Provide either folder_id or folder_path, not both');
       const filters = {
-        folderId: folder_id, tag,
+        folderId: folder_path ? await folderIdFromPath(folder_path) : folder_id,
+        tag,
         createdAfter: created_after, createdBefore: created_before,
         updatedAfter: updated_after, updatedBefore: updated_before,
       };
@@ -1170,7 +1227,7 @@ export function createMcpServer(): McpServer {
       let results: SearchResult[];
       let diagnostics: SearchDiagnostics;
       try {
-        ({ results, diagnostics } = await searchWithDiagnostics(q, { mode: type, limit, filters, explain }));
+        ({ results, diagnostics } = await searchWithDiagnostics(q, { mode: type, limit, offset, filters, rerank, explain }));
       } catch (err) {
         // Every arm is down. An empty result list here would be a claim about
         // the vault; this is a claim about the service.
@@ -1194,7 +1251,10 @@ export function createMcpServer(): McpServer {
         // below — a caller no longer needs a type-keyed branch just to read
         // the hit list (found live 2026-08-17, independently by both an
         // external audit and an independent-agent test).
-        return { content: [{ type: 'text' as const, text: JSON.stringify({ results: displayResults }, null, 2) }] };
+        return { content: [{ type: 'text' as const, text: JSON.stringify({
+          results: displayResults,
+          ...morePage(diagnostics.has_more, limit, offset),
+        }, null, 2) }] };
       }
 
       // best_score returned unconditionally, not just on an empty result —
@@ -1207,6 +1267,7 @@ export function createMcpServer(): McpServer {
           type: 'text' as const,
           text: JSON.stringify({
             results: displayResults,
+            ...morePage(diagnostics.has_more, limit, offset),
             // null = no automatic cutoff is configured, so an empty result
             // means the index returned nothing — not that something was
             // filtered out. Reported as null rather than 0 because zero reads

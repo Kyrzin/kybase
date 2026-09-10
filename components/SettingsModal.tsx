@@ -383,9 +383,10 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
                   search missed. Costs seconds per search on CPU, and applies to the API and
                   connected agents too, not just this window. Measure before trusting it: on the
                   vault it was developed against it did not move a single correct note higher, and
-                  moved two lower (docs/experiments). Whether it helps yours is a question about
-                  your notes, your language and your hardware — so treat it as an experiment to
-                  run, not an improvement to switch on.
+                  moved two lower. Whether it helps yours is a question about your notes, your
+                  language and your hardware — compare a search you know the answer to with the
+                  switch on and off, and treat it as an experiment to run rather than an
+                  improvement to switch on.
                 </div>
                 {rerank.enabled && (
                   <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #313244' }}>

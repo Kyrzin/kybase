@@ -16,6 +16,21 @@ import { extractHeadings, type Heading } from './markdown';
 import { getSemanticProfile } from './embeddings';
 import { MAX_NOTE_CONTENT_CHARS, stripNulBytes } from './types';
 
+/**
+ * A UUID parameter.
+ *
+ * Not `uuid()`, which emits `format: "uuid"` AND a 166-character
+ * `pattern` restating it — seventeen times across this server's tools, 706
+ * tokens of identical machine-generated regex an agent reads on every
+ * session and learns nothing from. The refinement validates exactly what
+ * that pattern did (verified against it, nil UUID included) and is invisible
+ * to JSON Schema, so `format` is declared explicitly and carries the meaning
+ * on its own.
+ */
+const UUID_RE = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
+const uuid = () => z.string().refine((v) => UUID_RE.test(v), 'must be a UUID').meta({ format: 'uuid' });
+
+
 
 // get_note(title=...) is the shortcut past search_notes, but real titles are long
 // and composite ("2026-07-24 — Kybase: Move-folder + sidebar UX polish"), and
@@ -400,7 +415,7 @@ export function createMcpServer(): McpServer {
     'trashed:true to see soft-deleted notes instead (recoverable with restore_note until they age ' +
     'out of the trash) — other filters are ignored in that mode.',
     {
-      folder_id: z.string().uuid().optional().describe('Filter by folder UUID'),
+      folder_id: uuid().optional().describe('Filter by folder UUID'),
       tag:       z.string().optional().describe('Filter by tag'),
       created_after:  z.string().optional().describe('ISO timestamp — only notes created at or after this'),
       created_before: z.string().optional().describe('ISO timestamp — only notes created at or before this'),
@@ -473,7 +488,7 @@ export function createMcpServer(): McpServer {
     'links (targets not found) are listed ' +
     'separately.',
     {
-      id:      z.string().uuid().optional()
+      id:      uuid().optional()
         .describe('The note\'s UUID. Live notes only — a trashed note is not found until restore_note brings it back'),
       title:   z.string().optional()
         .describe('Alternative to id: exact match first, then unique prefix, then unique substring. An ambiguous title comes back as the candidate list to retry with'),
@@ -586,7 +601,7 @@ export function createMcpServer(): McpServer {
         .describe('Unique across live notes, case-insensitively; a clash is refused rather than merged. This is the string other notes link to as [[Title]]'),
       content:     z.string().max(MAX_NOTE_CONTENT_CHARS).default('')
         .describe('Markdown body. Empty by default, so a note can be created first and filled with append_to_note'),
-      folder_id:   z.string().uuid().nullable().optional()
+      folder_id:   uuid().nullable().optional()
         .describe('Folder UUID. Omit or pass null for the vault root; use folder_path instead when you have the path rather than the id'),
       folder_path: z.string().optional()
         .describe('Folder path (e.g. "Projects/Kybase") as alternative to folder_id'),
@@ -647,13 +662,13 @@ export function createMcpServer(): McpServer {
     'Pass expected_updated_at (the updated_at you read) to be refused instead of overwriting a ' +
     'change made in between.',
     {
-      id:        z.string().uuid()
+      id:        uuid()
         .describe('The note\'s UUID. Live notes only; a note in the trash has to be restored before it can be edited'),
       title:     z.string().trim().min(1).max(500).optional()
         .describe('New title. Renaming rewrites every [[link]] pointing here in other notes'),
       content:   z.string().max(MAX_NOTE_CONTENT_CHARS).optional()
         .describe('Replaces the whole body. To add to a note use append_to_note, to change part of one use replace_in_note — both leave the rest untouched'),
-      folder_id: z.string().uuid().nullable().optional()
+      folder_id: uuid().nullable().optional()
         .describe('Move the note to this folder; null moves it to the vault root. Omit to leave it where it is'),
       tags:      z.array(z.string()).optional()
         .describe('Replaces the entire tag list — anything left out is removed. To add one tag, send the existing tags plus the new one'),
@@ -790,7 +805,7 @@ export function createMcpServer(): McpServer {
     'instead of the later one overwriting the earlier. Re-embeds in the background like any ' +
     'content change.',
     {
-      id:      z.string().uuid().optional().describe('The note\'s UUID. Alternative to title'),
+      id:      uuid().optional().describe('The note\'s UUID. Alternative to title'),
       title:   z.string().optional().describe('Alternative to id; resolved like get_note'),
       content: z.string().min(1).max(MAX_NOTE_CONTENT_CHARS)
         .describe('Text to add. Trailing whitespace is trimmed and a blank line is inserted before it, so the addition never runs into the preceding paragraph'),
@@ -883,7 +898,7 @@ export function createMcpServer(): McpServer {
     'actually occurred. Do not combine `edits` with the singular find/replace/old_string/new_string/' +
     'expected_count fields — use one form or the other.',
     {
-      id:      z.string().uuid().optional().describe('The note\'s UUID. Alternative to title'),
+      id:      uuid().optional().describe('The note\'s UUID. Alternative to title'),
       title:   z.string().optional().describe('Alternative to id; resolved like get_note'),
       ...editItemShape,
       expected_count: z.number().int().min(1).optional()
@@ -1014,7 +1029,7 @@ export function createMcpServer(): McpServer {
     `Soft-delete a note by id — it disappears from list_notes/search/get_note/the graph, but is ` +
     `recoverable with restore_note for ${TRASH_RETENTION_DAYS} days before being purged for good. ` +
     'Use list_notes with trashed:true to see what\'s currently in the trash.',
-    { id: z.string().uuid()
+    { id: uuid()
       .describe('The note\'s UUID. An unknown or already-trashed id is refused rather than reported as deleted') },
     async ({ id }) => {
       const deleted = await softDeleteNote(id);
@@ -1029,7 +1044,7 @@ export function createMcpServer(): McpServer {
     'Undo delete_note: brings a soft-deleted note back. Errors if the note isn\'t in the trash ' +
     '(never deleted, already restored, or purged past the retention window), or if a live note has ' +
     'since taken the same title (rename one of them first, then retry).',
-    { id: z.string().uuid()
+    { id: uuid()
       .describe('UUID of a note currently in the trash — the same id delete_note was given') },
     async ({ id }) => {
       let restored: boolean;
@@ -1228,7 +1243,7 @@ export function createMcpServer(): McpServer {
         .describe('Hits per page. Prefer has_more with offset over asking for one large page'),
       offset:         z.number().int().min(0).default(0)
         .describe('Skip this many hits — with has_more in the response, how you read past the first page'),
-      folder_id:      z.string().uuid().optional().describe('Restrict to notes in this folder'),
+      folder_id:      uuid().optional().describe('Restrict to notes in this folder'),
       folder_path:    z.string().optional()
         .describe('Same restriction by path (e.g. "Projects/Kybase") instead of UUID — that folder itself, not its subfolders'),
       tag:            z.string().optional().describe('Restrict to notes with this tag'),
@@ -1418,7 +1433,7 @@ export function createMcpServer(): McpServer {
     {
       name:      z.string().min(1).max(255)
         .describe('Folder name. Unique among its siblings — the same name under a different parent is fine'),
-      parent_id: z.string().uuid().nullable().optional()
+      parent_id: uuid().nullable().optional()
         .describe('Parent folder UUID. Omit or pass null to create it at the top level'),
     },
     async ({ name, parent_id }) => {
@@ -1443,10 +1458,10 @@ export function createMcpServer(): McpServer {
     'Provide at least one of name/parent_id. The response includes the resolved `path` so a rename or ' +
     'move can be confirmed without a follow-up list_folders call.',
     {
-      id:        z.string().uuid().describe('UUID of the folder to rename or move'),
+      id:        uuid().describe('UUID of the folder to rename or move'),
       name:      z.string().min(1).max(255).optional()
         .describe('New name. Must stay unique among this folder\'s siblings'),
-      parent_id: z.string().uuid().nullable().optional()
+      parent_id: uuid().nullable().optional()
         .describe('New parent folder UUID; null moves it to the top level. Moving a folder into its own descendant is refused'),
     },
     async ({ id, name, parent_id }) => {
@@ -1502,7 +1517,7 @@ export function createMcpServer(): McpServer {
     'notes in nested subfolders — is soft-deleted into the trash along with it (see delete_note), ' +
     'recoverable via restore_note within the retention window. To preserve organization instead, ' +
     'move notes/subfolders out first.',
-    { id: z.string().uuid()
+    { id: uuid()
       .describe('UUID of the folder to delete along with its subfolders. Notes inside are moved to the trash, not destroyed') },
     async ({ id }) => {
       // One transaction: notes in the subtree must land in the trash
@@ -1533,7 +1548,7 @@ export function createMcpServer(): McpServer {
     'default and call get_note on specific ids instead). Paginated like get_note. Takes id or title, ' +
     'like get_note — title resolves the same forgiving way (exact, then prefix, then substring).',
     {
-      id:              z.string().uuid().optional()
+      id:              uuid().optional()
         .describe('UUID of the note whose incoming links you want'),
       title:           z.string().optional()
         .describe('Alternative to id; resolved like get_note (exact, then prefix, then substring)'),
@@ -1615,7 +1630,7 @@ export function createMcpServer(): McpServer {
     'An empty result means nothing links to or from this note, which is a fact about the writing, ' +
     'not about the topic.',
     {
-      id:    z.string().uuid().optional()
+      id:    uuid().optional()
         .describe('UUID of the note whose surroundings you want'),
       title: z.string().optional()
         .describe('Alternative to id; resolved like get_note (exact, then prefix, then substring)'),
@@ -1664,7 +1679,7 @@ export function createMcpServer(): McpServer {
     'when you only need part of the graph. Node titles in the result are valid [[wikilink]] targets — ' +
     'but only within whatever scope you asked for.',
     {
-      folder_id:        z.string().uuid().optional()
+      folder_id:        uuid().optional()
         .describe('Restrict to notes in this folder and its descendant folders'),
       root_title:       z.string().optional()
         .describe('Keep only nodes within `depth` wikilink-hops of this note (case-insensitive)'),

@@ -407,7 +407,8 @@ export function createMcpServer(): McpServer {
       updated_after:  z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or after this'),
       updated_before: z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or before this'),
       sort:      z.enum(['created', 'updated']).default('updated').describe('Which date drives the ordering'),
-      limit:     z.number().int().min(1).max(200).default(20),
+      limit:     z.number().int().min(1).max(200).default(20)
+        .describe('Maximum notes to return. Applies in trashed mode too'),
       trashed:   z.boolean().default(false).describe('List soft-deleted notes instead of live ones'),
     },
     async ({ folder_id, tag, created_after, created_before, updated_after, updated_before, sort, limit, trashed }) => {
@@ -472,8 +473,10 @@ export function createMcpServer(): McpServer {
     'links (targets not found) are listed ' +
     'separately.',
     {
-      id:      z.string().uuid().optional(),
-      title:   z.string().optional(),
+      id:      z.string().uuid().optional()
+        .describe('The note\'s UUID. Live notes only — a trashed note is not found until restore_note brings it back'),
+      title:   z.string().optional()
+        .describe('Alternative to id: exact match first, then unique prefix, then unique substring. An ambiguous title comes back as the candidate list to retry with'),
       section: z.string().optional()
         .describe('Return only this section (heading text or slug, case-insensitive) and its body'),
       offset:  z.number().int().min(0).default(0).describe('Character offset into content to start from'),
@@ -579,12 +582,16 @@ export function createMcpServer(): McpServer {
     'The server instructions\' wikilink and tag rules apply: search_notes for the topic first and ' +
     'link the related notes it finds, and call list_tags before coining a new tag.',
     {
-      title:       z.string().trim().min(1).max(500),
-      content:     z.string().max(MAX_NOTE_CONTENT_CHARS).default(''),
-      folder_id:   z.string().uuid().nullable().optional(),
+      title:       z.string().trim().min(1).max(500)
+        .describe('Unique across live notes, case-insensitively; a clash is refused rather than merged. This is the string other notes link to as [[Title]]'),
+      content:     z.string().max(MAX_NOTE_CONTENT_CHARS).default('')
+        .describe('Markdown body. Empty by default, so a note can be created first and filled with append_to_note'),
+      folder_id:   z.string().uuid().nullable().optional()
+        .describe('Folder UUID. Omit or pass null for the vault root; use folder_path instead when you have the path rather than the id'),
       folder_path: z.string().optional()
         .describe('Folder path (e.g. "Projects/Kybase") as alternative to folder_id'),
-      tags:        z.array(z.string()).default([]),
+      tags:        z.array(z.string()).default([])
+        .describe('Tags for the new note: English, lowercase, kebab-case. Call list_tags first and reuse an existing tag where one fits'),
     },
     async ({ title, content: rawContent, folder_id: rawFolderId, folder_path, tags }) => {
       if (rawFolderId && folder_path) {
@@ -640,11 +647,16 @@ export function createMcpServer(): McpServer {
     'Pass expected_updated_at (the updated_at you read) to be refused instead of overwriting a ' +
     'change made in between.',
     {
-      id:        z.string().uuid(),
-      title:     z.string().trim().min(1).max(500).optional(),
-      content:   z.string().max(MAX_NOTE_CONTENT_CHARS).optional(),
-      folder_id: z.string().uuid().nullable().optional(),
-      tags:      z.array(z.string()).optional(),
+      id:        z.string().uuid()
+        .describe('The note\'s UUID. Live notes only; a note in the trash has to be restored before it can be edited'),
+      title:     z.string().trim().min(1).max(500).optional()
+        .describe('New title. Renaming rewrites every [[link]] pointing here in other notes'),
+      content:   z.string().max(MAX_NOTE_CONTENT_CHARS).optional()
+        .describe('Replaces the whole body. To add to a note use append_to_note, to change part of one use replace_in_note — both leave the rest untouched'),
+      folder_id: z.string().uuid().nullable().optional()
+        .describe('Move the note to this folder; null moves it to the vault root. Omit to leave it where it is'),
+      tags:      z.array(z.string()).optional()
+        .describe('Replaces the entire tag list — anything left out is removed. To add one tag, send the existing tags plus the new one'),
       expected_updated_at: z.string().optional()
         .describe('ISO updated_at from when you read the note; refuses the write if it changed since'),
     },
@@ -773,19 +785,30 @@ export function createMcpServer(): McpServer {
   server.tool(
     'append_to_note',
     'Add text to a note without resending the rest — prefer it over update_note for journals, logs ' +
-    'and running lists. A blank line separates your text from what was there. Re-embeds in the ' +
-    'background like any content change.',
+    'and running lists. A blank line separates your text from what was there. The note is locked ' +
+    'for the read-modify-write, so two sessions appending at the same moment keep both additions ' +
+    'instead of the later one overwriting the earlier. Re-embeds in the background like any ' +
+    'content change.',
     {
-      id:      z.string().uuid().optional(),
+      id:      z.string().uuid().optional().describe('The note\'s UUID. Alternative to title'),
       title:   z.string().optional().describe('Alternative to id; resolved like get_note'),
-      content: z.string().min(1).max(MAX_NOTE_CONTENT_CHARS),
+      content: z.string().min(1).max(MAX_NOTE_CONTENT_CHARS)
+        .describe('Text to add. Trailing whitespace is trimmed and a blank line is inserted before it, so the addition never runs into the preceding paragraph'),
       section: z.string().optional()
         .describe('Target this section (heading text or slug) instead of the whole note'),
       at: z.enum(['note_end', 'note_start', 'section_end', 'section_start', 'before_section', 'after_section'])
         .optional()
         .describe(
-          'Default section_end if section given, else note_end. note_start is after the H1/intro, ' +
-          'before its first nested heading — not offset 0.'
+          'Where the text lands. Defaults to section_end when section is given, else note_end. ' +
+          'note_end: the very end. ' +
+          'note_start: above the first heading nested under the opening one — NOT offset 0, except ' +
+          'on a note with no headings at all, where it is; on a note whose only heading is the ' +
+          'opening one it falls to the end instead. ' +
+          'before_section: above the section\'s own heading line. ' +
+          'section_start: directly under that heading line, above the section\'s body. ' +
+          'section_end: after the section and everything nested inside it. ' +
+          'after_section: the same position as section_end. ' +
+          'The four section-relative values require `section` and are refused without it.'
         ),
     },
     async ({ id, title, content, section, at }) => {
@@ -860,10 +883,11 @@ export function createMcpServer(): McpServer {
     'actually occurred. Do not combine `edits` with the singular find/replace/old_string/new_string/' +
     'expected_count fields — use one form or the other.',
     {
-      id:      z.string().uuid().optional(),
+      id:      z.string().uuid().optional().describe('The note\'s UUID. Alternative to title'),
       title:   z.string().optional().describe('Alternative to id; resolved like get_note'),
       ...editItemShape,
-      expected_count: z.number().int().min(1).optional(),
+      expected_count: z.number().int().min(1).optional()
+        .describe('How many times `find` is expected to occur (default 1). The edit is refused if the real count differs, so a loose `find` cannot quietly rewrite more than intended'),
       edits: z.array(z.object(editItemShape)).min(1).max(50).optional()
         .describe('Multiple find/replace steps applied in order in a single call — see main description.'),
       expected_updated_at: z.string().optional()
@@ -990,7 +1014,8 @@ export function createMcpServer(): McpServer {
     `Soft-delete a note by id — it disappears from list_notes/search/get_note/the graph, but is ` +
     `recoverable with restore_note for ${TRASH_RETENTION_DAYS} days before being purged for good. ` +
     'Use list_notes with trashed:true to see what\'s currently in the trash.',
-    { id: z.string().uuid() },
+    { id: z.string().uuid()
+      .describe('The note\'s UUID. An unknown or already-trashed id is refused rather than reported as deleted') },
     async ({ id }) => {
       const deleted = await softDeleteNote(id);
       if (!deleted) throw new Error('Note not found (already deleted, or no such note)');
@@ -1004,7 +1029,8 @@ export function createMcpServer(): McpServer {
     'Undo delete_note: brings a soft-deleted note back. Errors if the note isn\'t in the trash ' +
     '(never deleted, already restored, or purged past the retention window), or if a live note has ' +
     'since taken the same title (rename one of them first, then retry).',
-    { id: z.string().uuid() },
+    { id: z.string().uuid()
+      .describe('UUID of a note currently in the trash — the same id delete_note was given') },
     async ({ id }) => {
       let restored: boolean;
       try {
@@ -1158,10 +1184,9 @@ export function createMcpServer(): McpServer {
     'question is not a note answering it. Such hits take the top half of the relevance scale, ' +
     'ranked among themselves by their own text score. Neither tier nor coverage is comparable ' +
     'across different queries, only within one response. ' +
-    'Filters: folder_id (or folder_path, the same folder written as a path — no need to look the ' +
-    'UUID up first), tag, created_after/before (when a note was made), updated_after/before ' +
-    '(when its own content/title/folder/tags last actually changed — a rename elsewhere rewriting ' +
-    'a [[link]] to this note does not count) — these are NOT interchangeable. ' +
+    'The date filters answer different questions and are not interchangeable: created_* is when a ' +
+    'note was made, updated_* when its own text last changed — a rename elsewhere rewriting a ' +
+    '[[link]] inside it does not count as an edit here. ' +
     'Dates filter, they do not rank: a note edited an hour ago and one untouched for months ' +
     'compete on relevance alone, and nothing here prefers the fresher one. So for "what is the ' +
     'LATEST state of X" this is the wrong first call — list_notes already sorts by recency, ' +
@@ -1179,33 +1204,28 @@ export function createMcpServer(): McpServer {
     'non-zero value there explains a thin semantic arm rather than an empty vault. ' +
     'question_echo:true means the note LISTS your question without answering it (an FAQ or agenda ' +
     'of questions); treat it as a pointer to the topic, never as the answer. ' +
-    'When reranked:true, prefer type="text" for a term you already know is written in your notes ' +
-    'verbatim — an identifier, a filename, a code symbol, a product name. Reranking judges a ' +
-    'passage by meaning, and a model that has never seen your vault can rank a passage that reads ' +
-    'as more on-topic above the note that literally contains your term — a hit carrying most of ' +
-    'your query\'s words can end up below one carrying far fewer. Only ' +
-    'exact:true hits are protected from this. So hybrid remains the right default when you do not ' +
-    'know the wording, and text is the better tool when you do — check `coverage` on a hybrid ' +
-    'response to see whether the top hit actually contains what you typed. ' +
-    'When the response carries reranked:true, a cross-encoder chose this order instead of rank ' +
-    'fusion, and each hit\'s rerank_score is its best passage\'s score. That score is a model\'s ' +
-    'opinion about ONE passage of the note, ordering this response only — it is not a confidence ' +
-    'value, not comparable between queries, and not evidence the note answers you. reranked:false ' +
-    'alongside it means the reranker was asked and did not answer, so you are reading the ordinary ' +
-    'fused order. Read the text either way. ' +
-    'That model is by far the slowest part of a search, and reranking is off unless an owner ' +
-    'turned it on — it is optional and unproven, not an upgrade you are missing. Where it is on, ' +
-    'pass rerank:false whenever you want an answer rather than a better ORDER: checking whether a ' +
-    'term appears at all, or finding the note holding a value whose shape you already know. ' +
+    'Reranking is a hybrid-only stage: type "text" and type "semantic" never run it, report no ' +
+    'reranked field at all, and ignore the rerank flag. It judges a passage by meaning, so a term ' +
+    'you know is written verbatim is better served by type="text" — only exact:true hits are ' +
+    'protected from a passage that merely reads as more on-topic outranking the note that ' +
+    'literally contains your term. ' +
+    'reranked:true means a cross-encoder chose this order instead of rank fusion, and a hit\'s ' +
+    'rerank_score is its best passage\'s score: a model\'s opinion about ONE passage, ordering ' +
+    'this response only — not a confidence value, not comparable between queries, and not ' +
+    'evidence the note answers you. reranked:false alongside a configured reranker means it was ' +
+    'asked and did not answer, so the order is the ordinary fused one. Read the text either way. ' +
     'Pass explain:true to also see each hit\'s raw text_score/semantic_score/rrf_score and created_at ' +
     '— only useful for debugging the ranking itself, omitted by default to keep responses short.',
     {
       // The message matters more than the rule: an agent that wanted "every
       // note tagged X" hits this and needs to be told where that lives, not
       // that a string was expected.
-      query:          z.string({ error: QUERY_REQUIRED }).min(1, QUERY_REQUIRED),
-      type:           z.enum(['text', 'semantic', 'hybrid']).default('hybrid'),
-      limit:          z.number().int().min(1).max(50).default(5),
+      query:          z.string({ error: QUERY_REQUIRED }).min(1, QUERY_REQUIRED)
+        .describe('What to look for: words or a question for hybrid/semantic, an exact identifier, path or phrase for type "text"'),
+      type:           z.enum(['text', 'semantic', 'hybrid']).default('hybrid')
+        .describe('"hybrid" fuses keyword and meaning-based matching and is the right default; "text" is keyword-only and exact; "semantic" is meaning-only'),
+      limit:          z.number().int().min(1).max(50).default(5)
+        .describe('Hits per page. Prefer has_more with offset over asking for one large page'),
       offset:         z.number().int().min(0).default(0)
         .describe('Skip this many hits — with has_more in the response, how you read past the first page'),
       folder_id:      z.string().uuid().optional().describe('Restrict to notes in this folder'),
@@ -1217,7 +1237,7 @@ export function createMcpServer(): McpServer {
       updated_after:  z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or after this'),
       updated_before: z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or before this'),
       rerank:         z.boolean().default(true)
-        .describe('Set false to skip the cross-encoder and answer from the fused order — several times faster, and not measurably worse'),
+        .describe('Set false to skip the cross-encoder and answer from the fused order — several times faster, and not measurably worse. Applies to type "hybrid" only: text and semantic never rerank, and this flag changes nothing there'),
       explain:        z.boolean().default(false).describe('Include raw per-arm scores and created_at for debugging ranking'),
     },
     async ({ query: q, type, limit, offset, folder_id, folder_path, tag, created_after, created_before, updated_after, updated_before, rerank, explain }) => {
@@ -1396,8 +1416,10 @@ export function createMcpServer(): McpServer {
     'create_folder',
     'Create a new folder. Optionally nested under a parent.',
     {
-      name:      z.string().min(1).max(255),
-      parent_id: z.string().uuid().nullable().optional(),
+      name:      z.string().min(1).max(255)
+        .describe('Folder name. Unique among its siblings — the same name under a different parent is fine'),
+      parent_id: z.string().uuid().nullable().optional()
+        .describe('Parent folder UUID. Omit or pass null to create it at the top level'),
     },
     async ({ name, parent_id }) => {
       let data;
@@ -1421,9 +1443,11 @@ export function createMcpServer(): McpServer {
     'Provide at least one of name/parent_id. The response includes the resolved `path` so a rename or ' +
     'move can be confirmed without a follow-up list_folders call.',
     {
-      id:        z.string().uuid(),
-      name:      z.string().min(1).max(255).optional(),
-      parent_id: z.string().uuid().nullable().optional(),
+      id:        z.string().uuid().describe('UUID of the folder to rename or move'),
+      name:      z.string().min(1).max(255).optional()
+        .describe('New name. Must stay unique among this folder\'s siblings'),
+      parent_id: z.string().uuid().nullable().optional()
+        .describe('New parent folder UUID; null moves it to the top level. Moving a folder into its own descendant is refused'),
     },
     async ({ id, name, parent_id }) => {
       if (parent_id !== undefined && parent_id === id) {
@@ -1478,7 +1502,8 @@ export function createMcpServer(): McpServer {
     'notes in nested subfolders — is soft-deleted into the trash along with it (see delete_note), ' +
     'recoverable via restore_note within the retention window. To preserve organization instead, ' +
     'move notes/subfolders out first.',
-    { id: z.string().uuid() },
+    { id: z.string().uuid()
+      .describe('UUID of the folder to delete along with its subfolders. Notes inside are moved to the trash, not destroyed') },
     async ({ id }) => {
       // One transaction: notes in the subtree must land in the trash
       // together with the folder disappearing, not one without the other.
@@ -1508,11 +1533,16 @@ export function createMcpServer(): McpServer {
     'default and call get_note on specific ids instead). Paginated like get_note. Takes id or title, ' +
     'like get_note — title resolves the same forgiving way (exact, then prefix, then substring).',
     {
-      id:              z.string().uuid().optional(),
-      title:           z.string().optional(),
-      include_content: z.boolean().default(false),
-      limit:           z.number().int().min(1).max(200).default(50),
-      offset:          z.number().int().min(0).default(0),
+      id:              z.string().uuid().optional()
+        .describe('UUID of the note whose incoming links you want'),
+      title:           z.string().optional()
+        .describe('Alternative to id; resolved like get_note (exact, then prefix, then substring)'),
+      include_content: z.boolean().default(false)
+        .describe('Return each linking note\'s full text instead of a snippet around the link. Expensive when many notes link here'),
+      limit:           z.number().int().min(1).max(200).default(50)
+        .describe('Linking notes per page. Several links from the same note count as one'),
+      offset:          z.number().int().min(0).default(0)
+        .describe('Skip this many linking notes — pass back next_offset from the previous page'),
     },
     async ({ id, title, include_content, limit, offset }) => {
       if (!id && !title) throw new Error('Provide either id or title');
@@ -1585,8 +1615,10 @@ export function createMcpServer(): McpServer {
     'An empty result means nothing links to or from this note, which is a fact about the writing, ' +
     'not about the topic.',
     {
-      id:    z.string().uuid().optional(),
-      title: z.string().optional(),
+      id:    z.string().uuid().optional()
+        .describe('UUID of the note whose surroundings you want'),
+      title: z.string().optional()
+        .describe('Alternative to id; resolved like get_note (exact, then prefix, then substring)'),
       depth: z.number().int().min(1).max(3).default(1)
         .describe('Hops to walk. 1 = directly linked notes; each extra hop widens the set fast'),
     },

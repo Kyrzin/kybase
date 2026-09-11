@@ -113,6 +113,25 @@ export const FOLDER_REPARENT_LOCK_KEY = 0x666f6c64; // 'fold'
  */
 export const REINDEX_LOCK_KEY = 0x7265696e; // 'rein'
 
+/**
+ * Advisory-lock key admitting one link-index refresh at a time
+ * (lib/note-links.ts).
+ *
+ * The refresh reads the stale set, then per note deletes its rows and
+ * re-inserts them. Two callers that read the same stale set both delete and
+ * both insert, and the second one dies on note_links_pkey — which surfaces to
+ * a caller as a tool call that simply failed. Parallel tool calls are the
+ * normal way an agent works, so "get_graph and get_backlinks at once" was
+ * enough to trigger it whenever the index had drifted.
+ *
+ * Xact-scoped like FOLDER_REPARENT_LOCK_KEY, not session-scoped like the
+ * reindex above: this is a parse over already-loaded rows, short enough to
+ * hold a transaction for, and releasing on rollback is exactly what should
+ * happen if it fails. The stale set is re-read inside the lock, so the caller
+ * that waited does the work the first one did not, rather than repeating it.
+ */
+export const LINK_INDEX_LOCK_KEY = 0x6c696e6b; // 'link'
+
 /** True when the error is a Postgres unique-constraint violation. */
 export function isUniqueViolation(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: string }).code === '23505';

@@ -10,7 +10,7 @@
 // disagree with the renderer and with rename rewriting about which brackets
 // are links, and a third opinion on that question is how the existing two
 // came to differ in the first place.
-import { query, withTransaction } from './db';
+import { query, withTransaction, LINK_INDEX_LOCK_KEY } from './db';
 import { wikilinkOccurrences } from './wikilinks';
 
 /** Characters of surrounding text kept on each side of a link. */
@@ -57,14 +57,27 @@ function contextAround(content: string, index: number, length: number): string {
  * found nothing" stay distinguishable — otherwise every link-free note would
  * be re-parsed forever.
  */
-export async function refreshLinkIndex(): Promise<number> {
-  const stale = await query<{ id: string; content: string; content_revision: string }>(
-    `select id, content, content_revision from notes
-     where deleted_at is null and links_revision is distinct from content_revision`
-  );
-  if (stale.length === 0) return 0;
+const STALE_NOTES_SQL =
+  `select id, content, content_revision from notes
+   where deleted_at is null and links_revision is distinct from content_revision`;
 
+export async function refreshLinkIndex(): Promise<number> {
+  // Cheap guard so a current index costs one read and no transaction. It is
+  // only a guard: the set it returns is not the set that gets parsed.
+  const maybeStale = await query(STALE_NOTES_SQL);
+  if (maybeStale.length === 0) return 0;
+
+  let parsed = 0;
   await withTransaction(async (client) => {
+    // Serialised: the delete-then-insert below is not safe to run twice over
+    // one note at once, and an agent issuing parallel tool calls is the
+    // ordinary case, not a rare one. See LINK_INDEX_LOCK_KEY.
+    await client.query('select pg_advisory_xact_lock($1)', [LINK_INDEX_LOCK_KEY]);
+    // Re-read under the lock. Whoever waited here may have been waiting for
+    // exactly this work, and redoing it would mean deleting rows the first
+    // caller had just written.
+    const { rows: stale } = await client.query<{ id: string; content: string; content_revision: string }>(STALE_NOTES_SQL, []);
+    parsed = stale.length;
     for (const note of stale) {
       await client.query('delete from note_links where source_note_id = $1', [note.id]);
       const links = wikilinkOccurrences(note.content);
@@ -89,7 +102,7 @@ export async function refreshLinkIndex(): Promise<number> {
       );
     }
   });
-  return stale.length;
+  return parsed;
 }
 
 // Resolution mirrors extractWikilinkTarget: the whole raw string wins over

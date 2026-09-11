@@ -16,6 +16,21 @@ import { extractHeadings, type Heading } from './markdown';
 import { getSemanticProfile } from './embeddings';
 import { MAX_NOTE_CONTENT_CHARS, stripNulBytes } from './types';
 
+/**
+ * A UUID parameter.
+ *
+ * Not `uuid()`, which emits `format: "uuid"` AND a 166-character
+ * `pattern` restating it — seventeen times across this server's tools, 706
+ * tokens of identical machine-generated regex an agent reads on every
+ * session and learns nothing from. The refinement validates exactly what
+ * that pattern did (verified against it, nil UUID included) and is invisible
+ * to JSON Schema, so `format` is declared explicitly and carries the meaning
+ * on its own.
+ */
+const UUID_RE = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
+const uuid = () => z.string().refine((v) => UUID_RE.test(v), 'must be a UUID').meta({ format: 'uuid' });
+
+
 
 // get_note(title=...) is the shortcut past search_notes, but real titles are long
 // and composite ("2026-07-24 — Kybase: Move-folder + sidebar UX polish"), and
@@ -157,6 +172,29 @@ const QUERY_REQUIRED =
 function morePage(hasMore: boolean, limit: number, offset: number) {
   return hasMore ? { has_more: true, next_offset: offset + limit } : { has_more: false };
 }
+
+/**
+ * A JSON-Schema fragment the zod shape itself cannot express, merged into the
+ * schema this tool publishes.
+ *
+ * "id or title" is the case that forced this: every address-taking tool
+ * enforces it at runtime, but server.tool() derives `required` from the shape
+ * alone, where both fields are optional — so the rule reached the client as
+ * nothing at all and the call failed a network round trip later than it had
+ * to. registerTool() takes a whole ZodObject, so .meta() rides into the
+ * emitted schema. The handler's own throw stays the authority; this only
+ * lets a validating client catch the same mistake first.
+ *
+ * $schema is pinned to draft-07 because registerTool would otherwise emit
+ * 2020-12, and a surface that declares two dialects across eighteen tools is
+ * a worse thing to ship than the pin.
+ */
+function withSchemaRule<T extends z.ZodRawShape>(shape: T, rule: Record<string, unknown>) {
+  return z.object(shape).meta({ $schema: 'http://json-schema.org/draft-07/schema#', ...rule });
+}
+
+/** Addressed by either field, never neither — get_note and everything shaped like it. */
+const ID_OR_TITLE = { anyOf: [{ required: ['id'] }, { required: ['title'] }] };
 
 function withFolderPath<T extends { folder_id: string | null }>(
   row: T,
@@ -360,6 +398,61 @@ async function unresolvedWikilinksIn(text: string, selfTitle?: string): Promise<
   return missing;
 }
 
+/** Shape every tool handler returns; enough of it to log an outcome. */
+type ToolReply = { isError?: boolean; content?: { text?: string }[] };
+
+/**
+ * One stderr line per tool call: what was called, whether it worked, how much
+ * came back, how long it took.
+ *
+ * Nothing on this path used to log at all, which made every "how often does
+ * this actually happen" question unanswerable — the size of a reply, the rate
+ * of refusals and which tools agents reach for were all invisible to the
+ * person running the server. `docker logs` is where that belongs.
+ *
+ * Wrapped at the server rather than at each registration so a tool added
+ * later is logged without anyone remembering to, and so the eighteen call
+ * sites below stay about the tools instead of about logging.
+ *
+ * Deliberately never logs arguments or reply text — a query string and a note
+ * body are the two things most worth not writing to a log file. Length is the
+ * part that answers the question. stderr, because in stdio mode stdout
+ * carries JSON-RPC framing and nothing else.
+ */
+function logToolCalls(server: McpServer): void {
+  const wrap = (register: (...a: unknown[]) => unknown) => (...args: unknown[]) => {
+    const name = String(args[0]);
+    const last = args.length - 1;
+    const handler = args[last];
+    if (typeof handler === 'function') {
+      const inner = handler as (...a: unknown[]) => Promise<ToolReply>;
+      args[last] = async (...callArgs: unknown[]): Promise<ToolReply> => {
+        const started = Date.now();
+        const done = (outcome: string, chars: number) =>
+          console.error(`[mcp] ${name} ${outcome} ${chars}ch ${Date.now() - started}ms`);
+        try {
+          const reply = await inner(...callArgs);
+          const chars = reply?.content?.reduce((n, c) => n + (c.text?.length ?? 0), 0) ?? 0;
+          done(reply?.isError ? 'error' : 'ok', chars);
+          return reply;
+        } catch (err) {
+          // A throw becomes an isError reply one layer up, so it is the same
+          // event to a caller and has to read the same way here — including
+          // its size. A refusal that lists every heading in a note is not a
+          // cheap reply, and a log that called every error 0ch would hide
+          // exactly the ones worth finding.
+          done('error', err instanceof Error ? err.message.length : 0);
+          throw err;
+        }
+      };
+    }
+    return register.apply(server, args);
+  };
+  const s = server as unknown as Record<string, (...a: unknown[]) => unknown>;
+  s.tool = wrap(s.tool.bind(server));
+  s.registerTool = wrap(s.registerTool.bind(server));
+}
+
 export function createMcpServer(): McpServer {
   const server = new McpServer(
     { name: 'kybase', version: '1.0.0' },
@@ -368,26 +461,35 @@ export function createMcpServer(): McpServer {
         'Kybase is a personal knowledge base of interlinked markdown notes. Notes reference ' +
         'each other with [[Title]] wikilinks; those links form the knowledge graph.\n\n' +
         'When creating a note or substantially rewriting one:\n' +
-        '1. First call search_notes (type "hybrid") with the note\'s topic to find related existing notes.\n' +
+        '1. First call search_notes with the note\'s topic to find related existing notes.\n' +
         '2. If genuinely related notes exist, include [[wikilinks]] to the 2-5 most relevant ones in the ' +
         'note body — inline where natural, or as a final "Related: [[A]], [[B]]" line.\n' +
-        '3. Copy linked titles VERBATIM from tool results (search_notes, list_notes, get_graph). Never ' +
-        'write a [[link]] to a title you have not seen in a tool result in this conversation — invented ' +
+        '3. Copy linked titles VERBATIM from any tool result in this conversation. Never write a ' +
+        '[[link]] to a title you have not seen in one — invented ' +
         'or misremembered titles produce broken links. A write that introduces one comes back ' +
         'with `unresolved_links` naming it — fix it there, not hours later.\n' +
         '4. Do not force links: if nothing is related, create the note without any.\n\n' +
-        'Tagging: new tags are English, lowercase, kebab-case. Call list_tags first and reuse an ' +
-        'existing tag when one fits, rather than coining an RU/EN or case-variant duplicate.\n\n' +
+        'Tagging: new tags are lowercase, kebab-case, and follow the language already in use. Call ' +
+        'list_tags first and reuse an existing tag when one fits, rather than coining a duplicate.\n\n' +
         'To add to a note use append_to_note, not update_note: resending whole content to add a ' +
         'paragraph costs the note twice and overwrites what another session wrote meanwhile. When ' +
-        'you do rewrite whole content, pass the updated_at you read as expected_updated_at.',
+        'you do rewrite whole content, pass the updated_at you read as expected_updated_at.\n\n' +
+        'Paging: `limit` and `offset` count whatever that tool returns — characters in get_note, ' +
+        'hits in search_notes, notes in list_notes, linking notes in get_backlinks. A partial reply ' +
+        'always says so, in one of three ways: `has_more` with `next_offset` when there is another ' +
+        'page but no honest total; `total` above the rows you got when the real count is knowable; ' +
+        '`truncated: true` when a ceiling cut the reply, which means narrow the request rather than ' +
+        'raise the ceiling. None of the three present means you have everything there is.',
     }
   );
+
+  // Before any registration below — it wraps the registration methods.
+  logToolCalls(server);
 
   // ── list_notes ───────────────────────────────────────────────────────────
   server.tool(
     'list_notes',
-    'List notes, sorted by recency (newest first). Optional filters: folder_id, tag, ' +
+    'List notes, sorted by recency (newest first). Optional filters: folder_id or folder_path, tag, ' +
     'created_after/created_before, updated_after/updated_before, limit (max 200). ' +
     'created_after answers "what is new" — a note\'s creation date never changes after it is ' +
     'made. updated_after answers "what changed since I was last here" — it moves only when this ' +
@@ -398,30 +500,52 @@ export function createMcpServer(): McpServer {
     'ordering (default "updated"). Each note carries content_length (characters in the full note) ' +
     'so you can tell a long note from a short one before spending a get_note call on it. Pass ' +
     'trashed:true to see soft-deleted notes instead (recoverable with restore_note until they age ' +
-    'out of the trash) — other filters are ignored in that mode.',
+    'out of the trash) — other filters are ignored in that mode.\n\nThe reply is ' +
+    '`{notes, has_more, next_offset?}`, not a bare array: a page of 20 that ends there and a page ' +
+    'of 20 out of 400 are otherwise the same response. Pass `next_offset` back as `offset` for the ' +
+    'rest. Applies in trashed mode too.',
     {
-      folder_id: z.string().uuid().optional().describe('Filter by folder UUID'),
+      folder_id: uuid().optional().describe('Filter by folder UUID — that folder itself, not its subfolders'),
+      folder_path: z.string().optional()
+        .describe('Same filter by path (e.g. "Projects/Kybase") instead of UUID — that folder itself, not its subfolders'),
       tag:       z.string().optional().describe('Filter by tag'),
       created_after:  z.string().optional().describe('ISO timestamp — only notes created at or after this'),
       created_before: z.string().optional().describe('ISO timestamp — only notes created at or before this'),
       updated_after:  z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or after this'),
       updated_before: z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or before this'),
       sort:      z.enum(['created', 'updated']).default('updated').describe('Which date drives the ordering'),
-      limit:     z.number().int().min(1).max(200).default(20),
+      limit:     z.number().int().min(1).max(200).default(20)
+        .describe('Maximum notes to return per page. Applies in trashed mode too'),
+      offset:    z.number().int().min(0).default(0)
+        .describe('Skip this many notes — pass back next_offset from the previous page'),
       trashed:   z.boolean().default(false).describe('List soft-deleted notes instead of live ones'),
     },
-    async ({ folder_id, tag, created_after, created_before, updated_after, updated_before, sort, limit, trashed }) => {
+    async ({ folder_id, folder_path, tag, created_after, created_before, updated_after, updated_before, sort, limit, offset, trashed }) => {
+      // Same either/or as search_notes: two spellings of one filter, and
+      // accepting both would leave the caller guessing which one won.
+      if (folder_id && folder_path) throw new Error('Provide either folder_id or folder_path, not both');
+      // limit + 1 rather than a second count(*): the only question the caller
+      // has is "is there more", and one extra row answers it for the cost of
+      // one extra row. Both branches build the same envelope — a shape that
+      // changed between trashed and live modes would be a worse trap than the
+      // bare array it replaces.
       if (trashed) {
-        const data = await query<{ id: string; title: string; folder_id: string | null; deleted_at: string }>(
-          'select id, title, folder_id, deleted_at from notes where deleted_at is not null order by deleted_at desc limit $1',
-          [limit]
+        const rows = await query<{ id: string; title: string; folder_id: string | null; deleted_at: string }>(
+          'select id, title, folder_id, deleted_at from notes where deleted_at is not null order by deleted_at desc limit $1 offset $2',
+          [limit + 1, offset]
         );
-        return { content: [{ type: 'text' as const, text: JSON.stringify(data) }] };
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({ notes: rows.slice(0, limit), ...morePage(rows.length > limit, limit, offset) }),
+          }],
+        };
       }
 
       const conds: string[] = ['deleted_at is null'];
       const params: unknown[] = [];
-      if (folder_id) { params.push(folder_id); conds.push(`folder_id = $${params.length}`); }
+      const folderId = folder_path ? await folderIdFromPath(folder_path) : folder_id;
+      if (folderId) { params.push(folderId); conds.push(`folder_id = $${params.length}`); }
       if (tag)       { params.push([tag]);     conds.push(`tags @> $${params.length}`); }
       if (created_after)  { params.push(created_after);  conds.push(`created_at >= $${params.length}`); }
       if (created_before) { params.push(created_before); conds.push(`created_at <= $${params.length}`); }
@@ -431,33 +555,49 @@ export function createMcpServer(): McpServer {
       // see migration 020.
       if (updated_after)  { params.push(updated_after);  conds.push(`content_updated_at >= $${params.length}`); }
       if (updated_before) { params.push(updated_before); conds.push(`content_updated_at <= $${params.length}`); }
-      params.push(limit);
+      params.push(limit + 1);
+      const limitParam = params.length;
+      params.push(offset);
+      const offsetParam = params.length;
       // sort is a fixed 2-value enum from zod, not user-supplied text — safe
       // to interpolate as a column name.
       const orderCol = sort === 'created' ? 'created_at' : 'content_updated_at';
-      const [data, paths] = await Promise.all([
+      const [rows, paths] = await Promise.all([
         query<{ id: string; title: string; folder_id: string | null; tags: string[]; created_at: string; updated_at: string; content_updated_at: string; content_length: number }>(
           `select id, title, folder_id, tags, created_at, updated_at, content_updated_at, length(content) as content_length from notes
            where ${conds.join(' and ')}
-           order by ${orderCol} desc limit $${params.length}`,
+           order by ${orderCol} desc limit $${limitParam} offset $${offsetParam}`,
           params
         ),
         folderPathMap(),
       ]);
-      return { content: [{ type: 'text' as const, text: JSON.stringify(data.map((n) => withFolderPath(n, paths))) }] };
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            notes: rows.slice(0, limit).map((n) => withFolderPath(n, paths)),
+            ...morePage(rows.length > limit, limit, offset),
+          }),
+        }],
+      };
     }
   );
 
   // ── get_note ─────────────────────────────────────────────────────────────
-  server.tool(
+  server.registerTool(
     'get_note',
+    {
+      description:
     'Get full note content by id or title. Title matching is case-insensitive and forgiving: an ' +
     'exact match wins, otherwise it falls back to prefix then substring, so a unique partial title ' +
     'resolves. An ambiguous title returns the candidate list (id + title) to retry with. Large ' +
     `notes are windowed: content is capped at ${DEFAULT_CONTENT_LIMIT} chars by default (see limit/offset) — check ` +
     'content_truncated and content_total_length in the response, and pass next_offset back as ' +
-    '`offset` to fetch the rest. Every response carries `headings` — the H1–H3 outline with ' +
-    'character offsets, so a truncated note still shows what is in the part you did not get. ' +
+    '`offset` to fetch the rest. A windowed or `section` response carries `headings` — the H1–H3 ' +
+    'outline with character offsets, so a truncated note still shows what is in the part you did ' +
+    'not get. A whole note does not: its own text already is the outline, every heading line ' +
+    'present verbatim. (One exception: a note that repeats a heading text still ships `headings`, ' +
+    'because only the slug tells those apart.) ' +
     'Jump there with that offset, or name it in `section` to get that heading and its body alone — ' +
     'with `section`, `headings` narrows to that section\'s own subheadings too (offsets re-based to ' +
     'the section\'s own start, matching offset/limit\'s meaning in that mode), not the whole note\'s. ' +
@@ -471,9 +611,11 @@ export function createMcpServer(): McpServer {
     'were actually edited — that\'s the one that answers "did anyone really touch this". Unresolved ' +
     'links (targets not found) are listed ' +
     'separately.',
-    {
-      id:      z.string().uuid().optional(),
-      title:   z.string().optional(),
+      inputSchema: withSchemaRule({
+      id:      uuid().optional()
+        .describe('The note\'s UUID. Live notes only — a trashed note is not found until restore_note brings it back'),
+      title:   z.string().optional()
+        .describe('Alternative to id: exact match first, then unique prefix, then unique substring. An ambiguous title comes back as the candidate list to retry with'),
       section: z.string().optional()
         .describe('Return only this section (heading text or slug, case-insensitive) and its body'),
       offset:  z.number().int().min(0).default(0).describe('Character offset into content to start from'),
@@ -483,6 +625,7 @@ export function createMcpServer(): McpServer {
         .describe('Also resolve [[wikilinks]] inside the note one level deep'),
       include_content: z.boolean().default(false)
         .describe('With resolve_links: include full text of linked notes, not just id/title/folder_path'),
+      }, ID_OR_TITLE),
     },
     async ({ id, title, section, offset, limit, resolve_links, include_content }) => {
       if (!id && !title) throw new Error('Provide either id or title');
@@ -563,7 +706,27 @@ export function createMcpServer(): McpServer {
           .map(h => ({ ...h, offset: h.offset - range.start }));
       }
       const windowed = withFolderPath(windowContent(body, offset, limit), paths);
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ ...windowed, headings: responseHeadings, ...linkFields }) }] };
+      // The outline earns its place only where the text cannot serve as one.
+      // On a whole note every `## Heading` line is already in `content`,
+      // verbatim and in order, so shipping the parsed outline alongside pays
+      // twice for the same knowledge. It stays in the three cases where it is
+      // the only source: a windowed reply (what did not arrive is invisible
+      // otherwise), a `section` reply (the caller is navigating by heading),
+      // and a note that repeats a heading text — there the slug is the only
+      // way to name the second one, and the slug appears nowhere in the
+      // note's own text.
+      const repeatedHeadingText = new Set(headings.map((h) => h.text)).size !== headings.length;
+      const includeHeadings = windowed.content_truncated || section !== undefined || repeatedHeadingText;
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            ...windowed,
+            ...(includeHeadings ? { headings: responseHeadings } : {}),
+            ...linkFields,
+          }),
+        }],
+      };
     }
   );
 
@@ -579,12 +742,16 @@ export function createMcpServer(): McpServer {
     'The server instructions\' wikilink and tag rules apply: search_notes for the topic first and ' +
     'link the related notes it finds, and call list_tags before coining a new tag.',
     {
-      title:       z.string().trim().min(1).max(500),
-      content:     z.string().max(MAX_NOTE_CONTENT_CHARS).default(''),
-      folder_id:   z.string().uuid().nullable().optional(),
+      title:       z.string().trim().min(1).max(500)
+        .describe('Unique across live notes, case-insensitively; a clash is refused rather than merged. This is the string other notes link to as [[Title]]'),
+      content:     z.string().max(MAX_NOTE_CONTENT_CHARS).default('')
+        .describe('Markdown body. Empty by default, so a note can be created first and filled with append_to_note'),
+      folder_id:   uuid().nullable().optional()
+        .describe('Folder UUID. Omit or pass null for the vault root; use folder_path instead when you have the path rather than the id'),
       folder_path: z.string().optional()
         .describe('Folder path (e.g. "Projects/Kybase") as alternative to folder_id'),
-      tags:        z.array(z.string()).default([]),
+      tags:        z.array(z.string()).default([])
+        .describe('Tags for the new note: lowercase, kebab-case, in the language already in use. Call list_tags first and reuse an existing tag where one fits'),
     },
     async ({ title, content: rawContent, folder_id: rawFolderId, folder_path, tags }) => {
       if (rawFolderId && folder_path) {
@@ -640,11 +807,16 @@ export function createMcpServer(): McpServer {
     'Pass expected_updated_at (the updated_at you read) to be refused instead of overwriting a ' +
     'change made in between.',
     {
-      id:        z.string().uuid(),
-      title:     z.string().trim().min(1).max(500).optional(),
-      content:   z.string().max(MAX_NOTE_CONTENT_CHARS).optional(),
-      folder_id: z.string().uuid().nullable().optional(),
-      tags:      z.array(z.string()).optional(),
+      id:        uuid()
+        .describe('The note\'s UUID. Live notes only; a note in the trash has to be restored before it can be edited'),
+      title:     z.string().trim().min(1).max(500).optional()
+        .describe('New title. Renaming rewrites every [[link]] pointing here in other notes'),
+      content:   z.string().max(MAX_NOTE_CONTENT_CHARS).optional()
+        .describe('Replaces the whole body. To add to a note use append_to_note, to change part of one use replace_in_note — both leave the rest untouched'),
+      folder_id: uuid().nullable().optional()
+        .describe('Move the note to this folder; null moves it to the vault root. Omit to leave it where it is'),
+      tags:      z.array(z.string()).optional()
+        .describe('Replaces the entire tag list — anything left out is removed. To add one tag, send the existing tags plus the new one'),
       expected_updated_at: z.string().optional()
         .describe('ISO updated_at from when you read the note; refuses the write if it changed since'),
     },
@@ -773,19 +945,30 @@ export function createMcpServer(): McpServer {
   server.tool(
     'append_to_note',
     'Add text to a note without resending the rest — prefer it over update_note for journals, logs ' +
-    'and running lists. A blank line separates your text from what was there. Re-embeds in the ' +
-    'background like any content change.',
+    'and running lists. A blank line separates your text from what was there. The note is locked ' +
+    'for the read-modify-write, so two sessions appending at the same moment keep both additions ' +
+    'instead of the later one overwriting the earlier. Re-embeds in the background like any ' +
+    'content change.',
     {
-      id:      z.string().uuid().optional(),
+      id:      uuid().optional().describe('The note\'s UUID. Alternative to title'),
       title:   z.string().optional().describe('Alternative to id; resolved like get_note'),
-      content: z.string().min(1).max(MAX_NOTE_CONTENT_CHARS),
+      content: z.string().min(1).max(MAX_NOTE_CONTENT_CHARS)
+        .describe('Text to add. Trailing whitespace is trimmed and a blank line is inserted before it, so the addition never runs into the preceding paragraph'),
       section: z.string().optional()
-        .describe('Target this section (heading text or slug) instead of the whole note'),
+        .describe('Target this section (heading text or slug) instead of the whole note. Valid values come from a search hit\'s `section`, get_note\'s `headings`, or a heading line in the note\'s own text — the slug form is only needed when two headings share a text'),
       at: z.enum(['note_end', 'note_start', 'section_end', 'section_start', 'before_section', 'after_section'])
         .optional()
         .describe(
-          'Default section_end if section given, else note_end. note_start is after the H1/intro, ' +
-          'before its first nested heading — not offset 0.'
+          'Where the text lands. Defaults to section_end when section is given, else note_end. ' +
+          'note_end: the very end. ' +
+          'note_start: above the first heading nested under the opening one — NOT offset 0, except ' +
+          'on a note with no headings at all, where it is; on a note whose only heading is the ' +
+          'opening one it falls to the end instead. ' +
+          'before_section: above the section\'s own heading line. ' +
+          'section_start: directly under that heading line, above the section\'s body. ' +
+          'section_end: after the section and everything nested inside it. ' +
+          'after_section: the same position as section_end. ' +
+          'The four section-relative values require `section` and are refused without it.'
         ),
     },
     async ({ id, title, content, section, at }) => {
@@ -845,8 +1028,10 @@ export function createMcpServer(): McpServer {
     new_string: z.string().optional().describe('Alias for replace'),
     expected_count: z.number().int().min(1).default(1),
   };
-  server.tool(
+  server.registerTool(
     'replace_in_note',
+    {
+      description:
     'Replace exact text in a note without resending the rest. Refuses unless find occurs exactly ' +
     'expected_count times (default 1) — protects against a loose find rewriting more than intended. ' +
     'Accepts either find/replace or old_string/new_string (same pair, either naming works).\n\n' +
@@ -859,15 +1044,29 @@ export function createMcpServer(): McpServer {
     'completely untouched — the error names which edit index failed and how many times its find text ' +
     'actually occurred. Do not combine `edits` with the singular find/replace/old_string/new_string/' +
     'expected_count fields — use one form or the other.',
-    {
-      id:      z.string().uuid().optional(),
+      // Two independent requirements, so allOf rather than one anyOf: a call
+      // has to name a note AND carry at least one edit. Nine optional fields
+      // with no rule at all made the empty call schema-valid, and the server
+      // then refused it three different ways depending on which half was
+      // missing. The mutual exclusion of `edits` and the singular fields is
+      // deliberately NOT expressed here — it is a conflict between two valid
+      // forms, and the handler's message names which one it took.
+      inputSchema: withSchemaRule({
+      id:      uuid().optional().describe('The note\'s UUID. Alternative to title'),
       title:   z.string().optional().describe('Alternative to id; resolved like get_note'),
       ...editItemShape,
-      expected_count: z.number().int().min(1).optional(),
+      expected_count: z.number().int().min(1).optional()
+        .describe('How many times `find` is expected to occur (default 1). The edit is refused if the real count differs, so a loose `find` cannot quietly rewrite more than intended'),
       edits: z.array(z.object(editItemShape)).min(1).max(50).optional()
         .describe('Multiple find/replace steps applied in order in a single call — see main description.'),
       expected_updated_at: z.string().optional()
         .describe('ISO updated_at from when you read the note; refuses the write if it changed since'),
+      }, {
+        allOf: [
+          { anyOf: [{ required: ['id'] }, { required: ['title'] }] },
+          { anyOf: [{ required: ['edits'] }, { required: ['find'] }, { required: ['old_string'] }] },
+        ],
+      }),
     },
     async ({ id, title, find, replace, old_string, new_string, expected_count, edits, expected_updated_at }) => {
       if (!id && !title) throw new Error('Provide either id or title');
@@ -990,7 +1189,8 @@ export function createMcpServer(): McpServer {
     `Soft-delete a note by id — it disappears from list_notes/search/get_note/the graph, but is ` +
     `recoverable with restore_note for ${TRASH_RETENTION_DAYS} days before being purged for good. ` +
     'Use list_notes with trashed:true to see what\'s currently in the trash.',
-    { id: z.string().uuid() },
+    { id: uuid()
+      .describe('The note\'s UUID. An unknown or already-trashed id is refused rather than reported as deleted') },
     async ({ id }) => {
       const deleted = await softDeleteNote(id);
       if (!deleted) throw new Error('Note not found (already deleted, or no such note)');
@@ -1004,7 +1204,8 @@ export function createMcpServer(): McpServer {
     'Undo delete_note: brings a soft-deleted note back. Errors if the note isn\'t in the trash ' +
     '(never deleted, already restored, or purged past the retention window), or if a live note has ' +
     'since taken the same title (rename one of them first, then retry).',
-    { id: z.string().uuid() },
+    { id: uuid()
+      .describe('UUID of a note currently in the trash — the same id delete_note was given') },
     async ({ id }) => {
       let restored: boolean;
       try {
@@ -1115,15 +1316,16 @@ export function createMcpServer(): McpServer {
     'a flag and not a total — the only number available here is a capped candidate pool, and for ' +
     'meaning-based matching "how many match" has no answer at all. ' +
     '\n\nA hit in a long note may carry `excerpt_offset` — where that excerpt sits in the text. ' +
-    'Pass it to get_note as `offset` with a small `limit` to read around the answer in one call. ' +
+    'Pass it to get_note as `offset` with `limit: 1000` (the smallest it accepts) to read around ' +
+    'the answer in one call. ' +
     'That is how you read a book or a log: prose with no markdown headings has no outline and no ' +
     '`section`, so the position is the only way in short of paging from the top. ' +
     '\n\nRead the SECTION, not the note. When a hit carries `section`, that is the markdown ' +
     'heading its excerpt came from — pass that exact string to get_note\'s `section` and you get ' +
-    'that part alone (measured on a real 13000-character note: 681 characters). When a hit has no ' +
-    '`section` and its `content_length` is large, get_note with a small `limit` still returns the ' +
-    'note\'s FULL `headings` outline for about a kilobyte — choose a heading from it, then re-read ' +
-    'with `section`. Two small calls beat one 13-60 KB one; pull a whole note only when you ' +
+    'that part alone (typically a small fraction of the note). When a hit has no ' +
+    '`section` and its `content_length` is large, get_note with `limit: 1000` still returns the ' +
+    'note\'s FULL `headings` outline — choose a heading from it, then re-read ' +
+    'with `section`. Two small calls beat one large one; pull a whole note only when you ' +
     'genuinely need the whole note. ' +
     'Each hit carries `relevance` (0..1, how close to the best hit in THIS response) and ' +
     '`matched_by` (which arms found it). Both describe the response, not ' +
@@ -1158,10 +1360,9 @@ export function createMcpServer(): McpServer {
     'question is not a note answering it. Such hits take the top half of the relevance scale, ' +
     'ranked among themselves by their own text score. Neither tier nor coverage is comparable ' +
     'across different queries, only within one response. ' +
-    'Filters: folder_id (or folder_path, the same folder written as a path — no need to look the ' +
-    'UUID up first), tag, created_after/before (when a note was made), updated_after/before ' +
-    '(when its own content/title/folder/tags last actually changed — a rename elsewhere rewriting ' +
-    'a [[link]] to this note does not count) — these are NOT interchangeable. ' +
+    'The date filters answer different questions and are not interchangeable: created_* is when a ' +
+    'note was made, updated_* when its own text last changed — a rename elsewhere rewriting a ' +
+    '[[link]] inside it does not count as an edit here. ' +
     'Dates filter, they do not rank: a note edited an hour ago and one untouched for months ' +
     'compete on relevance alone, and nothing here prefers the fresher one. So for "what is the ' +
     'LATEST state of X" this is the wrong first call — list_notes already sorts by recency, ' +
@@ -1179,36 +1380,31 @@ export function createMcpServer(): McpServer {
     'non-zero value there explains a thin semantic arm rather than an empty vault. ' +
     'question_echo:true means the note LISTS your question without answering it (an FAQ or agenda ' +
     'of questions); treat it as a pointer to the topic, never as the answer. ' +
-    'When reranked:true, prefer type="text" for a term you already know is written in your notes ' +
-    'verbatim — an identifier, a filename, a code symbol, a product name. Reranking judges a ' +
-    'passage by meaning, and a model that has never seen your vault can rank a passage that reads ' +
-    'as more on-topic above the note that literally contains your term — a hit carrying most of ' +
-    'your query\'s words can end up below one carrying far fewer. Only ' +
-    'exact:true hits are protected from this. So hybrid remains the right default when you do not ' +
-    'know the wording, and text is the better tool when you do — check `coverage` on a hybrid ' +
-    'response to see whether the top hit actually contains what you typed. ' +
-    'When the response carries reranked:true, a cross-encoder chose this order instead of rank ' +
-    'fusion, and each hit\'s rerank_score is its best passage\'s score. That score is a model\'s ' +
-    'opinion about ONE passage of the note, ordering this response only — it is not a confidence ' +
-    'value, not comparable between queries, and not evidence the note answers you. reranked:false ' +
-    'alongside it means the reranker was asked and did not answer, so you are reading the ordinary ' +
-    'fused order. Read the text either way. ' +
-    'That model is by far the slowest part of a search, and reranking is off unless an owner ' +
-    'turned it on — it is optional and unproven, not an upgrade you are missing. Where it is on, ' +
-    'pass rerank:false whenever you want an answer rather than a better ORDER: checking whether a ' +
-    'term appears at all, or finding the note holding a value whose shape you already know. ' +
+    'Reranking is a hybrid-only stage: type "text" and type "semantic" never run it, report no ' +
+    'reranked field at all, and ignore the rerank flag. It judges a passage by meaning, so a term ' +
+    'you know is written verbatim is better served by type="text" — only exact:true hits are ' +
+    'protected from a passage that merely reads as more on-topic outranking the note that ' +
+    'literally contains your term. ' +
+    'reranked:true means a cross-encoder chose this order instead of rank fusion, and a hit\'s ' +
+    'rerank_score is its best passage\'s score: a model\'s opinion about ONE passage, ordering ' +
+    'this response only — not a confidence value, not comparable between queries, and not ' +
+    'evidence the note answers you. reranked:false alongside a configured reranker means it was ' +
+    'asked and did not answer, so the order is the ordinary fused one. Read the text either way. ' +
     'Pass explain:true to also see each hit\'s raw text_score/semantic_score/rrf_score and created_at ' +
     '— only useful for debugging the ranking itself, omitted by default to keep responses short.',
     {
       // The message matters more than the rule: an agent that wanted "every
       // note tagged X" hits this and needs to be told where that lives, not
       // that a string was expected.
-      query:          z.string({ error: QUERY_REQUIRED }).min(1, QUERY_REQUIRED),
-      type:           z.enum(['text', 'semantic', 'hybrid']).default('hybrid'),
-      limit:          z.number().int().min(1).max(50).default(5),
+      query:          z.string({ error: QUERY_REQUIRED }).min(1, QUERY_REQUIRED)
+        .describe('What to look for: words or a question for hybrid/semantic, an exact identifier, path or phrase for type "text"'),
+      type:           z.enum(['text', 'semantic', 'hybrid']).default('hybrid')
+        .describe('"hybrid" fuses keyword and meaning-based matching and is the right default; "text" is keyword-only and exact; "semantic" is meaning-only'),
+      limit:          z.number().int().min(1).max(50).default(5)
+        .describe('Hits per page. Prefer has_more with offset over asking for one large page'),
       offset:         z.number().int().min(0).default(0)
         .describe('Skip this many hits — with has_more in the response, how you read past the first page'),
-      folder_id:      z.string().uuid().optional().describe('Restrict to notes in this folder'),
+      folder_id:      uuid().optional().describe('Restrict to notes in this folder itself, not its subfolders'),
       folder_path:    z.string().optional()
         .describe('Same restriction by path (e.g. "Projects/Kybase") instead of UUID — that folder itself, not its subfolders'),
       tag:            z.string().optional().describe('Restrict to notes with this tag'),
@@ -1217,7 +1413,7 @@ export function createMcpServer(): McpServer {
       updated_after:  z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or after this'),
       updated_before: z.string().optional().describe('ISO timestamp — only notes whose own content actually changed at or before this'),
       rerank:         z.boolean().default(true)
-        .describe('Set false to skip the cross-encoder and answer from the fused order — several times faster, and not measurably worse'),
+        .describe('Set false to skip the cross-encoder and answer from the fused order — several times faster, and not measurably worse. Applies to type "hybrid" only: text and semantic never rerank, and this flag changes nothing there'),
       explain:        z.boolean().default(false).describe('Include raw per-arm scores and created_at for debugging ranking'),
     },
     async ({ query: q, type, limit, offset, folder_id, folder_path, tag, created_after, created_before, updated_after, updated_before, rerank, explain }) => {
@@ -1376,18 +1572,37 @@ export function createMcpServer(): McpServer {
   // ── list_folders ─────────────────────────────────────────────────────────
   server.tool(
     'list_folders',
-    'List all folders (flat array) with the full path already resolved — no need to walk parent_id ' +
-    'yourself. Pass a folder\'s own id as parent_id to create_folder/update_folder to nest under it.',
-    {},
-    async () => {
-      const data = await query<FolderRow>('select id, name, parent_id from folders order by name');
+    'List folders with the full path already resolved — no need to walk parent_id yourself. Pass a ' +
+    'folder\'s own id as parent_id to create_folder/update_folder to nest under it. Sorted by path, ' +
+    'so a page is a contiguous slice of the tree read top to bottom; the reply is ' +
+    '`{folders, has_more, next_offset?}`.',
+    {
+      limit:  z.number().int().min(1).max(1000).default(200)
+        .describe('Folders per page'),
+      offset: z.number().int().min(0).default(0)
+        .describe('Skip this many folders — pass back next_offset from the previous page'),
+    },
+    async ({ limit, offset }) => {
+      // The whole tree is fetched whatever the page: a path is built from a
+      // folder's ancestors, so a LIMIT in SQL would resolve the paths of a
+      // page against a tree it only half has. Folders are orders of magnitude
+      // fewer than notes, so the bound that matters is on the reply.
+      const data = await query<FolderRow>('select id, name, parent_id from folders');
       const paths = buildFolderPathMap(data);
       // parent_id dropped: path already encodes the full chain, and creating
       // a subfolder only ever needs a folder's own id, never its parent's.
       // name stays — folder names aren't barred from containing "/", so a
       // literal one there would be indistinguishable from a path separator.
-      const result = data.map((f) => ({ id: f.id, name: f.name, path: paths.get(f.id) ?? f.name }));
-      return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      const all = data
+        .map((f) => ({ id: f.id, name: f.name, path: paths.get(f.id) ?? f.name }))
+        .sort((a, b) => a.path.localeCompare(b.path));
+      const page = all.slice(offset, offset + limit);
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ folders: page, ...morePage(offset + page.length < all.length, limit, offset) }),
+        }],
+      };
     }
   );
 
@@ -1396,8 +1611,10 @@ export function createMcpServer(): McpServer {
     'create_folder',
     'Create a new folder. Optionally nested under a parent.',
     {
-      name:      z.string().min(1).max(255),
-      parent_id: z.string().uuid().nullable().optional(),
+      name:      z.string().min(1).max(255)
+        .describe('Folder name. Unique among its siblings — the same name under a different parent is fine'),
+      parent_id: uuid().nullable().optional()
+        .describe('Parent folder UUID. Omit or pass null to create it at the top level'),
     },
     async ({ name, parent_id }) => {
       let data;
@@ -1421,9 +1638,11 @@ export function createMcpServer(): McpServer {
     'Provide at least one of name/parent_id. The response includes the resolved `path` so a rename or ' +
     'move can be confirmed without a follow-up list_folders call.',
     {
-      id:        z.string().uuid(),
-      name:      z.string().min(1).max(255).optional(),
-      parent_id: z.string().uuid().nullable().optional(),
+      id:        uuid().describe('UUID of the folder to rename or move'),
+      name:      z.string().min(1).max(255).optional()
+        .describe('New name. Must stay unique among this folder\'s siblings'),
+      parent_id: uuid().nullable().optional()
+        .describe('New parent folder UUID; null moves it to the top level. Moving a folder into its own descendant is refused'),
     },
     async ({ id, name, parent_id }) => {
       if (parent_id !== undefined && parent_id === id) {
@@ -1478,7 +1697,8 @@ export function createMcpServer(): McpServer {
     'notes in nested subfolders — is soft-deleted into the trash along with it (see delete_note), ' +
     'recoverable via restore_note within the retention window. To preserve organization instead, ' +
     'move notes/subfolders out first.',
-    { id: z.string().uuid() },
+    { id: uuid()
+      .describe('UUID of the folder to delete along with its subfolders. Notes inside are moved to the trash, not destroyed') },
     async ({ id }) => {
       // One transaction: notes in the subtree must land in the trash
       // together with the folder disappearing, not one without the other.
@@ -1500,19 +1720,28 @@ export function createMcpServer(): McpServer {
   );
 
   // ── get_backlinks ────────────────────────────────────────────────────────
-  server.tool(
+  server.registerTool(
     'get_backlinks',
+    {
+      description:
     'Get notes that link to the given note via [[Title]] wikilinks. By default returns id/title/' +
     'folder_path plus a short snippet around the link occurrence, not full content — pass ' +
     'include_content:true for the full text of each (expensive if many notes link here; prefer the ' +
-    'default and call get_note on specific ids instead). Paginated like get_note. Takes id or title, ' +
+    'default and call get_note on specific ids instead). Paginated by linking note: offset and limit ' +
+    'count notes, not characters. Takes id or title, ' +
     'like get_note — title resolves the same forgiving way (exact, then prefix, then substring).',
-    {
-      id:              z.string().uuid().optional(),
-      title:           z.string().optional(),
-      include_content: z.boolean().default(false),
-      limit:           z.number().int().min(1).max(200).default(50),
-      offset:          z.number().int().min(0).default(0),
+      inputSchema: withSchemaRule({
+      id:              uuid().optional()
+        .describe('UUID of the note whose incoming links you want'),
+      title:           z.string().optional()
+        .describe('Alternative to id; resolved like get_note (exact, then prefix, then substring)'),
+      include_content: z.boolean().default(false)
+        .describe('Return each linking note\'s full text instead of a snippet around the link. Expensive when many notes link here'),
+      limit:           z.number().int().min(1).max(200).default(50)
+        .describe('Linking notes per page. Several links from the same note count as one'),
+      offset:          z.number().int().min(0).default(0)
+        .describe('Skip this many linking notes — pass back next_offset from the previous page'),
+      }, ID_OR_TITLE),
     },
     async ({ id, title, include_content, limit, offset }) => {
       if (!id && !title) throw new Error('Provide either id or title');
@@ -1568,8 +1797,10 @@ export function createMcpServer(): McpServer {
   );
 
   // ── get_neighbors ─────────────────────────────────────────────────────────
-  server.tool(
+  server.registerTool(
     'get_neighbors',
+    {
+      description:
     'What is around ONE note in the [[wikilink]] graph, out to depth hops. Answers "what is this ' +
     'connected to" with a flat list of titles — no node indices to decode, no whole-vault payload. ' +
     'For the shape of that neighbourhood — which notes link to each other, not just which are near ' +
@@ -1583,14 +1814,22 @@ export function createMcpServer(): McpServer {
     '\n\nThese are LINKS people wrote, not similarity — a note about the same subject that nobody ' +
     'linked is not here. get_graph\'s semantic_edges cover that, and search covers finding it at all. ' +
     'An empty result means nothing links to or from this note, which is a fact about the writing, ' +
-    'not about the topic.',
-    {
-      id:    z.string().uuid().optional(),
-      title: z.string().optional(),
+    'not about the topic.\n\nRows carry the title, not the id: titles are unique here and every ' +
+    'tool that walks onward (get_note, get_neighbors, get_backlinks) takes one. `total` counts the ' +
+    'whole neighbourhood, so `total` above `limit` plus `truncated` means you are reading a prefix ' +
+    'of it — raise limit or lower depth rather than assuming that is all there is.',
+      inputSchema: withSchemaRule({
+      id:    uuid().optional()
+        .describe('UUID of the note whose surroundings you want'),
+      title: z.string().optional()
+        .describe('Alternative to id; resolved like get_note (exact, then prefix, then substring)'),
       depth: z.number().int().min(1).max(3).default(1)
         .describe('Hops to walk. 1 = directly linked notes; each extra hop widens the set fast'),
+      limit: z.number().int().min(1).max(500).default(100)
+        .describe('Maximum neighbours to return, nearest depth first. `total` still counts them all'),
+      }, ID_OR_TITLE),
     },
-    async ({ id, title, depth }) => {
+    async ({ id, title, depth, limit }) => {
       if (!id && !title) throw new Error('Provide either id or title');
       const noteId = id
         ? (await queryOne<{ id: string }>('select id from notes where id = $1 and deleted_at is null', [id]))?.id
@@ -1598,18 +1837,25 @@ export function createMcpServer(): McpServer {
       if (!noteId) throw new Error('Note not found');
 
       const neighbors = await neighborsOf(noteId, depth);
+      // Counted before the slice, or `total` would just restate how many rows
+      // are below it and the caller could never tell a full neighbourhood
+      // from a page of one. neighborsOf already orders by (depth, title), so
+      // the prefix a limit keeps is the nearest hops, deterministically.
+      const total = neighbors.length;
+      const page = neighbors.slice(0, limit);
       return {
         content: [{
           type: 'text' as const,
           text: JSON.stringify({
-            neighbors: neighbors.map((n) => ({
-              id: n.id, title: n.title, depth: n.depth,
+            neighbors: page.map((n) => ({
+              title: n.title, depth: n.depth,
               // Only ever shipped when true — "false" on both flags is the
               // ordinary state at depth 2 and says nothing worth the bytes.
               ...(n.links_out ? { links_out: true } : {}),
               ...(n.links_in ? { links_in: true } : {}),
             })),
-            total: neighbors.length,
+            total,
+            ...(total > page.length ? { truncated: true } : {}),
           }),
         }],
       };
@@ -1619,23 +1865,28 @@ export function createMcpServer(): McpServer {
   // ── get_graph ─────────────────────────────────────────────────────────────
   server.tool(
     'get_graph',
-    'Get the knowledge graph: note nodes, directed edges from [[wikilinks]], and undirected ' +
+    'MANY notes at once and the edges between them — the heavy one of the three graph tools, and ' +
+    'the only one that reaches for the whole vault. For one note\'s surroundings use get_neighbors; ' +
+    'for who links to it, get_backlinks. Returns note nodes, directed edges from [[wikilinks]], and undirected ' +
     'semantic_edges (embedding cosine similarity) between related notes that may lack explicit links. ' +
-    'Nodes are `{id, t}` (t = title); edges and semantic_edges reference nodes by their position in ' +
+    'Nodes are `{t}` (t = title, a valid [[wikilink]] target and the address every other tool here ' +
+    'takes); edges and semantic_edges reference nodes by their position in ' +
     'the `nodes` array (not id) — `["edges"][0] = [2, 5]` means nodes[2] links to nodes[5], and a ' +
     'semantic_edges triple\'s third ' +
     'number is the cosine score. `unresolved_links` lists [[wikilink]] targets in this scope that ' +
     'match no note title — dangling links, not edges (no node index, since there is no node to point ' +
-    'at); rename the target or fix the link text to resolve one. Unfiltered, this returns the ENTIRE ' +
-    'vault in one response — fine for small vaults, but it will stop fitting in context as the vault ' +
-    'grows. Scope it with folder_id (a subtree) or root_title+depth (the neighborhood around one note) ' +
-    'when you only need part of the graph. Node titles in the result are valid [[wikilink]] targets — ' +
+    'at); rename the target or fix the link text to resolve one. Unfiltered, this reaches for the ' +
+    'ENTIRE vault and is capped at max_nodes — when the cap bites, the reply carries ' +
+    '`truncated: true` and what you have is a recency-ordered prefix, NOT the shape of the vault. ' +
+    'Scope it with folder_id (a subtree) or root_title+depth (the neighborhood around one note) ' +
+    'rather than raising the cap: a scoped graph answers a question, a bigger one just costs more. ' +
+    'Node titles in the result are valid [[wikilink]] targets — ' +
     'but only within whatever scope you asked for.',
     {
-      folder_id:        z.string().uuid().optional()
+      folder_id:        uuid().optional()
         .describe('Restrict to notes in this folder and its descendant folders'),
       root_title:       z.string().optional()
-        .describe('Keep only nodes within `depth` wikilink-hops of this note (case-insensitive)'),
+        .describe('Keep only nodes within `depth` wikilink-hops of this note — resolved like get_note: exact, then unique prefix, then unique substring, case-insensitive'),
       depth:            z.number().int().min(1).max(10).default(2)
         .describe('Hop count for root_title; ignored without it'),
       include_semantic: z.boolean().default(true).describe('Include semantic_edges at all'),
@@ -1643,14 +1894,17 @@ export function createMcpServer(): McpServer {
         .describe('Cosine floor for semantic_edges — lower to see more (noisier) edges'),
       unresolved_only:  z.boolean().default(false)
         .describe('If true, return only { unresolved_links } without nodes and edges (fast check for broken links)'),
+      max_nodes:        z.number().int().min(1).max(5000).default(500)
+        .describe('Ceiling on nodes returned, most recently edited first. The reply says `truncated: true` when it applies — scope with folder_id or root_title instead of raising this'),
     },
-    async ({ folder_id, root_title, depth, include_semantic, min_score, unresolved_only }) => {
+    async ({ folder_id, root_title, depth, include_semantic, min_score, unresolved_only, max_nodes }) => {
       const graph = await buildGraph({
         folderId: folder_id,
         rootTitle: root_title,
         depth,
         includeSemantic: unresolved_only ? false : include_semantic,
         minScore: min_score,
+        maxNodes: max_nodes,
       });
       if (unresolved_only) {
         return {

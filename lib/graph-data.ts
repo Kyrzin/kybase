@@ -12,7 +12,16 @@ import { wikilinkEdges } from './note-links';
 const SEMANTIC_THRESHOLD = 0.75;
 const SEMANTIC_MAX_NEIGHBORS = 5;
 
-export type Graph = { nodes: GraphNode[]; edges: GraphEdge[]; semantic_edges: SemanticEdge[]; unresolved_links: string[] };
+export type Graph = { nodes: GraphNode[]; edges: GraphEdge[]; semantic_edges: SemanticEdge[]; unresolved_links: string[]; truncated?: boolean };
+
+/**
+ * Default ceiling on nodes in one graph. Every other read tool here has a
+ * bound; this one had none, so an unfiltered call returned the entire vault
+ * and grew linearly with it — on a large vault that stops being expensive and
+ * starts being a response nothing can hold. A truncated graph also has to SAY
+ * so, or a caller reads a prefix as the whole shape of the vault.
+ */
+const DEFAULT_MAX_NODES = 500;
 
 export type BuildGraphOptions = {
   /** Restrict to notes inside this folder and its descendant folders. */
@@ -25,6 +34,8 @@ export type BuildGraphOptions = {
   includeSemantic?: boolean;
   /** Cosine floor for semantic_edges — lower to see more (and noisier) edges, raise to cut noise. */
   minScore?: number;
+  /** Hard ceiling on returned nodes; the result carries `truncated` when it bites. */
+  maxNodes?: number;
 };
 
 type TitledNote = { id: string; title: string };
@@ -58,31 +69,50 @@ function resolveRootTitle<T extends TitledNote>(notes: T[], rootTitle: string, f
 }
 
 export async function buildGraph(opts: BuildGraphOptions = {}): Promise<Graph> {
-  const { folderId, rootTitle, depth = 2, includeSemantic = true, minScore = SEMANTIC_THRESHOLD } = opts;
+  const { folderId, rootTitle, depth = 2, includeSemantic = true, minScore = SEMANTIC_THRESHOLD, maxNodes = DEFAULT_MAX_NODES } = opts;
+
+  // The folder subtree is resolved before the notes are fetched, not after:
+  // filtering in memory meant "scope this to one folder" still read every
+  // note in the vault first, so the advice to scope a large graph did not
+  // reduce the query it was given for.
+  let subtreeIds: string[] | null = null;
+  if (folderId) {
+    const folders = await query<{ id: string; parent_id: string | null }>('select id, parent_id from folders');
+    const ids = new Set<string>([folderId]);
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const f of folders) {
+        if (f.parent_id && ids.has(f.parent_id) && !ids.has(f.id)) {
+          ids.add(f.id);
+          grew = true;
+        }
+      }
+    }
+    subtreeIds = [...ids];
+  }
 
   // Content is no longer selected here: links come from the stored index
   // (lib/note-links.ts), so rendering a graph stops costing a full read of
   // every note's text. On the live vault that was 1.2 MB fetched and
   // re-parsed per call to produce a few hundred edges.
-  let notes = await query<{ id: string; title: string; folder_id: string | null }>(
-    'select id, title, folder_id from notes where deleted_at is null'
+  //
+  // rootTitle has to see the whole link graph to walk out from its root, so
+  // only the result can be bounded there. Every other call — including the
+  // unfiltered one that used to return the entire vault — is bounded by the
+  // query itself. Ordering by recency makes the cut deterministic and keeps
+  // the half of the vault someone is actually working in.
+  const params: unknown[] = [];
+  const conds = ['deleted_at is null'];
+  if (subtreeIds) { params.push(subtreeIds); conds.push(`folder_id = any($${params.length})`); }
+  let sqlLimit = '';
+  if (!rootTitle) { params.push(maxNodes + 1); sqlLimit = ` limit $${params.length}`; }
+  const notes = await query<{ id: string; title: string; folder_id: string | null }>(
+    `select id, title, folder_id from notes
+      where ${conds.join(' and ')}
+      order by content_updated_at desc, id${sqlLimit}`,
+    params
   );
-
-  if (folderId) {
-    const folders = await query<{ id: string; parent_id: string | null }>('select id, parent_id from folders');
-    const subtreeIds = new Set<string>([folderId]);
-    let grew = true;
-    while (grew) {
-      grew = false;
-      for (const f of folders) {
-        if (f.parent_id && subtreeIds.has(f.parent_id) && !subtreeIds.has(f.id)) {
-          subtreeIds.add(f.id);
-          grew = true;
-        }
-      }
-    }
-    notes = notes.filter((n) => n.folder_id !== null && subtreeIds.has(n.folder_id));
-  }
 
   let nodes = notes.map((n) => ({ id: n.id, title: n.title }));
   const built = await wikilinkEdges(nodes);
@@ -118,6 +148,18 @@ export async function buildGraph(opts: BuildGraphOptions = {}): Promise<Graph> {
     unresolved = unresolved.filter((u) => keep.has(u.from));
   }
 
+  // Applied after every scoping step and before semantic edges, which filter
+  // against the final node set — capping later would leave edges pointing at
+  // nodes no longer in the response.
+  let truncated = false;
+  if (nodes.length > maxNodes) {
+    nodes = nodes.slice(0, maxNodes);
+    const kept = new Set(nodes.map((n) => n.id));
+    edges = edges.filter((e) => kept.has(e.from) && kept.has(e.to));
+    unresolved = unresolved.filter((u) => kept.has(u.from));
+    truncated = true;
+  }
+
   // Second edge source — must never take down the wikilink graph if it fails.
   let semantic_edges: SemanticEdge[] = [];
   if (includeSemantic) {
@@ -132,5 +174,11 @@ export async function buildGraph(opts: BuildGraphOptions = {}): Promise<Graph> {
     }
   }
 
-  return { nodes, edges, semantic_edges, unresolved_links: [...new Set(unresolved.map((u) => u.target))] };
+  return {
+    nodes,
+    edges,
+    semantic_edges,
+    unresolved_links: [...new Set(unresolved.map((u) => u.target))],
+    ...(truncated ? { truncated: true } : {}),
+  };
 }

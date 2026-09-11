@@ -56,10 +56,11 @@ export function dedupeEdges(edges: GraphEdge[]): GraphEdge[] {
 }
 
 export type IndexedGraph = {
-  nodes: { id: string; t: string }[];
+  nodes: { t: string }[];
   edges: [number, number][];
   semantic_edges: [number, number, number][];
   unresolved_links: string[];
+  truncated?: boolean;
 };
 
 /**
@@ -79,12 +80,20 @@ export type IndexedGraph = {
  * repeating that position inside each node object added ~1000 chars (~6% of
  * a live get_graph response) for a value a consumer never needs to read
  * (found live 2026-08-17, roadmap's small-fixes item).
+ *
+ * Nodes carry the title and not the id, for the same reason edges carry an
+ * index: nothing in this response resolves through a node id. Edges address
+ * nodes positionally, titles are unique at the database level (migration
+ * 006), and every tool an agent reaches for next — get_note, get_neighbors,
+ * get_backlinks — accepts a title. The id was a third of the whole payload
+ * and answered no question the response itself poses.
  */
 export function indexedForm(graph: {
   nodes: GraphNode[];
   edges: GraphEdge[];
   semantic_edges: (GraphEdge & { score: number })[];
   unresolved_links?: string[];
+  truncated?: boolean;
 }): IndexedGraph {
   const indexById = new Map(graph.nodes.map((n, i) => [n.id, i]));
   const toIndexPair = (e: GraphEdge): [number, number] | null => {
@@ -93,7 +102,7 @@ export function indexedForm(graph: {
     return from !== undefined && to !== undefined ? [from, to] : null;
   };
   return {
-    nodes: graph.nodes.map((n) => ({ id: n.id, t: n.title })),
+    nodes: graph.nodes.map((n) => ({ t: n.title })),
     edges: graph.edges.map(toIndexPair).filter((p): p is [number, number] => p !== null),
     semantic_edges: graph.semantic_edges
       .map((e) => {
@@ -102,5 +111,6 @@ export function indexedForm(graph: {
       })
       .filter((t): t is [number, number, number] => t !== null),
     unresolved_links: graph.unresolved_links ?? [],
+    ...(graph.truncated ? { truncated: true } : {}),
   };
 }

@@ -398,6 +398,61 @@ async function unresolvedWikilinksIn(text: string, selfTitle?: string): Promise<
   return missing;
 }
 
+/** Shape every tool handler returns; enough of it to log an outcome. */
+type ToolReply = { isError?: boolean; content?: { text?: string }[] };
+
+/**
+ * One stderr line per tool call: what was called, whether it worked, how much
+ * came back, how long it took.
+ *
+ * Nothing on this path used to log at all, which made every "how often does
+ * this actually happen" question unanswerable — the size of a reply, the rate
+ * of refusals and which tools agents reach for were all invisible to the
+ * person running the server. `docker logs` is where that belongs.
+ *
+ * Wrapped at the server rather than at each registration so a tool added
+ * later is logged without anyone remembering to, and so the eighteen call
+ * sites below stay about the tools instead of about logging.
+ *
+ * Deliberately never logs arguments or reply text — a query string and a note
+ * body are the two things most worth not writing to a log file. Length is the
+ * part that answers the question. stderr, because in stdio mode stdout
+ * carries JSON-RPC framing and nothing else.
+ */
+function logToolCalls(server: McpServer): void {
+  const wrap = (register: (...a: unknown[]) => unknown) => (...args: unknown[]) => {
+    const name = String(args[0]);
+    const last = args.length - 1;
+    const handler = args[last];
+    if (typeof handler === 'function') {
+      const inner = handler as (...a: unknown[]) => Promise<ToolReply>;
+      args[last] = async (...callArgs: unknown[]): Promise<ToolReply> => {
+        const started = Date.now();
+        const done = (outcome: string, chars: number) =>
+          console.error(`[mcp] ${name} ${outcome} ${chars}ch ${Date.now() - started}ms`);
+        try {
+          const reply = await inner(...callArgs);
+          const chars = reply?.content?.reduce((n, c) => n + (c.text?.length ?? 0), 0) ?? 0;
+          done(reply?.isError ? 'error' : 'ok', chars);
+          return reply;
+        } catch (err) {
+          // A throw becomes an isError reply one layer up, so it is the same
+          // event to a caller and has to read the same way here — including
+          // its size. A refusal that lists every heading in a note is not a
+          // cheap reply, and a log that called every error 0ch would hide
+          // exactly the ones worth finding.
+          done('error', err instanceof Error ? err.message.length : 0);
+          throw err;
+        }
+      };
+    }
+    return register.apply(server, args);
+  };
+  const s = server as unknown as Record<string, (...a: unknown[]) => unknown>;
+  s.tool = wrap(s.tool.bind(server));
+  s.registerTool = wrap(s.registerTool.bind(server));
+}
+
 export function createMcpServer(): McpServer {
   const server = new McpServer(
     { name: 'kybase', version: '1.0.0' },
@@ -427,6 +482,9 @@ export function createMcpServer(): McpServer {
         'raise the ceiling. None of the three present means you have everything there is.',
     }
   );
+
+  // Before any registration below — it wraps the registration methods.
+  logToolCalls(server);
 
   // ── list_notes ───────────────────────────────────────────────────────────
   server.tool(
@@ -897,7 +955,7 @@ export function createMcpServer(): McpServer {
       content: z.string().min(1).max(MAX_NOTE_CONTENT_CHARS)
         .describe('Text to add. Trailing whitespace is trimmed and a blank line is inserted before it, so the addition never runs into the preceding paragraph'),
       section: z.string().optional()
-        .describe('Target this section (heading text or slug) instead of the whole note'),
+        .describe('Target this section (heading text or slug) instead of the whole note. Valid values come from a search hit\'s `section`, get_note\'s `headings`, or a heading line in the note\'s own text — the slug form is only needed when two headings share a text'),
       at: z.enum(['note_end', 'note_start', 'section_end', 'section_start', 'before_section', 'after_section'])
         .optional()
         .describe(
@@ -1514,18 +1572,37 @@ export function createMcpServer(): McpServer {
   // ── list_folders ─────────────────────────────────────────────────────────
   server.tool(
     'list_folders',
-    'List all folders (flat array) with the full path already resolved — no need to walk parent_id ' +
-    'yourself. Pass a folder\'s own id as parent_id to create_folder/update_folder to nest under it.',
-    {},
-    async () => {
-      const data = await query<FolderRow>('select id, name, parent_id from folders order by name');
+    'List folders with the full path already resolved — no need to walk parent_id yourself. Pass a ' +
+    'folder\'s own id as parent_id to create_folder/update_folder to nest under it. Sorted by path, ' +
+    'so a page is a contiguous slice of the tree read top to bottom; the reply is ' +
+    '`{folders, has_more, next_offset?}`.',
+    {
+      limit:  z.number().int().min(1).max(1000).default(200)
+        .describe('Folders per page'),
+      offset: z.number().int().min(0).default(0)
+        .describe('Skip this many folders — pass back next_offset from the previous page'),
+    },
+    async ({ limit, offset }) => {
+      // The whole tree is fetched whatever the page: a path is built from a
+      // folder's ancestors, so a LIMIT in SQL would resolve the paths of a
+      // page against a tree it only half has. Folders are orders of magnitude
+      // fewer than notes, so the bound that matters is on the reply.
+      const data = await query<FolderRow>('select id, name, parent_id from folders');
       const paths = buildFolderPathMap(data);
       // parent_id dropped: path already encodes the full chain, and creating
       // a subfolder only ever needs a folder's own id, never its parent's.
       // name stays — folder names aren't barred from containing "/", so a
       // literal one there would be indistinguishable from a path separator.
-      const result = data.map((f) => ({ id: f.id, name: f.name, path: paths.get(f.id) ?? f.name }));
-      return { content: [{ type: 'text' as const, text: JSON.stringify(result) }] };
+      const all = data
+        .map((f) => ({ id: f.id, name: f.name, path: paths.get(f.id) ?? f.name }))
+        .sort((a, b) => a.path.localeCompare(b.path));
+      const page = all.slice(offset, offset + limit);
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ folders: page, ...morePage(offset + page.length < all.length, limit, offset) }),
+        }],
+      };
     }
   );
 
@@ -1788,7 +1865,9 @@ export function createMcpServer(): McpServer {
   // ── get_graph ─────────────────────────────────────────────────────────────
   server.tool(
     'get_graph',
-    'Get the knowledge graph: note nodes, directed edges from [[wikilinks]], and undirected ' +
+    'MANY notes at once and the edges between them — the heavy one of the three graph tools, and ' +
+    'the only one that reaches for the whole vault. For one note\'s surroundings use get_neighbors; ' +
+    'for who links to it, get_backlinks. Returns note nodes, directed edges from [[wikilinks]], and undirected ' +
     'semantic_edges (embedding cosine similarity) between related notes that may lack explicit links. ' +
     'Nodes are `{t}` (t = title, a valid [[wikilink]] target and the address every other tool here ' +
     'takes); edges and semantic_edges reference nodes by their position in ' +

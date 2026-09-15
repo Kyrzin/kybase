@@ -11,12 +11,17 @@
   <img src="https://img.shields.io/badge/private-by%20default-success" alt="private by default">
 </p>
 
-**Kybase is self-hosted, long-term memory for AI agents.** Any
-MCP-speaking agent — Claude, Cursor, Windsurf — can search, read, and
-update a persistent Markdown knowledge base through MCP, while **you**
-keep full control in the browser: read every note, edit anything, revoke
-access anytime. Hybrid search finds the right note, section-level reads
-avoid loading entire documents into context, and `[[wikilinks]]` keep the
+**Every session starts from zero.** Your agent relearns your stack, your
+decisions and your preferences each time, then forgets them when the
+context window closes — and the agent in your other editor never knew
+them at all.
+
+**Kybase is long-term memory for AI agents, running on your own machine.**
+Any MCP-speaking agent — Claude, Cursor, Windsurf — searches, reads and
+updates one persistent Markdown knowledge base, while **you** keep full
+control in the browser: read every note, edit anything, revoke access
+anytime. Hybrid search finds the right note, section-level reads avoid
+loading whole documents into context, and `[[wikilinks]]` keep the
 knowledge connected as it grows.
 
 PostgreSQL + pgvector + Ollama, one `docker compose up`. **No SaaS, no
@@ -25,10 +30,29 @@ optional, not required (see [Switching Embedding
 Providers](#switching-embedding-providers) for the trade-off).
 
 <p align="center">
-  <img src="public/readme/screenshot.png" width="100%" alt="Kybase UI: a markdown note with wikilinks and tags on the left, the folder tree beside it, and an interactive knowledge graph (17 notes, 76 edges) with wikilink and semantic edges on the right.">
+  <img src="public/readme/demo.gif" width="100%" alt="Kybase in use: a markdown note with wikilinks, the knowledge graph with wikilink and semantic edges, then a plain-language question — 'what broke in production' — returning the right incident note first, even though none of those words appear in it.">
 </p>
 
-**[Why Kybase?](#why-kybase) · [How agents use it](#how-agents-use-it) · [Quick Start](#quick-start-docker) · [Environment variables](#environment-variables) · [Connect an MCP Client](#connect-an-mcp-client) · [Stack](#stack) · [Switching Embedding Providers](#switching-embedding-providers) · [Export & Import](#export--import) · [Sharing](#sharing-notes) · [Backups](#backups) · [Upgrading](#upgrading) · [Local development](#local-development) · [More documentation](#more-documentation) · [License](#license)**
+**[How you use it](#how-you-use-it) · [Why Kybase?](#why-kybase) · [How agents use it](#how-agents-use-it) · [Quick Start](#quick-start-docker) · [Environment variables](#environment-variables) · [Connect an MCP Client](#connect-an-mcp-client) · [Stack](#stack) · [Switching Embedding Providers](#switching-embedding-providers) · [Export & Import](#export--import) · [Sharing](#sharing-notes) · [Backups](#backups) · [Upgrading](#upgrading) · [Local development](#local-development) · [More documentation](#more-documentation) · [License](#license)**
+
+## How you use it
+
+**1. Point your agent at it.** One block in your MCP config — for a single
+local agent that is `npx -y kybase-mcp`, with nothing else to install. Full
+setup for every client: [Connect an MCP client](#connect-an-mcp-client).
+
+**2. Work the way you already work.** Ask the agent to write a decision
+down, or to check what you agreed last month. It searches before it
+answers and saves what is worth keeping, as ordinary notes.
+
+**3. Look whenever you want.** Everything the agent wrote is a Markdown
+note in your browser: read it, correct it, re-file it, delete it. Nothing
+is a hidden memory blob — if the agent remembered something wrong, you
+edit the sentence that is wrong.
+
+**4. Come back tomorrow.** New session, new context window, same memory —
+and the same memory in every agent you connect, instead of one silo per
+tool.
 
 ## Why Kybase?
 
@@ -68,6 +92,13 @@ reading a fraction of the content — cheaper for every step after the
 first search, and it's how the agent writes back too.
 
 ## Quick Start (Docker)
+
+> [!TIP]
+> **Just want memory for one local agent?** Skip all of this — `npx -y kybase-mcp`
+> runs the same MCP server with its own embedded database, no Docker and no
+> Postgres. See [stdio (no server at all)](#stdio-local-process). Everything
+> below is the full app: web UI, knowledge graph, sharing, several agents at
+> once.
 
 ```bash
 git clone https://github.com/Kyrzin/kybase.git
@@ -183,29 +214,28 @@ callback this server accepts, so registration cannot point one somewhere else.
 ```
 
 <a id="stdio-local-process"></a>
-**stdio (local process)** — for clients that can't speak HTTP, run the server as a
-child process against the database directly. Needs a checkout and the same
-`DATABASE_URL` the app uses; there is no bearer token, since access is whatever
-the process itself can reach.
+**stdio (no server at all)** — for a local agent, or for clients that only speak
+stdio, the same MCP server runs as a single command with an embedded database:
 
 ```json
 {
   "mcpServers": {
     "kybase": {
       "command": "npx",
-      "args": ["tsx", "scripts/mcp-stdio.ts"],
-      "cwd": "/path/to/kybase",
-      "env": {
-        "DATABASE_URL": "postgres://kybase:kybase@localhost:5432/kybase"
-      }
+      "args": ["-y", "kybase-mcp"]
     }
   }
 }
 ```
 
-Or `npm run mcp:stdio` from the checkout. The HTTP endpoint is the better choice
-whenever it's an option — it's the one with authentication, revocable tokens, and
-no local checkout to keep in sync.
+No Docker and no Postgres to install: `kybase-mcp` keeps a local knowledge base
+under `~/.kybase`. Add `"env": {"OLLAMA_URL": "http://localhost:11434"}` to turn
+on semantic search, or `DATABASE_URL` to point it at an existing Kybase database
+instead of its own. Details: [packages/kybase-mcp](packages/kybase-mcp).
+
+The HTTP endpoint above is still the better choice when it's an option — it is
+the one with the web UI, authentication, revocable tokens, and shared access for
+several agents at once.
 
 ### MCP tools (18)
 

@@ -29,9 +29,24 @@ the MCP endpoint, auth, or the compose/Dockerfile setup.
 ## PR expectations
 
 - Keep changes focused — a bug fix doesn't need surrounding refactors.
-- If you touch `lib/mcp-server.ts`, update the tool count/table in `README.md` and re-check the MCP tool descriptions the agent sees.
+- If you touch `lib/mcp-server.ts`, update the tool count/table in `README.md` and re-check the MCP tool descriptions the agent sees. The same file ships inside the `kybase-mcp` npm package (`packages/kybase-mcp`), so rebuild it there (`npm install && node build.mjs`) if you change what it exposes.
 - Migrations go in `db/migrations/` as a new numbered `.sql` file — never edit an already-released one.
 
 ## Reporting bugs / requesting features
 
 Use the issue templates (`.github/ISSUE_TEMPLATE/`) — they ask for the fields that make a report actionable.
+
+## Licensing of contributions
+
+Kybase is [AGPL-3.0-only](LICENSE), and contributions join the project
+under that same license.
+
+By opening a pull request you confirm two things: that the work is yours
+to contribute, and that you agree the project may also be released under
+other terms in future — a more permissive license, or a commercial license
+offered alongside the AGPL.
+
+That second point is here to keep the option open rather than to exercise
+it. Changing a project's license needs the agreement of everyone who holds
+copyright in it, and chasing down past contributors years after the fact is
+how projects end up unable to change course at all.

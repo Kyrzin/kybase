@@ -39,10 +39,14 @@ function resolveDataDir(): string {
 }
 
 /**
- * The embedded database has no password — access is controlled by the unix
- * socket's file permissions, which is why the directory is 0700 and why
- * this never opens a TCP port. A loopback port would be reachable by every
- * other process on the machine.
+ * The embedded database has no password. On Unix, access is controlled by
+ * the socket file's permissions — hence the 0700 directory and no open
+ * port. Windows cannot listen on a socket path at all (it fails with
+ * EACCES), and node-postgres addresses Windows named pipes by a convention
+ * that does not match the one it builds, so there the server binds a
+ * loopback port instead. That port is reachable by other processes running
+ * as the same user, which is the same exposure as a local development
+ * Postgres; it is never reachable from another machine.
  */
 function ensureSecret(dir: string): string {
   const existing = process.env.KYBASE_SECRET;
@@ -60,6 +64,19 @@ function ensureSecret(dir: string): string {
   return generated;
 }
 
+/** An unused loopback port, picked by the OS rather than guessed. */
+function freeLoopbackPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const address = probe.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      probe.close(() => (port ? resolve(port) : reject(new Error('could not reserve a local port'))));
+    });
+  });
+}
+
 async function startEmbeddedDatabase(dir: string): Promise<() => Promise<void>> {
   const { PGlite } = await import('@electric-sql/pglite');
   const { vector } = await import('@electric-sql/pglite-pgvector');
@@ -68,19 +85,31 @@ async function startEmbeddedDatabase(dir: string): Promise<() => Promise<void>> 
   const { PGLiteSocketServer } = await import('@electric-sql/pglite-socket');
 
   const dataDir = path.join(dir, 'pgdata');
-  const runDir = path.join(dir, 'run');
-  fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
-
-  // node-postgres derives the socket filename from the port, so the name is
-  // fixed and the directory is what varies.
-  const socket = path.join(runDir, '.s.PGSQL.5432');
-  if (fs.existsSync(socket)) fs.rmSync(socket, { force: true });
-
   const db = await PGlite.create({ dataDir, extensions: { vector, unaccent, moddatetime } });
-  const server = new PGLiteSocketServer({ db, path: socket, maxConnections: 10 });
-  await server.start();
 
-  process.env.DATABASE_URL = `postgresql:///postgres?host=${encodeURIComponent(runDir)}`;
+  // KYBASE_EMBEDDED_TCP forces the loopback path on Unix too — for a data
+  // directory on a filesystem that cannot host a socket (some network
+  // mounts), and so this branch is testable off Windows.
+  const useLoopback = process.platform === 'win32' || process.env.KYBASE_EMBEDDED_TCP === '1';
+
+  let server: InstanceType<typeof PGLiteSocketServer>;
+  if (useLoopback) {
+    const port = await freeLoopbackPort();
+    server = new PGLiteSocketServer({ db, host: '127.0.0.1', port, maxConnections: 10 });
+    await server.start();
+    process.env.DATABASE_URL = `postgresql://postgres:postgres@127.0.0.1:${port}/postgres`;
+  } else {
+    const runDir = path.join(dir, 'run');
+    fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
+    // node-postgres derives the socket filename from the port, so the name
+    // is fixed and the directory is what varies.
+    const socket = path.join(runDir, '.s.PGSQL.5432');
+    if (fs.existsSync(socket)) fs.rmSync(socket, { force: true });
+    server = new PGLiteSocketServer({ db, path: socket, maxConnections: 10 });
+    await server.start();
+    process.env.DATABASE_URL = `postgresql:///postgres?host=${encodeURIComponent(runDir)}`;
+  }
+
   note(`embedded database ready at ${dataDir}`);
 
   return async () => {

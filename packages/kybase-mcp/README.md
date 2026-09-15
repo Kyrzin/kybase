@@ -58,6 +58,20 @@ Existing notes are embedded in the background as soon as a provider is
 available; `indexing_status` reports progress. Without one, nothing
 breaks — semantic search simply stays idle.
 
+## Reading your notes
+
+The embedded database is not a folder of `.md` files, so this writes the
+whole vault out as one:
+
+```bash
+kybase-mcp export vault.zip
+```
+
+Plain Markdown with frontmatter, folders as directories, `[[wikilinks]]`
+intact — open it in any editor. It is also exactly the archive the full
+Kybase app accepts under **Settings → Import .zip**, so starting here and
+moving to the web UI later costs one command in each direction.
+
 ## Configuration
 
 Every variable is optional.

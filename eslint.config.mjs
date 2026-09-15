@@ -16,6 +16,10 @@ const eslintConfig = defineConfig([
     // a local `npm run lint` after a coverage run disagree with CI, which
     // never generates this directory.
     "coverage/**",
+    // packages/* are standalone npm packages with their own dependencies,
+    // installed separately from the app's. Linting them from here resolves
+    // imports against the wrong node_modules.
+    "packages/**",
   ]),
 ]);
 

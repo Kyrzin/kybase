@@ -13,7 +13,14 @@ import path from 'path';
 import { getPool } from './db';
 import { checkSecretStrength } from './secret-strength';
 
-const MIGRATIONS_DIR = path.join(process.cwd(), 'db', 'migrations');
+// The app runs from the repo root, so cwd is right for it. The published
+// stdio package runs from wherever the user invoked npx and ships its own
+// copy of the .sql files, so it points KYBASE_MIGRATIONS_DIR at them.
+// Read per call, not once at import: a caller that sets the variable after
+// importing this module would otherwise silently get the cwd path.
+function migrationsDir(): string {
+  return process.env.KYBASE_MIGRATIONS_DIR || path.join(process.cwd(), 'db', 'migrations');
+}
 
 // App-wide advisory lock so concurrently starting instances don't race.
 const MIGRATE_LOCK_KEY = 0x6b796261; // 'kyba'
@@ -55,7 +62,8 @@ export async function runMigrationsOrDie(): Promise<void> {
 }
 
 export async function runMigrations(): Promise<void> {
-  const files = fs.readdirSync(MIGRATIONS_DIR);
+  const dir = migrationsDir();
+  const files = fs.readdirSync(dir);
   const client = await connectWithRetry();
   try {
     await client.query('select pg_advisory_lock($1)', [MIGRATE_LOCK_KEY]);
@@ -79,7 +87,7 @@ export async function runMigrations(): Promise<void> {
     if (secretCheck.verdict === 'warn') console.warn(`[migrate] ${secretCheck.reason}`);
 
     for (const file of pending) {
-      const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
+      const sql = fs.readFileSync(path.join(dir, file), 'utf8');
       try {
         await client.query('begin');
         await client.query(sql);

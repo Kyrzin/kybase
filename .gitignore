@@ -2,6 +2,7 @@
 
 # dependencies
 /node_modules
+packages/*/node_modules
 /.pnp
 .pnp.*
 .yarn/*
@@ -24,6 +25,14 @@ docs/search-baseline.md
 
 # production
 /build
+
+# packages/kybase-mcp build output — both are produced by its build.mjs
+# (the bundle, and a copy of db/migrations), so committing them would only
+# create a second copy that can drift from the source.
+packages/*/dist
+packages/kybase-mcp/migrations
+# tarballs from `npm pack`, rebuilt on demand
+packages/*/*.tgz
 
 # misc
 .DS_Store

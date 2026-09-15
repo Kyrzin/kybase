@@ -1,0 +1,48 @@
+{
+  "name": "kybase-mcp",
+  "version": "0.1.0",
+  "description": "Persistent markdown memory for AI agents over MCP. Runs standalone with an embedded Postgres — no Docker, no server.",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "bin": {
+    "kybase-mcp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "migrations",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "agent-memory",
+    "knowledge-base",
+    "markdown",
+    "pgvector",
+    "semantic-search"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kyrzin/kybase.git",
+    "directory": "packages/kybase-mcp"
+  },
+  "homepage": "https://github.com/Kyrzin/kybase",
+  "scripts": {
+    "build": "node build.mjs",
+    "prepare": "node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-pgvector": "^0.0.9",
+    "@electric-sql/pglite-socket": "^0.2.11",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "pg": "^8.16.3",
+    "zod": "^4.4.3"
+  }
+}

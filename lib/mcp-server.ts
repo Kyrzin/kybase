@@ -33,7 +33,7 @@ const uuid = () => z.string().refine((v) => UUID_RE.test(v), 'must be a UUID').m
 
 
 // get_note(title=...) is the shortcut past search_notes, but real titles are long
-// and composite ("2026-07-24 — Kybase: Move-folder + sidebar UX polish"), and
+// and composite (" — Kybase: Move-folder + sidebar UX polish"), and
 // an agent almost never reproduces one verbatim from memory. Exact-only matching
 // made that shortcut a coin flip: title "Kybase" returned a bare "Note not found"
 // while seven notes started with "Kybase — ". An exact (case-insensitive) hit
@@ -234,7 +234,7 @@ export function sectionRange(
   //
   // A note repeating a heading — "Setup" under both Windows and Linux — is
   // ordinary, not pathological, and taking the first match was the one failure
-  // in this file that silently wrote to the wrong place: measured 2026-08-20,
+  // in this file that silently wrote to the wrong place:
   // an append aimed at section "Setup" landed under Windows when Linux was
   // meant, with nothing in the response suggesting a choice had been made.
   //
@@ -696,7 +696,7 @@ export function createMcpServer(): McpServer {
         body = { ...data, content: data.content.slice(range.start, range.end) };
         // The caller already named the section they want — the rest of the
         // note's outline is dead weight here, and could outweigh the section
-        // body itself (measured live 2026-08-17: ~967 content chars vs
+        // body itself (measured: ~967 content chars vs
         // ~2500 headings chars on one real note). Scope to headings that
         // fall within the section, re-based to the section's own start so
         // they stay usable as the next `offset` — offset/limit above already
@@ -895,7 +895,7 @@ export function createMcpServer(): McpServer {
           // A rename rewrites [[wikilinks]] to this note everywhere ELSE
           // (update_wikilinks below), but never touched this note's own
           // body — the visible `# Old Title` heading silently fell out of
-          // sync with the new title (found live 2026-08-17). Only fix it
+          // sync with the new title. Only fix it
           // when nobody explicitly rewrote content AND the body's very
           // first line is an exact, unambiguous `# <old title>` — the
           // vault's own convention (see the knowledge-base conventions
@@ -1244,7 +1244,7 @@ export function createMcpServer(): McpServer {
   // doesn't reformat still sees structure. Trimmed debug fields (~40% per
   // measurement) outweigh indentation's own overhead (~25%), so the net
   // response is smaller as well as more readable
-  // (2026-08-14 search-relevance overhaul, step 8).
+  //.
   function toDisplayResult(r: SearchResult | HybridSearchResult, explain: boolean): Record<string, unknown> {
     const hybrid = r as Partial<HybridSearchResult>;
     const out: Record<string, unknown> = {
@@ -1454,7 +1454,7 @@ export function createMcpServer(): McpServer {
       if (type === 'text') {
         // Always {results: [...]}, same top-level shape as hybrid/semantic
         // below — a caller no longer needs a type-keyed branch just to read
-        // the hit list (found live 2026-08-17, independently by both an
+        // the hit list (found independently by both an
         // external audit and an independent-agent test).
         return { content: [{ type: 'text' as const, text: JSON.stringify({
           results: displayResults,
@@ -1466,7 +1466,7 @@ export function createMcpServer(): McpServer {
       // relevance is only ever relative to the best hit IN THIS RESPONSE
       // (semanticSearch/rrfMerge), so an agent has no way to tell "a
       // confident 0.85 cosine" from "the least-bad of a weak field" without
-      // this number to compare against (2026-08-14 search-relevance overhaul, step 2).
+      // this number to compare against.
       return {
         content: [{
           type: 'text' as const,

@@ -7,7 +7,7 @@
 -- quotation in the vault. unaccent's standard rules fold « » ‹ › into << >>
 -- < >, and the default text-search parser classifies <...> as a `tag` token,
 -- which no standard configuration indexes. Measured on a clean
--- pgvector/pgvector:pg16 (the same image docker-compose.yml runs), 2026-08-18:
+-- pgvector/pgvector:pg16 (the same image docker-compose.yml runs):
 --
 --   to_tsvector('simple', '«gravierende Fehler»')      -> 'fehler':2 'gravierende':1
 --   unaccent('«gravierende Fehler»')                   -> <<gravierende Fehler>>
@@ -27,16 +27,16 @@
 -- Fixing this also fixes an OLDER, independent defect that has nothing to do
 -- with unaccent: anything inside angle brackets was already being dropped.
 -- 'Promise<void> and <div> and Array<T>' indexed as promise/array/and/… — void,
--- div and T were never findable. In a vault this full of TypeScript and n8n
+-- div and T were never findable. In a vault full of TypeScript and workflow
 -- notes that is not a corner case.
 --
 -- The fix strips the angle brackets AFTER unaccent rather than rewriting the
 -- guillemets before it. That order matters: post-unaccent, one translate()
 -- catches every character unaccent folds into an angle bracket — the two
 -- pairs measured above and any others its rules cover — instead of an
--- enumeration of the quote characters this particular vault happens to use.
--- Enumerating them would be exactly the vault-tuned constant the roadmap's
--- own framing rule rejects.
+-- enumeration of the quote characters one particular collection happens to
+-- use. Enumerating them would bake in exactly the installation-specific
+-- constant this project avoids.
 --
 -- Accepted trade: a genuine HTML/XML tag in a note now indexes as words
 -- rather than being discarded. For a knowledge base holding code samples

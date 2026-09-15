@@ -5,7 +5,7 @@
 // This is the document an MCP client looks for FIRST. It does not guess that
 // the MCP endpoint and its authorization server live on the same origin: it
 // asks the resource which authorization servers it trusts, and only then reads
-// that server's own metadata. Measured live 2026-08-20 against a deployed
+// that server's own metadata. Measured against a deployed
 // instance: this path returned 404, /api/mcp answered 401 with no
 // WWW-Authenticate header to point anywhere, and claude.ai's connector gave up
 // with "Automatic client registration isn't supported" — a message about the

@@ -19,7 +19,7 @@ import type { Readable } from 'node:stream';
 // per import path that could silently drift apart.
 //
 // 400MB (the original value here) does NOT leave enough headroom under this
-// app's own deployed container limit — measured live: a single EPUB whose
+// app's own deployed container limit — measured: a single EPUB whose
 // one entry decompresses past that cap OOM-killed the kybase container
 // (docker-compose.yml's `mem_limit: 512m` for the `kybase` service; kernel
 // log: "Memory cgroup out of memory... anon-rss:514056kB"). The 400MB

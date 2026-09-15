@@ -18,7 +18,7 @@ const blank = (s: string) => ' '.repeat(s.length);
  * offset in the original text still lines up — a caller that wants match
  * positions keeps getting the real ones.
  *
- * Why this exists: a note documenting the link syntax (this vault has
+ * Why this exists: a note documenting the link syntax (a vault has
  * several) puts `[[Title#Section]]` in a code block as an EXAMPLE. Without
  * masking, that example became a graph edge, a dangling "unresolved link"
  * with a made-up target, and — through update_wikilinks — a candidate for

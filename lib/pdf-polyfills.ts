@@ -29,7 +29,7 @@ if (typeof globalThis.DOMMatrix === 'undefined') {
 // ends up on disk. That's fine unpacked in node_modules, but breaks under
 // `output: standalone`: Turbopack inlines pdf.mjs into a server chunk, so
 // the relative path resolves against `.next/server/chunks/` instead —
-// verified live: "Cannot find module '.next/server/chunks/pdf.worker.mjs'"
+// verified: "Cannot find module '.next/server/chunks/pdf.worker.mjs'"
 // even after outputFileTracingIncludes correctly copied the real file into
 // node_modules; the code was never looking there once bundled.
 // PDFWorker's own fallback (pdf.mjs, PDFWorker.#mainThreadWorkerMessageHandler)

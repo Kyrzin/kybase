@@ -19,12 +19,11 @@
 -- this note", not "some other note's rename mechanically swapped one link
 -- string inside it". A vault where one note has 23 backlinks makes every
 -- rename of that note claim 23 unrelated notes were "updated" — pure noise
--- for anyone trying to reconstruct what actually happened (2026-08-17,
--- discussed with the owner against the roadmap's earlier deliberate
--- rejection of a separate column — that rejection assumed
--- updated_at's six consumers all wanted the same semantics; they split
--- into two groups with genuinely different needs, so the rejection's own
--- premise doesn't hold. restore_note was checked the same day and does not
+-- for anyone trying to reconstruct what actually happened. A separate
+-- column had been rejected earlier on the assumption that updated_at's six
+-- consumers all wanted the same semantics; they split into two groups with
+-- genuinely different needs, so that premise does not hold. restore_note
+-- was checked against the same reasoning and does not
 -- touch any other note's row at all, so it needs no exemption here.
 --
 -- Mechanism: content_updated_at bumps under the exact same WHEN condition

@@ -5,11 +5,10 @@
 // split by raw size instead of section, and get_note(section:) has nothing
 // to navigate. Worse, some books use a leading `#` in code-comment examples
 // ("# Remove stopped containers") which extractHeadings' own H1 regex reads
-// as a real markdown heading — verified live on a real book: 91 "headings",
-// all fake, none of them an actual chapter title.
+// as a real markdown heading. On a technical book that yields dozens of
+// "headings", all fake, none of them an actual chapter title.
 //
-// Scope, deliberately narrow (verified live against a real 738-page book,
-// not just a synthetic one): this module fixes headings and running
+// Scope, deliberately narrow: this module fixes headings and running
 // header/footer noise. It does NOT attempt to fix mid-word character
 // spacing some PDFs extract with ("std i o . write l n") or reconstruct
 // diagrams/figures (they extract as unordered text fragments, sometimes
@@ -28,8 +27,8 @@ export type Line = { text: string; fontSize: number | null; y: number; wordCount
 // pathological PDF (huge page count, or pages pdfjs struggles to lay out)
 // stalls every other request this process is serving, including MCP calls
 // from other agents. Two independent guards, since either alone has a gap:
-// a 738-page real book (the largest verified live) is well under the page
-// cap but could still be slow on a loaded box; a small page count can still
+// a book-length PDF of several hundred pages is well under the page cap
+// but could still be slow on a loaded box; a small page count can still
 // hang on a single pathological page.
 const MAX_PDF_PAGES = 2_000;
 const PDF_PARSE_TIMEOUT_MS = 60_000;
@@ -45,7 +44,7 @@ function timeout(ms: number, message: string): Promise<never> {
  * is passed — the legacy Node build (pdfjs-dist/legacy/build/pdf.mjs) runs
  * parsing on the main thread by itself when nothing spawns a real Worker,
  * which is the case here (no browser, no separate worker file to point at).
- * Verified live against a 738-page real-world PDF (10s, no worker needed).
+ * A book-length PDF parses in seconds this way, with no worker involved.
  *
  * The timeout races the whole extraction, not just the initial getDocument()
  * call — pdfjs yields to the event loop between pages (each is its own
@@ -175,9 +174,9 @@ function normalizeForRepeatDetection(text: string): string {
 /**
  * Text (normalized) of lines that recur, in the header/footer zone, across
  * enough of the document to be page furniture rather than content — see
- * HEADER_FOOTER_* above for the exact bar. Verified against a real book:
- * catches the "12 · Chapter 3 · Section Name" running header pattern
- * without touching a genuinely repeated in-body phrase.
+ * HEADER_FOOTER_* above for the exact bar. Catches the
+ * "12 · Chapter 3 · Section Name" running header pattern without touching
+ * a genuinely repeated in-body phrase.
  */
 export function findHeaderFooterLines(pages: PdfPage[]): Set<string> {
   const pageCountBySeenLine = new Map<string, Set<number>>();
@@ -207,7 +206,7 @@ export function findHeaderFooterLines(pages: PdfPage[]): Set<string> {
 // catching body-adjacent sizes (e.g. a slightly-larger figure caption).
 const HEADING_SIZE_RATIO = 1.15;
 // Headings are short by nature. This also rejects the real failure mode
-// found live: some books render individual emphasized terms mid-sentence
+// found: some books render individual emphasized terms mid-sentence
 // in a large display font ("the term function, or recursion, ...") — those
 // share a heading-sized font but are never alone on their line once mixed
 // with the surrounding 11pt sentence, so they're already excluded by
@@ -221,7 +220,7 @@ const MAX_HEADING_WORDS = 12;
 // than layout noise. Formulas, table remnants, and diagram fragments (single
 // letters, repeated glyphs, digit runs, stray punctuation) routinely pass
 // every other heading check — same isolated-uniform-large-font shape as a
-// real heading, verified live on multiple books, different noise each time.
+// real heading, verified on multiple books, different noise each time.
 // The one thing they don't have in common with real headings, in any
 // language: an actual multi-letter word. "1.1 Introduction" and "1.1 First
 // Program" both clear this; "i", "J J J J J J J J", "4<0xFFFD>", "::::: 9.21034."
@@ -320,7 +319,7 @@ export function pagesToMarkdown(pages: PdfPage[]): string {
       // A body/code line that happens to start a paragraph with a literal
       // "#" (a shell/Python comment marker, most often) is exactly the bug
       // this whole module exists to fix, just from the PDF-import side
-      // instead of copy-paste — verified live: real book code comments
+      // instead of copy-paste — verified: real book code comments
       // ("# Array initialization...") landed at a paragraph's start often
       // enough to matter. extractHeadings/chunkNote read `^#{1,6}\s` as a
       // real heading with no way to know it came from inside a code

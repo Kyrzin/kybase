@@ -6,7 +6,7 @@
 // lib/tokens.ts) isn't an option: the app needs the original value back, not
 // just proof that a presented value matches it.
 //
-// This closes the specific threat the roadmap names: a DB-only leak (a
+// This closes one specific threat: a DB-only leak (a
 // stolen backup, leaked DB credentials, a dump) that does not also expose
 // KYBASE_SECRET. If KYBASE_SECRET itself leaks, the attacker already has
 // root over the whole vault through every other path (login, bearer auth,

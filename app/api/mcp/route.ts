@@ -58,7 +58,7 @@ async function handle(req: NextRequest): Promise<Response> {
     // RFC 9728 §5.1: a 401 from a protected resource points at its own
     // metadata, which is how a client discovers where to authenticate. Without
     // this header the only thing an MCP client learns from a 401 is that it
-    // failed — measured live 2026-08-20: claude.ai's connector reported
+    // failed — measured: claude.ai's connector reported
     // "Automatic client registration isn't supported", a complaint about a
     // step it never reached, because it had no way to find the authorization
     // server that offers the registration.

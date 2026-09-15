@@ -19,7 +19,7 @@
 // endpoint — they cannot log into the UI, call the REST API..."), and no
 // MCP tool calls either of these two routes — accepting a token here would
 // silently widen its scope past what's documented, for zero functional
-// benefit. Found live during pre-publication review: an earlier version of
+// benefit. Found live: an earlier version of
 // this file DID call verifyToken() here, contradicting both SECURITY.md and
 // this file's own "mirrors proxy.ts" claim above (proxy.ts itself never
 // calls verifyToken() — check its own auth function to confirm before

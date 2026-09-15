@@ -29,10 +29,10 @@ import { readRequestBodyCapped } from '@/lib/request-body';
 
 const NOTE_SELECT = 'id, title, content, folder_id, tags, embedding_pending, created_at, updated_at';
 
-// The heaviest real file this pipeline was tested against (a 738-page PDF
-// textbook with diagrams) was 60MB and converted in ~10s. 80MB leaves
-// headroom for a legitimately large scanned book without inviting a
-// multi-minute request. This is the app-level "is this reasonable" cap,
+// A book-length illustrated PDF runs around 60MB and converts in seconds.
+// 80MB leaves headroom for a legitimately large scanned book without
+// inviting a multi-minute request. This is the app-level "is this
+// reasonable" cap,
 // enforced by streaming the body in and giving up as soon as it's exceeded
 // (readRequestBodyCapped) rather than trusting the attacker-controlled
 // Content-Length header.
@@ -79,7 +79,7 @@ export async function POST(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const folderId = searchParams.get('folder_id');
   // URI-encoded client-side (components/Sidebar.tsx): raw header values must
-  // be Latin-1, and this vault's note titles are routinely Cyrillic/German.
+  // be Latin-1, and note titles are routinely non-Latin.
   const rawFilename = req.headers.get('x-filename');
   const filename = rawFilename ? decodeURIComponent(rawFilename) : '';
 

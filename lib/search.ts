@@ -32,7 +32,7 @@ export type SearchResult = {
   // The semantic hit expressed in background units: how many IQRs above
   // the median of what THIS query scores against a frozen sample of the
   // vault's own chunks. Raw cosine is not
-  // comparable between queries -- measured live 2026-08-19, a correct
+  // comparable between queries -- measured: a correct
   // answer scored 0.443 for one query and 0.686 for another on the same
   // model and vault. Kept OUT of the default response for that reason: a
   // raw cosine handed to a caller invites it to invent its own threshold,
@@ -65,19 +65,19 @@ export type SearchResult = {
   // the excerpt it belongs to (rrfMerge keeps the first arm's result object
   // whole), so it never labels one passage with another's heading. Pass it
   // to get_note's `section` to read that part of the note alone: measured
-  // 2026-08-20 on a real server note, 681 characters instead of 13035.
+  // on a real server note, 681 characters instead of 13035.
   section?: string;
   // textSearch only. Fraction of the query's significant lexemes actually
   // present in this hit's search_vector (see computeTextCoverage) — a
   // query/document ratio, not a corpus-tuned constant. Exists because
   // relative-to-best normalization (step 4) hands the top result of an
   // ALL-junk set relevance 1.0 with no way to tell "matched every word" from
-  // "matched one of five and nothing else came close" — measured live
-  // 2026-08-14: a 5-word nonsense query's top hit read `relevance: 1` on a
+  // "matched one of five and nothing else came close" — measured
+  // a 5-word nonsense query's top hit read `relevance: 1` on a
   // single incidental word match. Exposed as its own field, not folded
   // invisibly into relevance, because the alternative was already tried and
   // failed silently (the confidence label alone was correct; the number
-  // still lied — see the 2026-08-14 search-relevance overhaul, step 3b).
+  // still lied).
   coverage?: number;
   // Filled in by enrichResults (a single id = any($1) lookup, not part
   // of search_notes_fts/match_chunks — see there for why). Absent only if
@@ -698,8 +698,8 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
           // at all (semanticSearch never sets `exact`) — without this, a
           // verbatim identifier match would silently lose the one fact that
           // proves it, right as it also picks up the semantic arm's
-          // normalized relevance and often a #1 rank. Measured live
-          // 2026-08-21: "KYBASE_SECRET" against a real vault — a note read
+          // normalized relevance and often a #1 rank. Measured
+          // "KYBASE_SECRET" against a real vault — a note read
           // `exact: true` from `type: text` and had no `exact` field at all
           // from `type: hybrid`, despite outranking everything.
           existing.exact = item.exact;
@@ -710,7 +710,7 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
           // it's computeTextCoverage's own IDF-weighted number — the exact
           // same function semanticSearch calls for the same note and query,
           // so the two arms' values are expected to agree (spot-checked live
-          // 2026-08-21, "PostgreSQL backup and restore": text 0.70 vs
+          //, "PostgreSQL backup and restore": text 0.70 vs
           // semantic 0.70 on the same note — no divergence found). Taking
           // the text arm's number is the documented, tier-consistent one;
           // a semantic-only hit falls through to the winning result's own
@@ -755,7 +755,7 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
       // some other reason (word order, cross-language stemming, the
       // multi-config OR-combination search_notes_fts builds) even though
       // the content is genuinely all there. Reviewed live on an external
-      // 28-note corpus (2026-08-14): requiring strict-AND-only made `strong`
+      // 28-note corpus : requiring strict-AND-only made `strong`
       // unreachable for 11/11 real queries against short, precise notes —
       // natural-language queries routinely don't echo a note's exact
       // wording verbatim, so the OR cascade fires even for a fully-correct
@@ -795,7 +795,7 @@ export function rrfMerge(lists: NamedResultList[]): HybridSearchResult[] {
     // than a score nudge: a query that is a filename, a path or an identifier
     // (see textSearch's two guards) and occurs literally in a note is a fact
     // about the string that neither arm's rank can express — Postgres tokenizes
-    // `cleanup-n8n-binary.sh` differently in the query and in the document, so
+    // `cleanup-old-artifacts.sh` differently in the query and in the document, so
     // FTS structurally cannot rank it first. Verbatim hits sort above the rest
     // and are ordered among themselves by RRF like everything else; `exact` is
     // only ever set for the narrow identifier shapes textSearch tests for, never
@@ -894,7 +894,7 @@ const MIN_SECTION_MATCH_LEN = 8;
  * small sections up to 2000 chars and keeps only the first section's heading
  * for the whole merged chunk, so an excerpt from the second (or third)
  * section inside that chunk got attributed to the first section's title
- * instead of its own — measured live 2026-08-21 on the real vault:
+ * instead of its own — measured on a real vault:
  * sectionCorrect for textSearch hits was 74.7%, i.e. roughly one in four
  * reported headings didn't actually contain the excerpt shown under it.
  * Reading straight from the note's own content and its own heading offsets
@@ -1053,10 +1053,10 @@ async function attachQuestionEcho(results: SearchResult[], words: string[]): Pro
 // phrase and come back empty. 3 chars is the same floor the overhaul uses
 // elsewhere for "significant" — short enough to keep real content words
 // ("dns", "kmv") while dropping prepositions/particles in RU/EN/DE, the
-// languages this vault actually configures (settings.fts_languages).
+// languages a vault actually configures (settings.fts_languages).
 //
 // Known scope limitation, flagged rather than silently left implicit
-// (pre-publication review): word length is language-dependent, and this
+//: word length is language-dependent, and this
 // cutoff was originally a cascade-triggering heuristic only — since step 3b
 // it also PRE-FILTERS which words computeTextCoverage's real, language-
 // aware significance test (numnode() against the configured FTS languages)
@@ -1064,14 +1064,13 @@ async function attachQuestionEcho(results: SearchResult[], words: string[]): Pro
 // before. German compounds ("Rechnungsnummer") clear it easily; a CJK
 // vault, where content words routinely run 1-2 characters, would have
 // significant words silently dropped before the language-aware test ever
-// ran. Not fixed here: this vault's configured languages (russian,
+// ran. Not fixed here: a vault's configured languages (russian,
 // english, and optionally german) are all space-delimited with multi-
 // character words, so the gap is real but doesn't fire on any language
 // this instance is actually configured for. A genuinely language-aware
 // tokenizer (leaning on Postgres's own parser rather than a fixed-length
-// JS regex split) is a bigger redesign than this review pass covers —
-// belongs in the roadmap as a known limitation for a CJK-configured vault,
-// not something to guess a fix for unmeasured.
+// JS regex split) is a bigger redesign. Treat it as a known limitation for
+// a CJK-configured instance, not something to guess a fix for unmeasured.
 const MIN_SIGNIFICANT_WORD_LEN = 3;
 
 function significantWords(query: string): string[] {
@@ -1079,12 +1078,12 @@ function significantWords(query: string): string[] {
 }
 
 /**
- * Query-coverage discount (2026-08-14 search-relevance overhaul, step 3b): what fraction of
+ * Query-coverage discount: what fraction of
  * the query's significant lexemes are actually present in a given hit,
  * independent of ts_rank entirely. Needed because step 4's relative-to-best
  * normalization (rank / max(rank)) always hands the top hit of a result set
  * relevance 1.0 — including a set where the "top hit" only matched one word
- * out of five and nothing else came close (measured live: a 5-word nonsense
+ * out of five and nothing else came close (measured: a 5-word nonsense
  * query's best OR-cascade hit read `relevance: 1`).
  *
  * "Significant" is decided the same way Postgres itself decides it for
@@ -1111,12 +1110,12 @@ function significantWords(query: string): string[] {
 // How many of a query's words to keep when the strict pass finds nothing and
 // the loose one is about to answer with whatever filler word is commonest.
 // Two, not one: a question often carries a pair that only means something
-// together ("cadvisor docker"), and two rare words still exclude far more
+// together ("pgbouncer docker"), and two rare words still exclude far more
 // than they admit.
 const ANCHOR_COUNT = 2;
 
 /**
- * The rarest words of a query, by document frequency in this vault. Same
+ * The rarest words of a query, by document frequency in a vault. Same
  * statistic the coverage weighting uses, asked a different question: not "how
  * much of the query does this hit contain" but "which part of the query was
  * worth searching for at all".
@@ -1188,15 +1187,15 @@ async function computeTextCoverage(words: string[], ids: string[]): Promise<Map<
     const langExprs = languages.map((_, i) => `websearch_to_tsquery($${i + 2}::regconfig, unaccent(wt.word))`);
     const tsqExpr = [`websearch_to_tsquery('simple', unaccent(wt.word))`, ...langExprs].join(' || ');
     const idsParamIndex = languages.length + 2;
-    // Words are weighted by how rare they are in THIS vault, not counted
-    // equally. Measured live 2026-08-20: a natural-language question about
-    // cadvisor returned notes matching only its two filler words at coverage
+    // Words are weighted by how rare they are in THIS collection, not counted
+    // equally. Measured: a natural-language question about
+    // pgbouncer returned notes matching only its two filler words at coverage
     // 0.75, while
-    // the one note containing `cadvisor` — the only word in the query that
+    // the one note containing `pgbouncer` — the only word in the query that
     // says anything — sat below them. Counting terms equally hands a natural
     // question to whichever of its filler words is most common in the vault.
     //
-    // The weight is inverse document frequency, computed against this vault:
+    // The weight is inverse document frequency, computed against a vault:
     // ln(1 + N/(1+df)). A word in nearly every note contributes almost
     // nothing; a word in three notes dominates. No stopword list is involved
     // — which matters, because a stopword list is a language, and kybase does
@@ -1264,10 +1263,10 @@ function weightForTags(tags: string[], weights: TagWeights): number {
 }
 
 // Exact folder_id match only, same as SearchFilters.folderId's own semantics
-// (filteredNoteIds above) — no subtree recursion. A vault that wants a
+// (filteredNoteIds above) — no subtree recursion. A collection that wants a
 // whole book tree downweighted sets the weight on each folder in it; adding
-// recursion would need walking the folders table for every search call for
-// a case the roadmap didn't ask for.
+// recursion would mean walking the folders table on every search call for a
+// case nothing has asked for yet.
 function weightForFolder(folderId: string | null | undefined, weights: FolderWeights): number {
   return folderId ? (weights[folderId] ?? 1) : 1;
 }
@@ -1305,10 +1304,10 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
 
   // A natural question that the strict pass could not satisfy: instead of
   // leaving the answer to whichever filler word is commonest here, search the
-  // query's rarest words as a strict query of their own. Measured live
-  // 2026-08-20: a natural-language question about cadvisor returned notes
-  // matching only its filler words, while the note containing `cadvisor` never entered
-  // the candidate set — and the bare word `cadvisor` found it instantly. The
+  // query's rarest words as a strict query of their own. Measured
+  // a natural-language question about pgbouncer returned notes
+  // matching only its filler words, while the note containing `pgbouncer` never entered
+  // the candidate set — and the bare word `pgbouncer` found it instantly. The
   // agent had learned to strip its own questions down to keywords before
   // asking; that is work the search should be doing.
   //
@@ -1326,7 +1325,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
 
   // The exact/substring pass used to run ONLY when both FTS passes came back
   // empty, which made it unreachable exactly when it matters most: measured
-  // live 2026-08-20, searching for the filename `cleanup-n8n-binary.sh`
+  // live, searching for the filename `cleanup-old-artifacts.sh`
   // returned five notes matching the single token "n8n" and never reached the
   // one note that literally contains the filename, because those five counted
   // as "results found". An identifier query is not a fallback for failure — it
@@ -1334,8 +1333,8 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   //
   // A hit that contains the query verbatim is also the top of the lexical
   // evidence order — above a strict-AND match, far above a partial OR one —
-  // and it is the one thing FTS structurally cannot say. Measured live
-  // 2026-08-20, `cleanup-n8n-binary.sh`: the note holding that filename came
+  // and it is the one thing FTS structurally cannot say. Measured
+  //, `cleanup-old-artifacts.sh`: the note holding that filename came
   // back at relevance 0.50 (the flat substring constant) UNDER an unrelated
   // note at 0.52 that had matched the single token "n8n" and repeated it
   // often enough to win on ts_rank. The tokenizers disagree by construction —
@@ -1351,24 +1350,24 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   //
   // And NO whitespace: the query has to be one contiguous name that the
   // tokenizer took apart, not a phrase the user typed with spaces. This is
-  // the whole failure mode — `cleanup-n8n-binary.sh` and `AGENT_RUN_ID_8832a`
+  // the whole failure mode — `cleanup-old-artifacts.sh` and `AGENT_RUN_ID_8832a`
   // are single names to a human and several lexemes to Postgres, which is why
   // FTS cannot reassemble them. A phrase with spaces has no such disagreement:
   // every word is its own lexeme on both sides, and FTS ranks it correctly
-  // without help (measured 2026-08-20: `PostgreSQL backup and restore` and
+  // without help (measured: `PostgreSQL backup and restore` and
   // `Log Rotation einrichten` were already ordered right before any of this).
   //
   // Without the second guard the rule reaches queries it has no business
-  // deciding. Counter-test, measured live: for `how do I add a new MCP
+  // deciding. Counter-test, measured: for `how do I add a new MCP
   // tool`, a note that merely QUOTES that question in a list of test prompts
   // beat the runbook that answers it — despite the runbook's ts_rank being
   // 4.4x higher. Containing a sentence is not the same as being about it;
   // containing a filename essentially is.
   //
   // A name does not have to split into several words to be a name. Measured
-  // 2026-08-20: `build.sh`, `x86-64` and an opaque id like `HL6AjEyrn6xOkSgr`
+  // `build.sh`, `x86-64` and an opaque id like `QY7xK2mNp4RtVwZa`
   // all failed the word-count test — "sh", "64" and the id are one significant
-  // word or none — and lost the protection that `cleanup-n8n-binary.sh` got,
+  // word or none — and lost the protection that `cleanup-old-artifacts.sh` got,
   // for no reason a user could see. So the question is asked structurally
   // instead: does this look like an identifier?
   //
@@ -1419,7 +1418,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   // EVERY term websearch_to_tsquery's own parser produced for the strict
   // query, by construction (that's what AND semantics means), so it's
   // fully covered regardless of what coverage would compute. Deliberately
-  // not "compute it anyway, it'll come out 1.0" — measured live 2026-08-14:
+  // not "compute it anyway, it'll come out 1.0" — measured:
   // a hostname query ("host1.example.cloud") is one lexeme to Postgres's
   // own tokenizer (its dotted-host special case), but significantWords()
   // (a plain JS regex split on non-letters) naively cut it into three —
@@ -1438,7 +1437,7 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
     // coverage (the common case for an OR-cascade result: everything
     // matched on one word out of N) — the multiplier would divide by
     // itself and the top hit would land back at 1.0, silently undoing the
-    // whole point (2026-08-14 search-relevance overhaul, step 3b).
+    // whole point.
     const normalized = best > 0 ? weightedRank(n) / best : 0;
     const exact = exactIds.has(n.id);
     // A note containing the query verbatim contains every word of it by
@@ -1579,8 +1578,8 @@ async function substringSearch(
 
 /**
  * How many notes match `query`, without paying for ranking, excerpts, or a
- * `limit` cutoff — roadmap item 44 ("nothing can be counted"): judging a
- * defect's real scope, or a lexeme's real drop rate, needs a total, and
+ * `limit` cutoff. Judging a defect's real scope, or a lexeme's real drop
+ * rate, needs a total, and
  * search_notes only ever reports how many it returned, never how many exist.
  *
  * Two modes, each one honest, unambiguous definition — deliberately not a
@@ -1598,8 +1597,8 @@ async function substringSearch(
  * effectiveSemanticThreshold) — "how many matched" would silently mean "the
  * whole vault" for the common unconfigured case, a number worse than none.
  *
- * No SearchFilters param (yet): every roadmap use case behind item 44 was a
- * vault-wide question ("how many notes have X"), not a scoped one — add
+ * No SearchFilters param (yet): the use cases behind this were all
+ * vault-wide questions ("how many notes have X"), not scoped ones — add
  * filtering if a real caller needs it rather than guessing the shape now.
  */
 export async function countNotes(query: string, mode: 'fts' | 'substring'): Promise<number> {
@@ -1629,9 +1628,9 @@ export async function countNotes(query: string, mode: 'fts' | 'substring'): Prom
  * surface both (deduplicated back to one result each below).
  *
  * Two separate jobs, deliberately not one absolute threshold doing both
- * (2026-08-14 measurement — a single cosine floor can't be both a junk gate
+ * (measurement — a single cosine floor can't be both a junk gate
  * and a relevance judgment: lowering it to catch more true positives always
- * let more noise in too, on this vault and by construction on anyone else's):
+ * let more noise in too, on a vault and by construction on anyone else's):
  *
  *  1. Recall — match_chunks itself is always called with a hardcoded 0
  *     (migration 002's own chunk-level floor is bypassed entirely, see the
@@ -1700,7 +1699,7 @@ async function semanticRun(query: string, limit = 10, filters?: SearchFilters, a
   // that a large document has real on-topic content, bad for a caller-facing
   // result list: a `limit: 3` call returning the same note twice leaves only
   // 2 actual documents represented with no signal in the response shape that
-  // that's what happened (measured live 2026-08-14: a long natural-language
+  // that's what happened (measured: a long natural-language
   // query against a job-vacancy note returned it twice in
   // 3 slots). Keep one entry per note — the first, since `data` is already
   // ordered by similarity desc, so it's that note's best-matching chunk —
@@ -1739,7 +1738,7 @@ async function semanticRun(query: string, limit = 10, filters?: SearchFilters, a
 
   // Coverage on a semantic hit answers the question the cosine cannot: does
   // the thing you asked about actually APPEAR in this note. Measured
-  // 2026-08-20 on a 16-query near-domain battery, half the convincing false
+  // on a 16-query near-domain battery, half the convincing false
   // positives were of exactly one shape — a query naming a technology the
   // vault has never used, answered with the vault's nearest neighbour at a
   // healthy similarity and no mention of that technology anywhere in it. The
@@ -1986,7 +1985,7 @@ async function applyRerank(
  *
  * The main pass already ranks NOTES well; what it cannot fix is which part of
  * the winning note is displayed, and that is decided by the same lexical
- * heuristic the reranker exists to replace. Measured live 2026-09-08 on a real
+ * heuristic the reranker exists to replace. Measured on a real
  * vault, all four failures were the FIRST hit: an excerpt that stopped four
  * words before the token it was asked for, a passage taken from the section
  * next to the answer, and twice a note's introduction shown instead of its

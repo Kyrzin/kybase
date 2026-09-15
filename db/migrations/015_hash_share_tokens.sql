@@ -1,7 +1,7 @@
 -- 015: stop storing share tokens in plaintext
 --
 -- note_shares.token was the primary key, stored in plaintext — a DB dump
--- contained working public share links (roadmap item 2). Two columns
+-- contained working public share links. Two columns
 -- replace it:
 --   token_hash      sha256, deterministic — what the public /share/:token
 --                   route looks up by. Same pattern as oauth_tokens'

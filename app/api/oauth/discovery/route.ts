@@ -11,7 +11,7 @@ export function GET(req: NextRequest) {
     authorization_endpoint: `${origin}/authorize`,
     token_endpoint: `${origin}/api/oauth/token`,
     // Hosted MCP clients read this document and refuse the server outright
-    // when registration_endpoint is missing — measured live 2026-08-20:
+    // when registration_endpoint is missing — measured:
     // "Incompatible auth server: does not support dynamic client
     // registration", raised before the consent page is ever requested.
     registration_endpoint: `${origin}/api/oauth/register`,

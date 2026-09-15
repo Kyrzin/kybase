@@ -6,12 +6,12 @@
 -- migration 018's fix (ts_headline using the vault's own configured
 -- language, `headline_config := langs[1]`, plus filtering blank entries out
 -- of fts_languages) back to a hardcoded `ts_headline('russian', ...)`.
--- Caught 2026-08-17 by reading the live function definition
+-- Caught by reading the live function definition
 -- (pg_get_functiondef) before building on top of it for unaccent below —
 -- confirmed live, not assumed. This migration restores 018's logic in full
 -- and keeps 021's folder_id.
 --
--- Part 2 — unaccent, a genuinely new gap (found live 2026-08-17 by an
+-- Part 2 — unaccent, a genuinely new gap (found by an
 -- independent-agent test, then reproduced by hand): "Telescope" (typed
 -- without the accent) does not strict-AND match a note containing
 -- "Télescope" — confirmed independent of the language-stemmer gap (adding

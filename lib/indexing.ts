@@ -119,9 +119,9 @@ export async function indexNote(id: string, title: string, content: string, isCa
     // without a lock here, their DELETE-then-INSERT sequences on
     // note_chunks below can interleave: whichever commits second can
     // collide with rows the first one just inserted, throwing
-    // note_chunks_note_id_chunk_index_key (measured live, pre-publication
-    // review — reproducible with two concurrent append_to_note calls on
-    // the same note; the failing call's error is caught and logged by
+    // note_chunks_note_id_chunk_index_key — reproducible with two
+    // concurrent append_to_note calls on the same note; the failing call's
+    // error is caught and logged by
     // indexNoteAsync, not surfaced anywhere a caller would see it, so the
     // note's semantic index could silently end up reflecting only one of
     // the two edits). xact-scoped, like FOLDER_REPARENT_LOCK_KEY — releases

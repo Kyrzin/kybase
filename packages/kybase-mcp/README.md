@@ -91,9 +91,16 @@ Everything is under `KYBASE_DATA_DIR`:
   pgvector). Copy the directory to back it up.
 - `secret` — generated on first run, `0600`. It encrypts any embedding
   provider API keys you store. Keep it with the data.
-- `run/` — the unix socket the server listens on. The embedded database
-  has no password; file permissions are the access control, which is why
-  no TCP port is ever opened.
+- `run/` — the unix socket the database listens on, in a `0700` directory.
+  It has no password, so file permissions are the access control. Windows
+  cannot listen on a socket path, so there the database binds an unused
+  loopback port instead — reachable by other processes running as you, and
+  never from another machine. `KYBASE_EMBEDDED_TCP=1` forces that mode on
+  Unix too, for a data directory on a filesystem that cannot host a socket.
+
+Expect the process to hold a few hundred MB of memory while it runs: the
+embedded database is a full Postgres, and it lives inside it. Pointing
+`DATABASE_URL` at a Postgres you already run avoids that entirely.
 
 Note content is plain Markdown and every note is readable through the MCP
 tools, so an agent can always read the whole vault back out. The `.zip`

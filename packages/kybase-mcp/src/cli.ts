@@ -25,6 +25,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+// Type-only: erased at build time, so it cannot disturb the import ordering
+// the runtime imports below depend on.
+import type { ExportNote, ExportFolder } from '../../../lib/export';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -48,12 +51,12 @@ function resolveDataDir(): string {
  * as the same user, which is the same exposure as a local development
  * Postgres; it is never reachable from another machine.
  */
-function ensureSecret(dir: string): string {
+function ensureSecret(dir: string): { secret: string; firstRun: boolean } {
   const existing = process.env.KYBASE_SECRET;
-  if (existing) return existing;
+  if (existing) return { secret: existing, firstRun: false };
 
   const file = path.join(dir, 'secret');
-  if (fs.existsSync(file)) return fs.readFileSync(file, 'utf8').trim();
+  if (fs.existsSync(file)) return { secret: fs.readFileSync(file, 'utf8').trim(), firstRun: false };
 
   // Persisted because it encrypts embedding-provider API keys stored in
   // settings: a fresh secret every run would make yesterday's keys
@@ -61,7 +64,7 @@ function ensureSecret(dir: string): string {
   const generated = crypto.randomBytes(32).toString('hex');
   fs.writeFileSync(file, `${generated}\n`, { mode: 0o600 });
   note(`generated a new instance secret at ${file}`);
-  return generated;
+  return { secret: generated, firstRun: true };
 }
 
 /** An unused loopback port, picked by the OS rather than guessed. */
@@ -118,38 +121,111 @@ async function startEmbeddedDatabase(dir: string): Promise<() => Promise<void>> 
   };
 }
 
-async function main() {
-  const external = Boolean(process.env.DATABASE_URL);
-  let shutdownDatabase: () => Promise<void> = async () => {};
+type OpenDatabase = { external: boolean; firstRun: boolean; shutdown: () => Promise<void> };
 
-  if (!external) {
+async function openDatabase(): Promise<OpenDatabase> {
+  const external = Boolean(process.env.DATABASE_URL);
+  let shutdown: () => Promise<void> = async () => {};
+  let firstRun = false;
+
+  if (external) {
+    note('using DATABASE_URL; leaving schema migrations to the app that owns it');
+  } else {
     const dir = resolveDataDir();
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    process.env.KYBASE_SECRET = ensureSecret(dir);
-    shutdownDatabase = await startEmbeddedDatabase(dir);
-  } else {
-    note('using DATABASE_URL; leaving schema migrations to the app that owns it');
+    const secret = ensureSecret(dir);
+    process.env.KYBASE_SECRET = secret.secret;
+    firstRun = secret.firstRun;
+    shutdown = await startEmbeddedDatabase(dir);
   }
 
   if (!process.env.KYBASE_MIGRATIONS_DIR) {
     process.env.KYBASE_MIGRATIONS_DIR = path.join(here, '..', 'migrations');
   }
+  if (!external) {
+    const { runMigrations } = await import('../../../lib/migrate');
+    await runMigrations();
+  }
 
-  const { runMigrations } = await import('../../../lib/migrate');
-  const { createMcpServer } = await import('../../../lib/mcp-server');
+  return { external, firstRun, shutdown };
+}
 
-  if (!external) await runMigrations();
+/**
+ * `kybase-mcp export [file.zip]` — the whole vault as Markdown with
+ * frontmatter, folders as directories. The same archive the web app's
+ * Import accepts, so notes written through this package are not stranded
+ * in it; it is also the only way to read them as files, since the embedded
+ * database is not a directory of .md you can open.
+ */
+async function runExport(target?: string): Promise<void> {
+  const stamp = new Date().toISOString().slice(0, 10);
+  const out = path.resolve(target ?? `kybase-export-${stamp}.zip`);
+
+  const db = await openDatabase();
+  try {
+    const { query } = await import('../../../lib/db');
+    const { buildExportTree } = await import('../../../lib/export');
+    const JSZip = (await import('jszip')).default;
+
+    // content_updated_at, not updated_at — matches the web export: a rename
+    // elsewhere rewriting a [[link]] in this note must not claim the note
+    // itself was edited.
+    const [notes, folders] = await Promise.all([
+      query<ExportNote>(
+        'select title, content, folder_id, tags, created_at, content_updated_at as updated_at from notes where deleted_at is null order by title'
+      ),
+      query<ExportFolder>('select id, name, parent_id from folders'),
+    ]);
+
+    const zip = new JSZip();
+    const files = buildExportTree(notes, folders);
+    for (const file of files) zip.file(file.path, file.content);
+    fs.writeFileSync(out, Buffer.from(await zip.generateAsync({ type: 'uint8array' })));
+
+    process.stdout.write(`${files.length} notes written to ${out}\n`);
+    process.stdout.write('Import it in Kybase: Settings -> Import .zip\n');
+
+    // Close the pool before the database goes away, or its idle clients
+    // report the socket dying as an error after a successful export.
+    const { getPool } = await import('../../../lib/db');
+    await getPool().end();
+  } finally {
+    await db.shutdown();
+  }
+}
+
+async function serve(): Promise<void> {
+  const db = await openDatabase();
 
   if (!process.env.OLLAMA_URL && !process.env.GOOGLE_API_KEY && !process.env.OPENAI_API_KEY) {
     note('no embedding provider configured — full-text search works, semantic search stays idle until one is set');
   }
 
+  const { createMcpServer } = await import('../../../lib/mcp-server');
   await createMcpServer().connect(new StdioServerTransport());
   note('ready');
 
-  const stop = async () => { await shutdownDatabase(); process.exit(0); };
+  if (db.firstRun) {
+    // Otherwise nobody discovers that these notes are readable at all: the
+    // embedded database is not a folder of .md files, and the UI that makes
+    // this a knowledge base rather than a memory blob lives elsewhere.
+    note('your notes are plain Markdown — `kybase-mcp export vault.zip` writes them out as files');
+    note('to read and edit them in a browser, with the graph and sharing: https://github.com/Kyrzin/kybase');
+  }
+
+  const stop = async () => { await db.shutdown(); process.exit(0); };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+}
+
+async function main() {
+  const [command, argument] = process.argv.slice(2);
+  if (command === 'export') return runExport(argument);
+  if (command && command !== 'serve') {
+    note(`unknown command "${command}" — usage: kybase-mcp [serve] | kybase-mcp export [file.zip]`);
+    process.exit(2);
+  }
+  return serve();
 }
 
 main().catch((err) => {

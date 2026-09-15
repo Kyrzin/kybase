@@ -30,7 +30,7 @@ export type EmbedTask = 'query' | 'document';
 // pair directly, or come from a fixed benchmark run once per model — not
 // from a fourth way of averaging the corpus.
 //
-// Measured on live vaults (2026-08-14 gemma/nomic, 2026-08-18 google), noise =
+// Measured on real vaults (gemma/nomic, google), noise =
 // unrelated passages, signal = a real query against its actual answer:
 //   embeddinggemma      noise ~0.08–0.21, signal ~0.38–0.69  — wide gap
 //   nomic-embed-text    noise ~0.50–0.66, signal ~0.68–0.72  — compressed
@@ -42,7 +42,7 @@ export type EmbedTask = 'query' | 'document';
 // and hid it in two files. What a search applies is what is written here.
 //
 // Adding a model means measuring it — properly, across several unrelated
-// corpora rather than one vault (roadmap).
+// corpora rather than one collection.
 // ─── and then it was measured properly, and it lost ──────────────────────
 //
 // None of those numbers ship any more. Semantic retrieval has NO automatic
@@ -53,7 +53,7 @@ export type EmbedTask = 'query' | 'document';
 // the measurements above describe a spread, and a spread is not a boundary.
 // Set against real use, the shipped number failed in both directions at once:
 //
-//   Recall it cost — measured 2026-08-20 on a separate 32-note ru/de/fr/en
+//   Recall it cost — measured on a separate 32-note ru/de/fr/en
 //   corpus, embeddinggemma at 0.349: a Russian query for "container
 //   orchestration" returned NOTHING while the vault held both a Kubernetes
 //   and a Docker Compose note;
@@ -246,9 +246,8 @@ const OLLAMA_TIMEOUT_MS = 60_000;
 
 // Google's RESOURCE_EXHAUSTED body carries the real wait in
 // error.details[].retryDelay (a "23s"-style string), not a Retry-After
-// header — verified live 2026-08-18, this vault's actual 429 body has no
-// such header. Safe to try on any provider: returns null on anything that
-// isn't this exact shape.
+// header: the observed 429 body carries no such header. Safe to try on any
+// provider: returns null on anything that isn't this exact shape.
 async function parseRetryDelayMs(res: Response): Promise<number | null> {
   try {
     const body = await res.clone().json();
@@ -319,7 +318,7 @@ async function fetchWithRetry(
 // prefix to the configured model:
 //   - embeddinggemma (shipped default): Google's multilingual format. Our
 //     document text already carries its title inline, so title: none.
-//     Separates RU/DE far better than nomic (verified live: query→CV 0.32
+//     Separates RU/DE far better than nomic (verified: query→CV 0.32
 //     vs query→borsch 0.11, a ~0.2 gap, versus nomic's compressed ~0.06).
 //     https://ai.google.dev/gemma/docs/embeddinggemma
 //   - nomic-embed-text: search_query: / search_document:
@@ -328,7 +327,7 @@ async function fetchWithRetry(
 /**
  * Bump whenever the QUERY-side prompt below changes. Stored query vectors
  * from two versions live in different subspaces and must never be pooled into
- * one distribution — the same trap that made 2026-08-19's first calibration
+ * one distribution — the same trap that made's first calibration
  * compare document-space against query-space and read 0.3 too high.
  */
 export const QUERY_PROMPT_VERSION = 1;
@@ -396,7 +395,7 @@ async function ollamaEmbed(text: string, model: string | undefined, task: EmbedT
 // getEmbedConcurrency's notes:1/chunks:2 only caps how many Google calls run
 // at once — it has no idea how many ran in the last minute, so a reindex
 // still bursts past the free-tier RPM limit at that concurrency (measured
-// live 2026-08-18: 693 requests, 429 on most of them). This paces every
+// live: 693 requests, 429 on most of them). This paces every
 // Google call against a shared minimum gap instead. There's no single
 // published RPM figure worth hard-coding (and free-tier limits change), so
 // it adapts: back off hard on a 429, ease back down after a run of clean

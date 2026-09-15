@@ -4,7 +4,8 @@
 // left alone so they read naturally in text — attribute values built from
 // user text must go through escapeAttr(), and URLs through safeUrl(), or a
 // note containing e.g. [x](" onerror="...") breaks out of the attribute.
-// XSS coverage lives in lib/markdown.test.ts — extend it when touching this.
+// This file is the XSS boundary: any change here needs matching test
+// coverage before it ships.
 
 export function escapeAttr(s: string): string {
   return s.replace(/"/g, '&quot;');
@@ -130,8 +131,8 @@ const TABLE_CELL_STYLE = 'border:1px solid #313244;padding:6px 10px';
 // and its existing per-row whitespace handling is already covered by tests
 // this file ships with — reconstructing it from these anchored, ^$-bound
 // forms risked a silent behavior change for no reader who asked for it);
-// markdown.test.ts's "table detection agrees with renderTables" cases are
-// what actually keeps the two from drifting apart.
+// the "table detection agrees with renderTables" test cases are what
+// actually keeps the two from drifting apart.
 export const TABLE_ROW_RE = /^\|.*\|[ \t]*\r?$/;
 export const TABLE_SEPARATOR_RE = /^\|(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*\r?$/;
 

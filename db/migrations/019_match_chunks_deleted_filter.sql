@@ -6,9 +6,9 @@
 -- around row_number()/rn <= 2 and dropped that condition while doing so —
 -- textSearch's equivalent soft-delete filter was untouched (separate
 -- function, search_notes_fts), so only the semantic arm regressed. Found
--- live 2026-08-14 by an agent calling search_notes(type: "semantic")
+-- live by an agent calling search_notes(type: "semantic")
 -- directly, not by any test — semanticSearch/hybridSearch had no coverage
--- for this (only textSearch did), now added in lib/__itest__/search.itest.ts.
+-- for this (only textSearch did); it is covered now.
 --
 -- note_chunks/embeddings themselves are correctly NOT deleted on soft
 -- delete (restore_note relies on them still being there — see lib/trash.ts)

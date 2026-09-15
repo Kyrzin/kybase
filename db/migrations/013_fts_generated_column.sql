@@ -8,7 +8,7 @@
 -- bodies for every row — twice for the WHERE filter, twice more for
 -- ts_rank in the ORDER BY, en+ru each time). A generated STORED column
 -- computes that tokenization once, at write time, instead of on every
--- search — verified live: same query plan shape (still a Seq Scan on this
+-- search — verified: same query plan shape (still a Seq Scan on this
 -- table's size) drops to 9.4ms, because the column read replaces four
 -- to_tsvector() calls with a stored value. Row-for-row identical results
 -- (id, rank, headline) confirmed against the old function on 5 live

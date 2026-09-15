@@ -66,7 +66,7 @@ export type IndexedGraph = {
 /**
  * Re-shapes a graph for MCP output: edges reference nodes by array index
  * instead of repeating their 36-char UUID twice per edge. Two full UUIDs per
- * edge is most of what get_graph costs — 490 edges on the live vault is
+ * edge is most of what get_graph costs — 490 edges on a live vault is
  * ~48KB of ids an agent cannot act on without joining back to nodes anyway.
  * Not used by the REST route or MiniGraph — both key edges by id directly
  * (MiniGraph's hover/layout logic reads edge.from/to as ids throughout), so
@@ -78,8 +78,7 @@ export type IndexedGraph = {
  *
  * A node's own array position IS the index edges reference — an `i` field
  * repeating that position inside each node object added ~1000 chars (~6% of
- * a live get_graph response) for a value a consumer never needs to read
- * (found live 2026-08-17, roadmap's small-fixes item).
+ * a get_graph response) for a value a consumer never needs to read.
  *
  * Nodes carry the title and not the id, for the same reason edges carry an
  * index: nothing in this response resolves through a node id. Edges address

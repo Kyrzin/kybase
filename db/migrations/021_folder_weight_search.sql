@@ -1,13 +1,13 @@
 -- 021: folder_id in search_notes_fts — mechanic for a per-folder weight
--- (roadmap item 11's remaining half; tag weight for text search shipped
--- 2026-08-17 in the same slot). A text-search hit doesn't currently say
+-- alongside the tag weight text search already applies. A text-search hit
+-- doesn't currently say
 -- which folder it came from at all — search_notes_fts has only ever
 -- returned (id, title, tags, rank, headline). Needed so lib/search.ts's
 -- textSearch can multiply a hit's rank by a per-folder weight the same way
 -- it already does for tags (weightForTags) — e.g. downweighting a folder of
 -- whole-book imports so their chunks don't crowd out ordinary notes, without
--- a `kind` column or a folder-name filter (per the roadmap's own framing:
--- mechanic in code, vocabulary in settings, no vault-specific constant).
+-- a `kind` column or a folder-name filter: mechanic in code, vocabulary in
+-- settings, no installation-specific constant.
 --
 -- CREATE OR REPLACE cannot add an output column to a RETURNS TABLE
 -- function — Postgres rejects a changed OUT-parameter list — so this drops

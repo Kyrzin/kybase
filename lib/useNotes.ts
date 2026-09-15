@@ -469,7 +469,7 @@ export function useNotes(cb: UseNotesCallbacks) {
         body: file,
         headers: {
           'Content-Type': 'application/octet-stream', // dispatch is by filename extension, not this
-          // Latin-1-only header value; this vault's titles are routinely
+          // Latin-1-only header value; a vault's titles are routinely
           // Cyrillic/German — see the matching decodeURIComponent server-side.
           'X-Filename': encodeURIComponent(file.name),
         },

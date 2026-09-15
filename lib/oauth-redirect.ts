@@ -7,7 +7,7 @@
 // URI refused at registration must never sneak in through authorize.
 
 // claude.ai's connector callback, observed on a real authorization against a
-// live instance (2026-08-20) rather than guessed — an exact-match rule built
+// live instance rather than guessed — an exact-match rule built
 // on a guessed URI locks every user out with an opaque error.
 // KYBASE_OAUTH_REDIRECT_URIS adds more for anyone running a different client.
 const DEFAULT_REDIRECT_URIS = ['https://claude.ai/api/mcp/auth_callback'];

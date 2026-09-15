@@ -94,7 +94,7 @@ export async function buildGraph(opts: BuildGraphOptions = {}): Promise<Graph> {
 
   // Content is no longer selected here: links come from the stored index
   // (lib/note-links.ts), so rendering a graph stops costing a full read of
-  // every note's text. On the live vault that was 1.2 MB fetched and
+  // every note's text. On a live vault that was 1.2 MB fetched and
   // re-parsed per call to produce a few hundred edges.
   //
   // rootTitle has to see the whole link graph to walk out from its root, so

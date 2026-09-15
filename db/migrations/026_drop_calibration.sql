@@ -12,7 +12,7 @@
 -- is an invitation to switch it back on in six months without knowing it was
 -- already disproved.
 --
--- Both migrations shipped and ran on 2026-08-19 only, so this touches nothing
+-- Both migrations shipped and ran on only, so this touches nothing
 -- older than that day; `if exists` keeps it a no-op for installs that never saw
 -- them.
 drop table if exists search_observations;

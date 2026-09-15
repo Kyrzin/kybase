@@ -1,6 +1,6 @@
 -- 027: dynamic client registration (RFC 7591), needed for hosted MCP clients.
 --
--- Measured live 2026-08-20: claude.ai's connector refuses this server outright
+-- Measured: claude.ai's connector refuses this server outright
 -- with "Incompatible auth server: does not support dynamic client
 -- registration" — it reads the authorization-server metadata, finds no
 -- registration_endpoint, and stops before the consent page is ever reached.

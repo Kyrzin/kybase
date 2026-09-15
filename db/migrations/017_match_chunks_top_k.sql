@@ -3,7 +3,7 @@
 -- `distinct on (c.note_id)` (migration 002) collapses every note to its
 -- single best-matching chunk before the results even compete against each
 -- other — a 760-chunk book and a 3-chunk note each get exactly one shot at
--- the outer match_count slots. Measured live (2026-08-14 search-relevance
+-- the outer match_count slots. Measured (search-relevance
 -- overhaul): a "what is an inode in a filesystem" query surfaces the Linux textbook's
 -- one lucky matching chunk, with no way to tell from the result whether
 -- that's the book's main content on the topic or an incidental mention.

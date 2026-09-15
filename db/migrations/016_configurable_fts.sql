@@ -5,10 +5,9 @@
 -- 013 (still a stored, GIN-indexed column) — only writes get slower, and
 -- only by one extra settings lookup.
 --
--- Per the 2026-08-14 search-relevance overhaul, step 5 / the roadmap's own
--- framing ("this is a public AGPL product"): hardcoding russian+english (migration
--- 001/013) was itself a vault-specific constant. Default stays
--- ['russian','english'] — same behavior as before for this vault — but
+-- Kybase is a product other people run: hardcoding russian+english
+-- (migration 001/013) was itself an installation-specific constant.
+-- Default stays ['russian','english'] — same behavior as before — but
 -- it's now data (settings.fts_languages, comma-separated text), not code,
 -- so someone running this against their own language mix can add 'german'
 -- or swap it entirely without a fork.

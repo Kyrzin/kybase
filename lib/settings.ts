@@ -266,9 +266,9 @@ export type TagWeights = Record<string, number>;
 // this before normalizing), vocabulary lives here — empty default, so an
 // install that never sets this behaves exactly as before (weight 1 for
 // every tag is a no-op on the multiply). No vault-specific tag name is
-// hardcoded anywhere: this vault's own canonical/ephemeral split, if the
+// hardcoded anywhere: a vault's own canonical/ephemeral split, if the
 // owner wants it, is a value in this JSON blob, not a constant in the
-// product (per the roadmap's own framing on this file).
+// product.
 // JSON, not comma-separated like fts_languages: this is a map, not a list.
 // Cached like getEmbeddingConfig — textSearch reads this on every call, and
 // an OR-cascade search can mean two search_notes_fts round trips per
@@ -358,7 +358,7 @@ export async function setFolderWeights(weights: FolderWeights): Promise<void> {
 // Short TTL rather than "forever until invalidated": a stale read is
 // bounded to a few seconds even if some future write path forgets to
 // clear the cache, instead of serving last session's provider config
-// indefinitely (2026-08-14 search-relevance overhaul, step 7 — measured cost, not
+// indefinitely (overhaul: measured cost, not
 // hypothetical: unbounded before this).
 const EMBEDDING_CONFIG_CACHE_TTL_MS = 5_000;
 let cachedEmbeddingConfig: { value: EmbeddingConfig; expiresAt: number } | null = null;

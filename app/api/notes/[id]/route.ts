@@ -104,7 +104,7 @@ export async function PATCH(
       const contentChanged = parsed.data.content !== undefined && parsed.data.content !== existing.content;
       let finalSets = titleChanged || contentChanged ? [...sets, 'embedding_pending = true'] : sets;
 
-      // Same fix as lib/mcp-server.ts's update_note (2026-08-17, commit
+      // Same fix as lib/mcp-server.ts's update_note (, commit
       // ebb6ed5) — this route duplicates the same title-update logic for
       // the browser UI, and a rename here left the note's own leading
       // `# Old Title` heading silently out of sync with the new title too.

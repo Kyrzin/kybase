@@ -14,7 +14,7 @@
 // Cost is the reason for that caution, not caution for its own sake. A
 // cross-encoder scores every (query, passage) pair through a full transformer
 // pass, so its cost is linear in the number of passages and paid on EVERY
-// search — measured 2026-09-08 on the deployment this was built for (4 shared
+// search — measured on the deployment this was built for (4 shared
 // cores, no GPU, mmarco-mMiniLMv2-L12 behind text-embeddings-inference):
 // roughly 190 ms per passage, i.e. ~1.9 s for ten. Search itself runs in
 // ~280 ms. The defaults below are chosen to keep that bounded, and a caller

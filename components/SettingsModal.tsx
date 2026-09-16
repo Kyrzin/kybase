@@ -243,11 +243,13 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
       const res = await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
       const data = await res.json();
       setSettingsFailed(false);
-      setSettingsStatus(
-        data.reindexTriggered
-          ? `Saved. ${data.pendingCount ?? 0} notes marked for reindex — click "Reindex" below to run it.`
-          : 'Settings saved.'
-      );
+      const saved = data.reindexTriggered
+        ? `Saved. ${data.pendingCount ?? 0} notes marked for reindex — click "Reindex" below to run it.`
+        : 'Settings saved.';
+      // Only present when the new model's vector width needed attention —
+      // including the case where it cannot be used at all, which would
+      // otherwise read as an ordinary successful save.
+      setSettingsStatus(data.dimensionNote ? `${saved} (${data.dimensionNote})` : saved);
     } catch {
       setSettingsFailed(true);
       setSettingsStatus('Failed to save.');

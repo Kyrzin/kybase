@@ -3,6 +3,7 @@ import { query } from '@/lib/db';
 import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages, getTagWeights, setTagWeights, getFolderWeights, setFolderWeights, getEmbeddingBands, setEmbeddingBands, getProviderKeyHealth, getRerankEnabled, setRerankEnabled, getRerankMinScore, setRerankMinScore } from '@/lib/settings';
 import { rerankAvailable } from '@/lib/rerank';
 import { reconcileEmbeddingDimension, describeOutcome } from '@/lib/embedding-dim';
+import { parseRequestedDimensions } from '@/lib/settings';
 import { z } from 'zod';
 
 const UpdateSettingsSchema = z.object({
@@ -10,6 +11,20 @@ const UpdateSettingsSchema = z.object({
   googleApiKey: z.string().min(1).optional(),
   openaiApiKey: z.string().min(1).optional(),
   ollamaModel:  z.string().min(1).optional(),
+  // Stored per provider, so switching away and back keeps each one's choice.
+  // Not validated against the provider's catalogue here: /api/settings/models
+  // is a network call, and a save must not fail because the provider is down.
+  googleModel:  z.string().min(1).optional(),
+  openaiModel:  z.string().min(1).optional(),
+  // How wide a vector to ask Google or OpenAI for: a positive integer, or
+  // 'native' to send no size and take the model's own. Validated through the
+  // same parser the config uses, so the dialog and the embedding path cannot
+  // disagree about what a value means. Ollama ignores it — its models are
+  // whatever width they are.
+  embeddingDim: z.string().min(1).refine(
+    (v) => { try { parseRequestedDimensions(v); return true; } catch { return false; } },
+    { message: "must be a positive integer or 'native'" },
+  ).optional(),
   // migration 016 — notes_search_vector_trigger/search_notes_fts combine
   // these (plus 'simple', always) instead of the old hardcoded ru+en pair.
   // No per-language validation here — an unregistered Postgres text search
@@ -61,6 +76,11 @@ export async function GET() {
   return NextResponse.json({
     provider: cfg.provider,
     ollamaModel: cfg.ollamaModel,
+    googleModel: cfg.googleModel,
+    openaiModel: cfg.openaiModel,
+    // The width as a field the dialog can show and send back: a number, or
+    // 'native' when no size is sent at all.
+    embeddingDim: cfg.requestedDimensions === null ? 'native' : String(cfg.requestedDimensions),
     hasGoogleKey: !!cfg.googleApiKey,
     hasOpenaiKey: !!cfg.openaiApiKey,
     // 'undecryptable' means a key was saved through this UI but can no
@@ -95,12 +115,18 @@ export async function PUT(req: NextRequest) {
   const currentCfg = await getEmbeddingConfig();
   const providerChanged =
     (body.provider && body.provider !== currentCfg.provider) ||
-    (body.ollamaModel && body.ollamaModel !== currentCfg.ollamaModel);
+    (body.ollamaModel && body.ollamaModel !== currentCfg.ollamaModel) ||
+    (body.googleModel && body.googleModel !== currentCfg.googleModel) ||
+    (body.openaiModel && body.openaiModel !== currentCfg.openaiModel) ||
+    (body.embeddingDim !== undefined && parseRequestedDimensions(body.embeddingDim) !== currentCfg.requestedDimensions);
 
   if (body.provider)     await setSetting('embedding_provider', body.provider);
   if (body.googleApiKey) await setSetting('google_api_key',     body.googleApiKey);
   if (body.openaiApiKey) await setSetting('openai_api_key',     body.openaiApiKey);
   if (body.ollamaModel)  await setSetting('ollama_model',       body.ollamaModel);
+  if (body.googleModel)  await setSetting('google_model',       body.googleModel);
+  if (body.openaiModel)  await setSetting('openai_model',       body.openaiModel);
+  if (body.embeddingDim) await setSetting('embedding_dim',       body.embeddingDim.trim().toLowerCase());
   if (body.ftsLanguages)  await setFtsLanguages(body.ftsLanguages);
   if (body.tagWeights)    await setTagWeights(body.tagWeights);
   if (body.folderWeights) await setFolderWeights(body.folderWeights);

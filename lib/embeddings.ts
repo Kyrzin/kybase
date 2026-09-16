@@ -1,5 +1,5 @@
 // lib/embeddings.ts — embedding provider abstraction (DB settings override env vars)
-import { getEmbeddingConfig, getBandOverride, type EmbeddingConfig } from './settings';
+import { getEmbeddingConfig, getBandOverride, DEFAULT_REQUESTED_DIMENSIONS, type EmbeddingConfig } from './settings';
 
 export type EmbedTask = 'query' | 'document';
 
@@ -92,8 +92,8 @@ export type SemanticProfile = {
 
 function modelNameOf(cfg: EmbeddingConfig): string {
   if (cfg.provider === 'ollama') return cfg.ollamaModel ?? 'embeddinggemma';
-  if (cfg.provider === 'google') return process.env.GOOGLE_MODEL ?? 'text-embedding-004';
-  return process.env.OPENAI_MODEL ?? 'text-embedding-3-small';
+  if (cfg.provider === 'google') return cfg.googleModel ?? 'gemini-embedding-001';
+  return cfg.openaiModel ?? 'text-embedding-3-small';
 }
 
 /**
@@ -139,15 +139,33 @@ const INPUT_VERSION: Record<EmbeddingConfig['provider'], number> = {
   openai: 1,
 };
 
+/**
+ * The part of the model key that records a non-default requested width.
+ *
+ * Empty unless something was actually chosen, because the key is what the
+ * drift check and migration 028's generation stamp compare: adding a suffix
+ * unconditionally would tell every existing vault its model had changed and
+ * cost it a full, pointless reindex.
+ *
+ * Ollama has no width parameter to have chosen — its models are whatever
+ * width they are, and the schema follows them instead (lib/embedding-dim.ts).
+ */
+function dimensionSuffix(cfg: EmbeddingConfig): string {
+  if (cfg.provider === 'ollama') return '';
+  const dims = cfg.requestedDimensions;
+  if (dims === DEFAULT_REQUESTED_DIMENSIONS) return '';
+  return `#d${dims ?? 'native'}`;
+}
+
 /** Stable key for the active provider+model+input shape, used by the bands setting, drift detection and the index generation stamp. */
 export function embeddingModelKey(cfg: EmbeddingConfig): string {
   // Version 1 is written without a suffix so existing keys keep their exact
   // stored form — an ollama vault must not reindex over a formatting change.
   const v = INPUT_VERSION[cfg.provider] ?? 1;
-  const suffix = v > 1 ? `@v${v}` : '';
+  const suffix = (v > 1 ? `@v${v}` : '') + dimensionSuffix(cfg);
   if (cfg.provider === 'ollama') return `ollama:${cfg.ollamaModel ?? 'embeddinggemma'}${suffix}`;
-  if (cfg.provider === 'google') return `google:${process.env.GOOGLE_MODEL ?? 'text-embedding-004'}${suffix}`;
-  return `openai:${process.env.OPENAI_MODEL ?? 'text-embedding-3-small'}${suffix}`;
+  if (cfg.provider === 'google') return `google:${cfg.googleModel ?? 'gemini-embedding-001'}${suffix}`;
+  return `openai:${cfg.openaiModel ?? 'text-embedding-3-small'}${suffix}`;
 }
 
 // A reindex batch (lib/reindex.ts) can be stopped mid-run by the user. The
@@ -187,8 +205,8 @@ export async function getEmbedding(text: string, task: EmbedTask = 'document', i
   const cfg = await getEmbeddingConfig();
   switch (cfg.provider) {
     case 'ollama': return ollamaEmbed(text, cfg.ollamaModel, task);
-    case 'google': return googleEmbed(text, cfg.googleApiKey, task, isCancelled);
-    case 'openai': return openaiEmbed(text, cfg.openaiApiKey);
+    case 'google': return googleEmbed(text, cfg.googleApiKey, modelNameOf(cfg), cfg.requestedDimensions, task, isCancelled);
+    case 'openai': return openaiEmbed(text, cfg.openaiApiKey, modelNameOf(cfg), cfg.requestedDimensions);
     default:       throw new Error(`Unknown embedding provider: ${cfg.provider}`);
   }
 }
@@ -206,7 +224,7 @@ export async function getEmbeddings(
   if (texts.length === 0) return [];
   const cfg = await getEmbeddingConfig();
   if (cfg.provider === 'google') {
-    return googleBatchEmbed(texts, cfg.googleApiKey, task, isCancelled);
+    return googleBatchEmbed(texts, cfg.googleApiKey, modelNameOf(cfg), cfg.requestedDimensions, task, isCancelled);
   }
   const { chunks: chunkConcurrency } = await getEmbedConcurrency();
   const results: number[][] = [];
@@ -435,9 +453,13 @@ function googleTaskType(task: EmbedTask): string {
   return task === 'query' ? 'RETRIEVAL_QUERY' : 'RETRIEVAL_DOCUMENT';
 }
 
-async function googleEmbed(text: string, apiKey?: string, task: EmbedTask = 'document', isCancelled?: () => boolean): Promise<number[]> {
+/** Spread into a request body: absent entirely when no size was chosen. */
+function googleDimensions(dims: number | null): { outputDimensionality?: number } {
+  return dims === null ? {} : { outputDimensionality: dims };
+}
+
+async function googleEmbed(text: string, apiKey: string | undefined, model: string, dims: number | null, task: EmbedTask = 'document', isCancelled?: () => boolean): Promise<number[]> {
   if (!apiKey) throw new Error('Google API key is not configured');
-  const model = process.env.GOOGLE_MODEL ?? 'text-embedding-004';
   const res = await fetchWithRetry(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${apiKey}`,
     {
@@ -447,7 +469,7 @@ async function googleEmbed(text: string, apiKey?: string, task: EmbedTask = 'doc
         model: `models/${model}`,
         content: { parts: [{ text }] },
         taskType: googleTaskType(task),
-        outputDimensionality: 768,
+        ...googleDimensions(dims),
       }),
     },
     {
@@ -464,10 +486,9 @@ async function googleEmbed(text: string, apiKey?: string, task: EmbedTask = 'doc
 
 const GOOGLE_BATCH_MAX = 100;
 
-async function googleBatchEmbed(texts: string[], apiKey?: string, task: EmbedTask = 'document', isCancelled?: () => boolean): Promise<number[][]> {
+async function googleBatchEmbed(texts: string[], apiKey: string | undefined, model: string, dims: number | null, task: EmbedTask = 'document', isCancelled?: () => boolean): Promise<number[][]> {
   if (!apiKey) throw new Error('Google API key is not configured');
   if (texts.length === 0) return [];
-  const model = process.env.GOOGLE_MODEL ?? 'text-embedding-004';
 
   const allEmbeddings: number[][] = [];
   for (let i = 0; i < texts.length; i += GOOGLE_BATCH_MAX) {
@@ -477,7 +498,7 @@ async function googleBatchEmbed(texts: string[], apiKey?: string, task: EmbedTas
       model: `models/${model}`,
       content: { parts: [{ text }] },
       taskType: googleTaskType(task),
-      outputDimensionality: 768,
+      ...googleDimensions(dims),
     }));
 
     const res = await fetchWithRetry(
@@ -507,17 +528,17 @@ async function googleBatchEmbed(texts: string[], apiKey?: string, task: EmbedTas
   return allEmbeddings;
 }
 
-async function openaiEmbed(text: string, apiKey?: string): Promise<number[]> {
+async function openaiEmbed(text: string, apiKey: string | undefined, model: string, dims: number | null): Promise<number[]> {
   if (!apiKey) throw new Error('OpenAI API key is not configured');
-  // OPENAI_MODEL, not a literal: modelNameOf/embeddingModelKey already read
-  // it, so a vault with OPENAI_MODEL set was reporting (and keying its
-  // reindex-on-drift check and its threshold profile on) one model while
-  // every request went to another. The two names have to be the same name.
-  const model = process.env.OPENAI_MODEL ?? 'text-embedding-3-small';
+  // The model arrives from the caller's config, not read again here: the
+  // name that keys the drift check and the name every request goes to have to
+  // be the same name.
   const res = await fetchWithRetry('https://api.openai.com/v1/embeddings', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model, input: text, dimensions: 768 }),
+    // Omitted rather than sent as null when no size was chosen: the older
+    // embedding models reject the parameter instead of ignoring it.
+    body: JSON.stringify({ model, input: text, ...(dims === null ? {} : { dimensions: dims }) }),
   });
   if (!res.ok) throw new Error(`OpenAI embed error (${res.status}): ${(await res.text()).slice(0, 200)}`);
   const data = await res.json();

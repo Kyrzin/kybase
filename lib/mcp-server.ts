@@ -479,7 +479,14 @@ export function createMcpServer(): McpServer {
         'always says so, in one of three ways: `has_more` with `next_offset` when there is another ' +
         'page but no honest total; `total` above the rows you got when the real count is knowable; ' +
         '`truncated: true` when a ceiling cut the reply, which means narrow the request rather than ' +
-        'raise the ceiling. None of the three present means you have everything there is.',
+        'raise the ceiling. None of the three present means you have everything there is.\n\n' +
+        // Lives here, not in search_notes: it governs every tool that ranks or
+        // walks rather than reads, and a rule repeated in three descriptions is
+        // paid for in every request instead of once per session.
+        'Retrieval is not an answer. search_notes, get_neighbors and get_backlinks return ' +
+        'candidates. Before stating something as fact, quote the text you actually read — a ' +
+        'relevance value, a similarity or a rerank score is never evidence that a note says what ' +
+        'you asked.',
     }
   );
 
@@ -489,21 +496,12 @@ export function createMcpServer(): McpServer {
   // ── list_notes ───────────────────────────────────────────────────────────
   server.tool(
     'list_notes',
-    'List notes, sorted by recency (newest first). Optional filters: folder_id or folder_path, tag, ' +
-    'created_after/created_before, updated_after/updated_before, limit (max 200). ' +
-    'created_after answers "what is new" — a note\'s creation date never changes after it is ' +
-    'made. updated_after answers "what changed since I was last here" — it moves only when this ' +
-    'note\'s own title/content/folder/tags were actually edited, NOT when renaming some other note ' +
-    'rewrote a [[link]] to it in passing (that still touches updated_at, returned separately, but ' +
-    'not this filter/sort). They are NOT interchangeable: a note edited today but created months ' +
-    'ago matches updated_after, not created_after. sort picks which of the two dates drives the ' +
-    'ordering (default "updated"). Each note carries content_length (characters in the full note) ' +
-    'so you can tell a long note from a short one before spending a get_note call on it. Pass ' +
-    'trashed:true to see soft-deleted notes instead (recoverable with restore_note until they age ' +
-    'out of the trash) — other filters are ignored in that mode.\n\nThe reply is ' +
-    '`{notes, has_more, next_offset?}`, not a bare array: a page of 20 that ends there and a page ' +
-    'of 20 out of 400 are otherwise the same response. Pass `next_offset` back as `offset` for the ' +
-    'rest. Applies in trashed mode too.',
+    'List notes newest first, filtered by folder, tag or date. This is the tool for "what is new" ' +
+    'and "what changed lately": search_notes ranks by relevance and never by recency.\n\n' +
+    'created_* is when a note was made, updated_* when its own text last changed — a rename ' +
+    'elsewhere rewriting a [[link]] inside it does not count as an edit here. Each row carries ' +
+    'content_length, so you can tell a long note from a short one before spending a get_note call. ' +
+    'With trashed:true the other filters are ignored.',
     {
       folder_id: uuid().optional().describe('Filter by folder UUID — that folder itself, not its subfolders'),
       folder_path: z.string().optional()
@@ -588,29 +586,20 @@ export function createMcpServer(): McpServer {
     'get_note',
     {
       description:
-    'Get full note content by id or title. Title matching is case-insensitive and forgiving: an ' +
-    'exact match wins, otherwise it falls back to prefix then substring, so a unique partial title ' +
-    'resolves. An ambiguous title returns the candidate list (id + title) to retry with. Large ' +
-    `notes are windowed: content is capped at ${DEFAULT_CONTENT_LIMIT} chars by default (see limit/offset) — check ` +
-    'content_truncated and content_total_length in the response, and pass next_offset back as ' +
-    '`offset` to fetch the rest. A windowed or `section` response carries `headings` — the H1–H3 ' +
-    'outline with character offsets, so a truncated note still shows what is in the part you did ' +
-    'not get. A whole note does not: its own text already is the outline, every heading line ' +
-    'present verbatim. (One exception: a note that repeats a heading text still ships `headings`, ' +
-    'because only the slug tells those apart.) ' +
-    'Jump there with that offset, or name it in `section` to get that heading and its body alone — ' +
-    'with `section`, `headings` narrows to that section\'s own subheadings too (offsets re-based to ' +
-    'the section\'s own start, matching offset/limit\'s meaning in that mode), not the whole note\'s. ' +
-    'Pass `resolve_links: true` to also resolve [[wikilinks]] inside it one level deep — use when ' +
-    'you need a note\'s linked context without extra round-trips. Each linked note comes back as ' +
-    'id/title/folder_path only by default; pass include_content:true for the full text of each ' +
-    `(expensive if the note links to many others), capped at ${LINKED_NOTE_CONTENT_LIMIT} chars — call ` +
-    'get_note on a specific id for its full text. `updated_at` moves on any stored change, including ' +
-    'another note\'s rename rewriting a [[link]] to this one — pass it back as expected_updated_at ' +
-    'on a write. `content_updated_at` only moves when THIS note\'s own title/content/folder/tags ' +
-    'were actually edited — that\'s the one that answers "did anyone really touch this". Unresolved ' +
-    'links (targets not found) are listed ' +
-    'separately.',
+    'Read one note, by id or title.\n\n' +
+    // Both limits stay, and stay apart: a `+` between two interpolated
+    // template literals drops the left one's trailing text in the Next build,
+    // which once shipped "default 200004000 chars" to every agent.
+    `- Long notes come back windowed — ${DEFAULT_CONTENT_LIMIT} chars by default: check ` +
+    '`content_truncated` and pass `next_offset` back as `offset` for the rest. A windowed reply ' +
+    'carries `headings` — the H1–H3 outline with character offsets — so name one in `section` to ' +
+    'get that heading and its body alone instead of paging through the note.\n' +
+    '- `resolve_links:true` also returns the notes this one links to, id/title only unless you add ' +
+    `include_content:true, whose text is capped at ${LINKED_NOTE_CONTENT_LIMIT} chars — call get_note on ` +
+    'an id for the whole of one. Targets that match no note are listed as unresolved.\n' +
+    '- Pass the `updated_at` you read back as `expected_updated_at` when you write. ' +
+    '`content_updated_at` is the one that moves only on a real edit to this note: a rename ' +
+    'elsewhere rewriting a [[link]] inside it touches `updated_at` but not that.',
       inputSchema: withSchemaRule({
       id:      uuid().optional()
         .describe('The note\'s UUID. Live notes only — a trashed note is not found until restore_note brings it back'),
@@ -1032,18 +1021,14 @@ export function createMcpServer(): McpServer {
     'replace_in_note',
     {
       description:
-    'Replace exact text in a note without resending the rest. Refuses unless find occurs exactly ' +
-    'expected_count times (default 1) — protects against a loose find rewriting more than intended. ' +
-    'Accepts either find/replace or old_string/new_string (same pair, either naming works).\n\n' +
-    'For several replacements in one note, pass `edits` (array of {find/old_string, replace/new_string, ' +
-    'expected_count}) instead of the singular fields — one row lock and one re-embed for the whole ' +
-    'batch instead of one per call. Edits apply in order, and each one\'s find is matched against the ' +
-    'note as already changed by the edits before it, not the original content — an earlier edit can ' +
-    'create the text a later one needs, or remove the text a later one expects to find; sequence them ' +
-    'accordingly. If any step\'s count does not match, the whole batch is refused and the note is left ' +
-    'completely untouched — the error names which edit index failed and how many times its find text ' +
-    'actually occurred. Do not combine `edits` with the singular find/replace/old_string/new_string/' +
-    'expected_count fields — use one form or the other.',
+    'Replace exact text in a note without resending the rest. Either find/replace or ' +
+    'old_string/new_string — the same pair, either spelling.\n\n' +
+    'For several replacements pass `edits` rather than the singular fields (one lock and one ' +
+    're-embed for the batch, not one per call); the two forms cannot be combined in one call. ' +
+    'Edits apply in order, and each `find` is matched against the note as the edits before it ' +
+    'already changed it — an earlier edit can create the text a later one needs, or destroy it, so ' +
+    'sequence them. If any step\'s count is wrong the whole batch is refused and the note is left ' +
+    'untouched, and the error names the failing index.',
       // Two independent requirements, so allOf rather than one anyOf: a call
       // has to name a note AND carry at least one edit. Nine optional fields
       // with no rule at all made the empty call schema-valid, and the server
@@ -1270,7 +1255,15 @@ export function createMcpServer(): McpServer {
     // The note's own text is current; only its vectors are still rebuilding,
     // so this excerpt may be from the previous version. get_note returns the
     // live text.
-    if (r.index_pending) out.index_pending = true;
+    //
+    // Both of these carry their own instruction rather than relying on the
+    // tool description to have explained them in advance: the rule costs
+    // nothing on the responses where the condition never fires, which is
+    // nearly all of them, instead of riding in every request forever.
+    if (r.index_pending) {
+      out.index_pending = true;
+      out.hint = 'Excerpt is from a previous version of this note; read it with get_note before quoting.';
+    }
     if (r.section) out.section = r.section;
     if (r.content_length !== undefined) out.content_length = r.content_length;
     // Where the excerpt sits, for a note long enough that reading it whole is
@@ -1305,93 +1298,27 @@ export function createMcpServer(): McpServer {
   // ── search_notes ─────────────────────────────────────────────────────────
   server.tool(
     'search_notes',
-    'Search notes. type: "text" (fast), "semantic" (meaning-based), "hybrid" (best, uses RRF). ' +
-    'Hybrid is the right default; prefer type=text for exact identifiers, code fragments, or quoted ' +
-    'phrases, where FTS beats meaning-matching. ' +
-    'Returns short excerpts, not full notes — call get_note on the top 1-2 hits to read them. ' +
-    'A query is required, because this ranks text against text: to list or filter notes by folder, ' +
-    'tag or recency with no keywords, use list_notes instead. ' +
-    '`has_more` says whether hits exist past the page you got, so a short result is never mistaken ' +
-    'for a small vault; read the next page with the `next_offset` it comes with. It is deliberately ' +
-    'a flag and not a total — the only number available here is a capped candidate pool, and for ' +
-    'meaning-based matching "how many match" has no answer at all. ' +
-    '\n\nA hit in a long note may carry `excerpt_offset` — where that excerpt sits in the text. ' +
-    'Pass it to get_note as `offset` with `limit: 1000` (the smallest it accepts) to read around ' +
-    'the answer in one call. ' +
-    'That is how you read a book or a log: prose with no markdown headings has no outline and no ' +
-    '`section`, so the position is the only way in short of paging from the top. ' +
-    '\n\nRead the SECTION, not the note. When a hit carries `section`, that is the markdown ' +
-    'heading its excerpt came from — pass that exact string to get_note\'s `section` and you get ' +
-    'that part alone (typically a small fraction of the note). When a hit has no ' +
-    '`section` and its `content_length` is large, get_note with `limit: 1000` still returns the ' +
-    'note\'s FULL `headings` outline — choose a heading from it, then re-read ' +
-    'with `section`. Two small calls beat one large one; pull a whole note only when you ' +
-    'genuinely need the whole note. ' +
-    'Each hit carries `relevance` (0..1, how close to the best hit in THIS response) and ' +
-    '`matched_by` (which arms found it). Both describe the response, not ' +
-    'the world: relevance orders hits, it does not judge them, and there is deliberately no ' +
-    'confidence score. Judge a hit by reading its excerpt.' +
-    '\n\nThis is candidate retrieval, not a factual answer, and the search does NOT decide for you ' +
-    'whether the vault knows something. Semantic search returns the nearest passages it has; by ' +
-    'default nothing is filtered out for being too dissimilar, so an EMPTY result means the index ' +
-    'returned nothing at all — and a NON-empty one is not evidence that what you asked about is in ' +
-    'there. (An owner may configure a minimum similarity; `threshold` in the response says whether ' +
-    'one is in force, and is null when none is.)' +
-    '\n\nSo a hit found ONLY by the semantic arm (`matched_by` is semantic_score alone) says the ' +
-    'passage is ABOUT something similar — never that it confirms what you asked. The two are ' +
-    'routinely different: a query about a technology a vault has never used still returns its ' +
-    'nearest neighbours with nothing about that technology in them. When a hit is semantic-only ' +
-    'and its excerpt does not actually contain what you asked about, the honest reading is "no ' +
-    'confirmation found" — say that, or open the note to check. Do not report it as evidence the ' +
-    'thing exists. The excerpt is the evidence; the score never is.' +
-    '\n\n`text_tier`, `coverage` and `exact` are observed facts about the text match, shipped when ' +
-    'they say something you would not assume. A tier of "or"/"substring" means the strict query ' +
-    'found nothing and a looser pass filled in — recall, not confirmation. `coverage` measures ' +
-    'LEXICAL overlap: the share of your query\'s significant words that occur in the hit, weighted ' +
-    'by how rare each is here. A low or zero value does NOT mean irrelevant — a paraphrase or a ' +
-    'cross-language match legitimately shares no words with the question, and that is what the ' +
-    'semantic arm is for. Read it as "how much of what you typed is literally in there", nothing ' +
-    'more. `exact: true` is the ' +
-    'one thing FTS cannot express, and it means exactly this and nothing more: the query occurs ' +
-    'as a contiguous, case-insensitive substring of that note (wildcards escaped — `A_B` does not ' +
-    'match `AxB`). It is set only for a whitespace-free query that still splits into several ' +
-    'words — a filename, an identifier, a code symbol, the case where the tokenizer takes one ' +
-    'name apart and cannot put it back. Never for a phrase or a question: a note QUOTING your ' +
-    'question is not a note answering it. Such hits take the top half of the relevance scale, ' +
-    'ranked among themselves by their own text score. Neither tier nor coverage is comparable ' +
-    'across different queries, only within one response. ' +
-    'The date filters answer different questions and are not interchangeable: created_* is when a ' +
-    'note was made, updated_* when its own text last changed — a rename elsewhere rewriting a ' +
-    '[[link]] inside it does not count as an edit here. ' +
-    'Dates filter, they do not rank: a note edited an hour ago and one untouched for months ' +
-    'compete on relevance alone, and nothing here prefers the fresher one. So for "what is the ' +
-    'LATEST state of X" this is the wrong first call — list_notes already sorts by recency, ' +
-    'newest first, and takes updated_after. Search finds a topic; list_notes finds what changed. ' +
-    'A question about the current state of something usually needs both. ' +
-    'Every semantic/hybrid response includes threshold/best_score/pending_embeddings so you can ' +
-    'tell "nothing was found" from "a configured filter removed it" from "embeddings not generated ' +
-    'yet", even when results came back non-empty. ' +
-    'Freshness: a hit carrying index_pending:true has an excerpt built from a PREVIOUS version of ' +
-    'that note — the note row itself always holds the current text, only its search vectors lag. ' +
-    'Call get_note on it (with section, if one is reported) and quote that, not the excerpt, before ' +
-    'telling the user what the note says. Response-level pending_embeddings counts how many notes ' +
-    'are in that state vault-wide, and stale_generation_chunks counts vectors left over from a ' +
-    'previous embedding model, which are excluded from semantic results until reindexed — a ' +
-    'non-zero value there explains a thin semantic arm rather than an empty vault. ' +
-    'question_echo:true means the note LISTS your question without answering it (an FAQ or agenda ' +
-    'of questions); treat it as a pointer to the topic, never as the answer. ' +
-    'Reranking is a hybrid-only stage: type "text" and type "semantic" never run it, report no ' +
-    'reranked field at all, and ignore the rerank flag. It judges a passage by meaning, so a term ' +
-    'you know is written verbatim is better served by type="text" — only exact:true hits are ' +
-    'protected from a passage that merely reads as more on-topic outranking the note that ' +
-    'literally contains your term. ' +
-    'reranked:true means a cross-encoder chose this order instead of rank fusion, and a hit\'s ' +
-    'rerank_score is its best passage\'s score: a model\'s opinion about ONE passage, ordering ' +
-    'this response only — not a confidence value, not comparable between queries, and not ' +
-    'evidence the note answers you. reranked:false alongside a configured reranker means it was ' +
-    'asked and did not answer, so the order is the ordinary fused one. Read the text either way. ' +
-    'Pass explain:true to also see each hit\'s raw text_score/semantic_score/rrf_score and created_at ' +
-    '— only useful for debugging the ranking itself, omitted by default to keep responses short.',
+    // Kept deliberately short. Everything here is a rule the caller can act on
+    // with a field name to act through; what a field MEANS travels with the
+    // field (toDisplayResult's hints), and what applies to more than this tool
+    // lives in the server instructions. Algorithm internals — rank fusion, the
+    // cross-encoder, how coverage is derived — are not here at all: they change
+    // no decision a caller makes, and this text is re-sent on every request.
+    'Search notes: hybrid (keyword + meaning) by default. Returns ranked excerpts, not whole notes.\n\n' +
+    '- Use type="text" for an exact identifier, filename, code symbol or quoted phrase; "hybrid" ' +
+    'for questions and topics.\n' +
+    '- READ THE SECTION, NOT THE NOTE. A hit\'s `section` is the heading its excerpt came from — ' +
+    'pass that string to get_note\'s `section` to get that part alone. If a long hit has no ' +
+    '`section`, get_note with limit:1000 returns its `headings` outline; pick one and re-read with ' +
+    '`section`. For prose without headings, a hit\'s `excerpt_offset` goes to get_note as `offset`.\n' +
+    '- A hit is a candidate, not an answer. `matched_by` says which arms found it: semantic_score ' +
+    'alone means "about something similar", never that it confirms your question. Quote the excerpt ' +
+    'or open the note — a score is never evidence. `exact:true` means the query occurs verbatim in ' +
+    'that note; `text_tier` of "or" or "substring" means the strict words missed and a looser pass ' +
+    'filled in — recall, not confirmation.\n' +
+    '- Dates here filter, they do not rank. For "what changed lately" use list_notes, which sorts ' +
+    'by recency; it is also how you browse by folder or tag, since a query is required here.\n' +
+    '- `has_more` with `next_offset` pages the results.',
     {
       // The message matters more than the rule: an agent that wanted "every
       // note tagged X" hits this and needs to be told where that lives, not
@@ -1509,20 +1436,16 @@ export function createMcpServer(): McpServer {
   // ── indexing_status ──────────────────────────────────────────────────────
   server.tool(
     'indexing_status',
-    'Semantic-index progress: total/indexed/pending notes, complete=true when pending=0. Pending ' +
-    'notes are still found by text search; notes with previous embeddings remain in semantic search ' +
-    'with their last vector, while notes never embedded are excluded from semantic/hybrid until ' +
-    'processed (automatic, background). Stuck pending count while nothing is being edited = check Ollama/server logs.\n' +
-    'Also names the active embedding model and says whether any automatic semantic cutoff is in ' +
-    'force. By default there is none: semantic_profile reads "none" and semantic_min_similarity is ' +
-    'null, meaning semantic search returns its nearest matches and refuses nothing on its own. ' +
-    'Automatic abstention is deliberately not part of the default retrieval contract — a shipped ' +
-    'per-model cutoff was measured and withdrawn, because it cost real answers (cross-language ' +
-    'matches share no words, so nothing else finds them) without reliably stopping confident ' +
-    'near-misses. An owner who has measured their own corpus can set one; then semantic_profile ' +
-    'reads "configured" and the number is theirs. Raw cosines are NOT comparable between models: ' +
-    'a number that means a good match on one means noise on another, which is why the model is ' +
-    'named here rather than left to be inferred from the score.',
+    // search_notes already reports pending_embeddings and
+    // stale_generation_chunks on every semantic response, so this is the
+    // deliberate second look, not the only way to learn the index is behind.
+    'Semantic index progress: total/indexed/pending, complete=true when pending is 0. Pending notes ' +
+    'are still found by text search; ones never embedded stay out of semantic results until the ' +
+    'background pass reaches them.\n\n' +
+    'Also names the active embedding model and the configured similarity cutoff ' +
+    '(`semantic_min_similarity`, null when there is none — the default, meaning nothing is refused ' +
+    'for being too dissimilar). Cosines are not comparable between models, which is why the model ' +
+    'is named rather than left to be guessed from a score.',
     {},
     async () => {
       const row = await queryOne<{ total: number; pending: number }>(
@@ -1550,12 +1473,10 @@ export function createMcpServer(): McpServer {
   // ── list_tags ────────────────────────────────────────────────────────────
   server.tool(
     'list_tags',
-    'List tags in use with the number of notes carrying each, most-used first, capped at `limit` ' +
-    '(default 40). Call this before tagging a note and reuse an existing tag when one fits, rather ' +
-    'than coining a near-duplicate (a translation, transliteration, or plural of an existing tag) — ' +
-    'the vault has no tag synonyms, so near-duplicates fragment the same concept into separate tags. ' +
-    'The default cuts off the one-off tail: a tag ' +
-    'used once is not one worth reusing, so it is not shown unless you raise limit.',
+    // Why to reuse a tag rather than coin a near-duplicate is in the server
+    // instructions: it is a rule about writing, not about this tool.
+    'Tags in use with the number of notes carrying each, most-used first. The default limit cuts ' +
+    'off the one-off tail — a tag used once is not one worth reusing — so raise it to see those.',
     {
       limit: z.number().int().min(1).max(1000).default(40).describe('Max tags to return, most-used first'),
     },
@@ -1724,12 +1645,10 @@ export function createMcpServer(): McpServer {
     'get_backlinks',
     {
       description:
-    'Get notes that link to the given note via [[Title]] wikilinks. By default returns id/title/' +
-    'folder_path plus a short snippet around the link occurrence, not full content — pass ' +
-    'include_content:true for the full text of each (expensive if many notes link here; prefer the ' +
-    'default and call get_note on specific ids instead). Paginated by linking note: offset and limit ' +
-    'count notes, not characters. Takes id or title, ' +
-    'like get_note — title resolves the same forgiving way (exact, then prefix, then substring).',
+    'Notes that link to this one via [[Title]] wikilinks, by id or title. Each comes back as ' +
+    'id/title/folder_path plus a snippet around the link; include_content:true returns their full ' +
+    'text instead, which is expensive when many notes link here — prefer get_note on the ids you ' +
+    'actually want. offset and limit count notes, not characters.',
       inputSchema: withSchemaRule({
       id:              uuid().optional()
         .describe('UUID of the note whose incoming links you want'),
@@ -1801,23 +1720,16 @@ export function createMcpServer(): McpServer {
     'get_neighbors',
     {
       description:
-    'What is around ONE note in the [[wikilink]] graph, out to depth hops. Answers "what is this ' +
-    'connected to" with a flat list of titles — no node indices to decode, no whole-vault payload. ' +
-    'For the shape of that neighbourhood — which notes link to each other, not just which are near ' +
-    '— use get_graph with root_title and depth instead; it scopes the same way and keeps the edges. ' +
-    '\n\nTraversal is undirected: a note linking HERE is a neighbour just as much as one linked ' +
-    'FROM here, because "what is this connected to" means both. `links_out` and `links_in` describe ' +
-    'the direct relation to the note you asked about, and are sent only when true — so a depth-2 ' +
-    'row carries neither. That is not a missing value: "which way does the arrow point" has no ' +
-    'answer two hops away. Each ' +
-    'note appears once, at the shortest depth that reaches it, and `depth: 1` means directly linked. ' +
-    '\n\nThese are LINKS people wrote, not similarity — a note about the same subject that nobody ' +
-    'linked is not here. get_graph\'s semantic_edges cover that, and search covers finding it at all. ' +
-    'An empty result means nothing links to or from this note, which is a fact about the writing, ' +
-    'not about the topic.\n\nRows carry the title, not the id: titles are unique here and every ' +
-    'tool that walks onward (get_note, get_neighbors, get_backlinks) takes one. `total` counts the ' +
-    'whole neighbourhood, so `total` above `limit` plus `truncated` means you are reading a prefix ' +
-    'of it — raise limit or lower depth rather than assuming that is all there is.',
+    'What is around ONE note in the [[wikilink]] graph, out to `depth` hops: a flat list of titles, ' +
+    'no node indices to decode and no whole-vault payload. For the shape of that neighbourhood — ' +
+    'which of them link to each other — use get_graph with root_title instead.\n\n' +
+    'Traversal is undirected: a note linking HERE counts as much as one linked FROM here. ' +
+    '`links_out`/`links_in` describe the direct relation and appear only at depth 1 — two hops out, ' +
+    '"which way does the arrow point" has no answer. Each note appears once, at the shortest depth ' +
+    'that reaches it.\n\n' +
+    'These are links people wrote, not similarity: a note on the same subject that nobody linked is ' +
+    'not here, and an empty result is a fact about the writing rather than about the topic. Rows ' +
+    'carry the title, which is what get_note, get_backlinks and this tool all take.',
       inputSchema: withSchemaRule({
       id:    uuid().optional()
         .describe('UUID of the note whose surroundings you want'),
@@ -1865,23 +1777,21 @@ export function createMcpServer(): McpServer {
   // ── get_graph ─────────────────────────────────────────────────────────────
   server.tool(
     'get_graph',
-    'MANY notes at once and the edges between them — the heavy one of the three graph tools, and ' +
-    'the only one that reaches for the whole vault. For one note\'s surroundings use get_neighbors; ' +
-    'for who links to it, get_backlinks. Returns note nodes, directed edges from [[wikilinks]], and undirected ' +
-    'semantic_edges (embedding cosine similarity) between related notes that may lack explicit links. ' +
-    'Nodes are `{t}` (t = title, a valid [[wikilink]] target and the address every other tool here ' +
-    'takes); edges and semantic_edges reference nodes by their position in ' +
-    'the `nodes` array (not id) — `["edges"][0] = [2, 5]` means nodes[2] links to nodes[5], and a ' +
-    'semantic_edges triple\'s third ' +
-    'number is the cosine score. `unresolved_links` lists [[wikilink]] targets in this scope that ' +
-    'match no note title — dangling links, not edges (no node index, since there is no node to point ' +
-    'at); rename the target or fix the link text to resolve one. Unfiltered, this reaches for the ' +
-    'ENTIRE vault and is capped at max_nodes — when the cap bites, the reply carries ' +
-    '`truncated: true` and what you have is a recency-ordered prefix, NOT the shape of the vault. ' +
-    'Scope it with folder_id (a subtree) or root_title+depth (the neighborhood around one note) ' +
-    'rather than raising the cap: a scoped graph answers a question, a bigger one just costs more. ' +
-    'Node titles in the result are valid [[wikilink]] targets — ' +
-    'but only within whatever scope you asked for.',
+    // The positional edge encoding stays, and so does the sentence explaining
+    // it: this is the tool that can return hundreds of nodes, where repeating
+    // a title on both ends of every edge costs more than the decoding does.
+    // get_neighbors is the title-addressed answer for the common case.
+    'Many notes at once and the edges between them — the heavy graph tool, and the only one that ' +
+    'reaches for the whole vault. For one note\'s surroundings use get_neighbors; for who links to ' +
+    'it, get_backlinks.\n\n' +
+    'Nodes are `{t}` (t = title). Edges reference nodes BY POSITION in the `nodes` array: ' +
+    '`edges[0] = [2, 5]` means nodes[2] links to nodes[5]. semantic_edges are undirected and come ' +
+    'from embedding similarity rather than written links, with the cosine as a third number. ' +
+    '`unresolved_links` are [[wikilink]] targets matching no note title — dangling, so they have no ' +
+    'node index.\n\n' +
+    'Unscoped this reaches for the ENTIRE vault and stops at max_nodes: `truncated: true` means you ' +
+    'hold a recency-ordered prefix, NOT the shape of the vault. Scope with folder_id or ' +
+    'root_title+depth rather than raising the cap.',
     {
       folder_id:        uuid().optional()
         .describe('Restrict to notes in this folder and its descendant folders'),

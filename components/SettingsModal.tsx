@@ -39,6 +39,15 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   const [settingsGoogleKey, setSettingsGoogleKey] = useState('');
   const [settingsOpenaiKey, setSettingsOpenaiKey] = useState('');
   const [settingsOllamaModel, setSettingsOllamaModel] = useState('embeddinggemma');
+  const [settingsGoogleModel, setSettingsGoogleModel] = useState('');
+  const [settingsOpenaiModel, setSettingsOpenaiModel] = useState('');
+  // Text, not a number input: 'native' is a legal value, and an empty number
+  // field is indistinguishable from a zero.
+  const [settingsDim, setSettingsDim] = useState('');
+  // Fetched from the provider itself — a caption cannot say which models a
+  // provider still offers, and Google withdrew the one that used to be named
+  // here while it was still the shipped default.
+  const [modelList, setModelList] = useState<{ provider: string; models: { id: string }[]; error?: string; filtered: boolean } | null>(null);
   const [settingsSaving, setSettingsSaving]   = useState(false);
   const [settingsStatus, setSettingsStatus]   = useState<string | null>(null);
   const [settingsFailed, setSettingsFailed]   = useState(false);
@@ -64,6 +73,9 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
     apiFetch('/api/settings').then(r => r.json()).then(data => {
       setSettingsProvider(data.provider ?? 'ollama');
       setSettingsOllamaModel(data.ollamaModel ?? 'embeddinggemma');
+      setSettingsGoogleModel(data.googleModel ?? '');
+      setSettingsOpenaiModel(data.openaiModel ?? '');
+      setSettingsDim(data.embeddingDim ?? '');
       setSettingsStatus(null);
       setKeyStatus({ google: data.googleKeyStatus ?? 'unset', openai: data.openaiKeyStatus ?? 'unset' });
       setRerank({ available: !!data.rerankAvailable, enabled: !!data.rerankEnabled });
@@ -82,6 +94,24 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
       .then(d => { if (Array.isArray(d)) setTrash(d); })
       .catch(() => {});
   }, [apiFetch]);
+
+  // Re-asked whenever the provider changes, because the answer is that
+  // provider's catalogue — and asked again after a key is saved, since
+  // without one there is nothing to ask with. Never blocks the dialog: a
+  // failure leaves the field a plain text input, which is what it was before.
+  // The result carries the provider it describes rather than being cleared
+  // first: clearing would be a synchronous state write inside an effect, and
+  // the stale-vs-loading distinction is exactly what that field already tells.
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch(`/api/settings/models?provider=${settingsProvider}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (!cancelled && d) setModelList({ provider: settingsProvider, models: d.models ?? [], error: d.error, filtered: !!d.filtered });
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [apiFetch, settingsProvider]);
 
   // Saved on click, not on the modal's Save button: this is a switch, and a
   // switch that needs a second confirmation to take effect reads as broken.
@@ -238,6 +268,10 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
     setSettingsStatus(null);
     try {
       const body: Record<string, string> = { provider: settingsProvider, ollamaModel: settingsOllamaModel };
+      if (settingsGoogleModel) body.googleModel = settingsGoogleModel;
+      if (settingsOpenaiModel) body.openaiModel = settingsOpenaiModel;
+      // Only for the providers that have a width parameter at all.
+      if (settingsProvider !== 'ollama' && settingsDim) body.embeddingDim = settingsDim;
       if (settingsGoogleKey) body.googleApiKey = settingsGoogleKey;
       if (settingsOpenaiKey) body.openaiApiKey = settingsOpenaiKey;
       const res = await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
@@ -340,17 +374,11 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
             )}
             <label style={{ fontSize: 12, color: '#a6adc8', display: 'block', marginBottom: 6 }}>Provider</label>
             <select value={settingsProvider} onChange={e => setSettingsProvider(e.target.value as 'ollama' | 'google' | 'openai')} style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', marginBottom: 16, outline: 'none' }}>
-              <option value="ollama">Ollama (local, free)</option>
-              <option value="google">Google text-embedding-004 (free tier)</option>
-              <option value="openai">OpenAI text-embedding-3-small</option>
+              <option value="ollama">Ollama — local, free</option>
+              <option value="google">Google — API key, free tier</option>
+              <option value="openai">OpenAI — API key</option>
             </select>
 
-            {settingsProvider === 'ollama' && (
-              <>
-                <label style={{ fontSize: 12, color: '#a6adc8', display: 'block', marginBottom: 6 }}>Model</label>
-                <input value={settingsOllamaModel} onChange={e => setSettingsOllamaModel(e.target.value)} placeholder="embeddinggemma" style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', marginBottom: 16, outline: 'none' }} />
-              </>
-            )}
 
             {settingsProvider === 'google' && (
               <>
@@ -364,6 +392,53 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
               <>
                 <label style={{ fontSize: 12, color: '#a6adc8', display: 'block', marginBottom: 6 }}>OpenAI API Key</label>
                 <input type="password" value={settingsOpenaiKey} onChange={e => setSettingsOpenaiKey(e.target.value)} placeholder="sk-… (leave blank to keep current)" style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', marginBottom: 16, outline: 'none' }} />
+              </>
+            )}
+
+            {/* One field for every provider. A list when the provider could be
+                asked, free text always: a model may be listed and not yet
+                pulled (Ollama), or offered under a name the list does not
+                carry. What actually refuses an unusable choice is the width
+                check on save, not this control. */}
+            <label style={{ fontSize: 12, color: '#a6adc8', display: 'block', marginBottom: 6 }}>Model</label>
+            <input
+              list="embedding-model-options"
+              value={settingsProvider === 'ollama' ? settingsOllamaModel : settingsProvider === 'google' ? settingsGoogleModel : settingsOpenaiModel}
+              onChange={e => {
+                const v = e.target.value;
+                if (settingsProvider === 'ollama') setSettingsOllamaModel(v);
+                else if (settingsProvider === 'google') setSettingsGoogleModel(v);
+                else setSettingsOpenaiModel(v);
+              }}
+              placeholder={settingsProvider === 'ollama' ? 'embeddinggemma' : 'model name'}
+              style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', marginBottom: 16, outline: 'none' }}
+            />
+            <datalist id="embedding-model-options">
+              {(modelList?.provider === settingsProvider ? modelList.models : []).map(m => <option key={m.id} value={m.id} />)}
+            </datalist>
+            <div style={{ fontSize: 11, color: '#585b70', marginBottom: 16, lineHeight: 1.5, marginTop: -10 }}>
+              {modelList === null || modelList.provider !== settingsProvider
+                ? 'Loading the provider\u2019s models\u2026'
+                : modelList.error
+                  ? modelList.error
+                  : modelList.models.length === 0
+                    ? 'The provider listed no embedding models.'
+                    : modelList.filtered
+                      ? `${modelList.models.length} embedding models offered by this provider.`
+                      : `${modelList.models.length} models installed. Ollama cannot say which of them embed \u2014 a chat model is refused on save, by width.`}
+            </div>
+
+            {settingsProvider !== 'ollama' && (
+              <>
+                {/* Ollama has no width parameter, so this is only shown where
+                    it does something. Changing it re-embeds the vault: the
+                    width is part of the model key, so the schema is retyped
+                    and every note reindexed. */}
+                <label style={{ fontSize: 12, color: '#a6adc8', display: 'block', marginBottom: 6 }}>Vector width</label>
+                <input value={settingsDim} onChange={e => setSettingsDim(e.target.value)} placeholder="768" style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', marginBottom: 16, outline: 'none' }} />
+                <div style={{ fontSize: 11, color: '#585b70', marginBottom: 16, lineHeight: 1.5, marginTop: -10 }}>
+                  How many numbers to ask this provider for. <code>native</code> sends no size and takes the model&apos;s own — which some older models require. Changing it re-embeds every note, and anything above 2000 is refused: pgvector cannot index it.
+                </div>
               </>
             )}
 

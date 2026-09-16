@@ -8,7 +8,50 @@ export interface EmbeddingConfig {
   provider: EmbeddingProvider;
   googleApiKey?: string;
   openaiApiKey?: string;
+  // One per provider rather than a single `model`: switching provider and back
+  // should not lose the model that was chosen for the first one.
   ollamaModel?: string;
+  googleModel?: string;
+  openaiModel?: string;
+  /**
+   * Width to ask Google or OpenAI for; null means send no size and take the
+   * model's own. NOT per provider — the schema holds one width at a time, so
+   * two stored values would only disagree with each other.
+   *
+   * Resolved here rather than read where it is used, so embeddingModelKey()
+   * can stay synchronous: it is called on the search path, and making it
+   * await a settings read would spread async through every caller.
+   */
+  requestedDimensions: number | null;
+}
+
+/**
+ * The width Google and OpenAI are asked for when nothing says otherwise.
+ * Both can serve a requested size, so Kybase has always asked for the one its
+ * schema shipped with; keeping that as the default means an existing vault
+ * gets the same vectors after an upgrade as before it.
+ */
+export const DEFAULT_REQUESTED_DIMENSIONS = 768;
+
+/**
+ * A stored or env-provided width, as a number or null for "send no size".
+ *
+ * `native` exists because a requested size is not universally accepted:
+ * OpenAI's text-embedding-ada-002 rejects the parameter outright, so there has
+ * to be a way to omit it rather than only to change it.
+ *
+ * Lives here, not in lib/embeddings.ts, only because that module imports this
+ * one — putting it there and reading settings from it would close a cycle.
+ */
+export function parseRequestedDimensions(raw: string | null | undefined): number | null {
+  const v = raw?.trim();
+  if (!v) return DEFAULT_REQUESTED_DIMENSIONS;
+  if (v.toLowerCase() === 'native') return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`Embedding width must be a positive integer or 'native', got '${v}'`);
+  }
+  return n;
 }
 
 // Provider API keys are encrypted at rest (lib/secret-box.ts) — a DB dump
@@ -368,18 +411,38 @@ export async function getEmbeddingConfig(): Promise<EmbeddingConfig> {
     return cachedEmbeddingConfig.value;
   }
 
-  const [provider, googleApiKey, openaiApiKey, ollamaModel] = await Promise.all([
+  const [provider, googleApiKey, openaiApiKey, ollamaModel, googleModel, openaiModel, embeddingDim] = await Promise.all([
     getSetting('embedding_provider'),
     getSetting('google_api_key'),
     getSetting('openai_api_key'),
     getSetting('ollama_model'),
+    getSetting('google_model'),
+    getSetting('openai_model'),
+    getSetting('embedding_dim'),
   ]);
 
+  // The literal fallbacks are the ones lib/embeddings.ts used to inline, kept
+  // exactly: embeddingModelKey is built from these, and a key that changed
+  // shape would tell every existing vault its model had changed and cost it a
+  // full, pointless reindex.
   const cfg: EmbeddingConfig = {
     provider: (provider ?? process.env.EMBEDDING_PROVIDER ?? 'ollama') as EmbeddingProvider,
     googleApiKey:  googleApiKey  ?? process.env.GOOGLE_API_KEY,
     openaiApiKey:  openaiApiKey  ?? process.env.OPENAI_API_KEY,
     ollamaModel:   ollamaModel   ?? process.env.OLLAMA_MODEL ?? 'embeddinggemma',
+    googleModel:   googleModel   ?? process.env.GOOGLE_MODEL ?? 'gemini-embedding-001',
+    openaiModel:   openaiModel   ?? process.env.OPENAI_MODEL ?? 'text-embedding-3-small',
+    // A bad stored value must not take the whole config down with it — the
+    // embedding path would stop dead over one mistyped field. Fall back to the
+    // default and say so; the settings route validates on the way in.
+    requestedDimensions: (() => {
+      try {
+        return parseRequestedDimensions(embeddingDim ?? process.env.EMBEDDING_DIM);
+      } catch (err) {
+        console.warn(`[settings] ${err instanceof Error ? err.message : err} — using ${DEFAULT_REQUESTED_DIMENSIONS}`);
+        return DEFAULT_REQUESTED_DIMENSIONS;
+      }
+    })(),
   };
   cachedEmbeddingConfig = { value: cfg, expiresAt: Date.now() + EMBEDDING_CONFIG_CACHE_TTL_MS };
   return cfg;

@@ -24,7 +24,10 @@ create table if not exists notes (
   content          text not null default '',
   folder_id        uuid references folders(id) on delete set null,
   tags             text[] not null default '{}',
-  embedding        vector(768),          -- nomic-embed-text & text-embedding-004 both 768-dim
+  -- Starting width, not a fixed one: it matches the default model, and the
+  -- server retypes this column (and note_chunks.embedding) to whatever the
+  -- configured model actually returns — see lib/embedding-dim.ts.
+  embedding        vector(768),
   embedding_pending boolean not null default true,  -- true = needs (re)indexing
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now()

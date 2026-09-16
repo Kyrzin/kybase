@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages, getTagWeights, setTagWeights, getFolderWeights, setFolderWeights, getEmbeddingBands, setEmbeddingBands, getProviderKeyHealth, getRerankEnabled, setRerankEnabled, getRerankMinScore, setRerankMinScore } from '@/lib/settings';
 import { rerankAvailable } from '@/lib/rerank';
+import { reconcileEmbeddingDimension, describeOutcome } from '@/lib/embedding-dim';
 import { z } from 'zod';
 
 const UpdateSettingsSchema = z.object({
@@ -117,7 +118,15 @@ export async function PUT(req: NextRequest) {
   // with no confirmation. Now it only flags the notes; the caller decides
   // whether to run "Reindex" right away.
   let pendingCount = 0;
+  let dimensionNote: string | null = null;
   if (providerChanged) {
+    // Before marking anything: a model of a different width needs the vector
+    // columns retyped, and that discards the old vectors itself. Reported back
+    // rather than only logged — a width that cannot be applied means this
+    // model will fail on every note, and the person choosing it is standing
+    // right here (lib/embedding-dim.ts).
+    const outcome = await reconcileEmbeddingDimension();
+    if (outcome.status !== 'ok') dimensionNote = describeOutcome(outcome);
     const marked = await query<{ id: string }>('update notes set embedding_pending = true where deleted_at is null returning id');
     pendingCount = marked.length;
   }
@@ -127,5 +136,5 @@ export async function PUT(req: NextRequest) {
     await query('update notes set title = title where deleted_at is null');
   }
 
-  return NextResponse.json({ ok: true, reindexTriggered: providerChanged, pendingCount });
+  return NextResponse.json({ ok: true, reindexTriggered: providerChanged, pendingCount, dimensionNote });
 }

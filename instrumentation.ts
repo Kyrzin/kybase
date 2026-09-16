@@ -23,11 +23,27 @@ export async function register() {
   const { query } = await import('./lib/db');
   const currentModelKey = embeddingModelKey(await getEmbeddingConfig());
   const lastModelKey = await getLastIndexedModel();
+  let widthSettled = true;
+  if (lastModelKey !== currentModelKey) {
+    // Runs on the very first start too, where there is no prior model to have
+    // drifted from: the schema ships at 768, so a vault configured for a
+    // wider model from the outset would otherwise fail every insert before it
+    // ever indexed anything (lib/embedding-dim.ts).
+    const { reconcileEmbeddingDimension, describeOutcome } = await import('./lib/embedding-dim');
+    const outcome = await reconcileEmbeddingDimension();
+    widthSettled = outcome.status === 'ok' || outcome.status === 'resized';
+    (outcome.status === 'ok' ? console.log : console.warn)(`[startup] ${describeOutcome(outcome)}`);
+  }
   if (lastModelKey !== null && lastModelKey !== currentModelKey) {
     const marked = await query<{ id: string }>('update notes set embedding_pending = true where deleted_at is null returning id');
     console.warn(`[startup] embedding model changed (${lastModelKey} -> ${currentModelKey}) — marked ${marked.length} notes for reindex`);
   }
-  await setLastIndexedModel(currentModelKey);
+  // Withheld when the new model's width could not be established — usually
+  // the provider was still starting up alongside us. Recording the key anyway
+  // would mark the question answered and never ask again, leaving a vault
+  // permanently too narrow for its own model; leaving it unset costs one
+  // repeated check per restart until the provider answers.
+  if (widthSettled) await setLastIndexedModel(currentModelKey);
 
   // A note stays embedding_pending when its provider call failed (Ollama
   // down, crash mid-index) — without this it silently never enters semantic

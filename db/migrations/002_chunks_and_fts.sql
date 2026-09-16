@@ -18,7 +18,7 @@ create table if not exists note_chunks (
   chunk_index int  not null,
   heading     text,                 -- nearest markdown heading, for context
   content     text not null,
-  embedding   vector(768),
+  embedding   vector(768),           -- retyped to the model's width, as in 001
   created_at  timestamptz not null default now(),
   unique (note_id, chunk_index)
 );

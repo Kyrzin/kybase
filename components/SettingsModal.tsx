@@ -416,17 +416,28 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
             <datalist id="embedding-model-options">
               {(modelList?.provider === settingsProvider ? modelList.models : []).map(m => <option key={m.id} value={m.id} />)}
             </datalist>
-            <div style={{ fontSize: 11, color: '#585b70', marginBottom: 16, lineHeight: 1.5, marginTop: -10 }}>
-              {modelList === null || modelList.provider !== settingsProvider
-                ? 'Loading the provider\u2019s models\u2026'
-                : modelList.error
-                  ? modelList.error
+            {/* An unreachable provider is not a footnote: semantic search is
+                off until it is dealt with, and the message carries the command
+                that deals with it. Styled to be read, with the command in a
+                box a single click selects whole. Everything else here is a
+                genuine aside and stays muted. */}
+            {modelList?.provider === settingsProvider && modelList.error ? (
+              <div style={{ fontSize: 12, color: '#f9e2af', background: 'rgba(249,226,175,0.08)', border: '1px solid rgba(249,226,175,0.3)', borderRadius: 6, padding: '10px 12px', marginBottom: 16, marginTop: -10, lineHeight: 1.6 }}>
+                {modelList.error.split('`').map((part, i) => (i % 2 === 1
+                  ? <code key={i} style={{ display: 'inline-block', background: '#11111b', border: '1px solid #313244', borderRadius: 4, padding: '2px 6px', margin: '3px 0', fontSize: 12, color: '#cdd6f4', userSelect: 'all' }}>{part}</code>
+                  : <span key={i}>{part}</span>))}
+              </div>
+            ) : (
+              <div style={{ fontSize: 11, color: '#585b70', marginBottom: 16, lineHeight: 1.5, marginTop: -10 }}>
+                {modelList === null || modelList.provider !== settingsProvider
+                  ? 'Loading the provider\u2019s models\u2026'
                   : modelList.models.length === 0
                     ? 'The provider listed no embedding models.'
                     : modelList.filtered
                       ? `${modelList.models.length} embedding models offered by this provider.`
                       : `${modelList.models.length} models installed. Ollama cannot say which of them embed \u2014 a chat model is refused on save, by width.`}
-            </div>
+              </div>
+            )}
 
             {settingsProvider !== 'ollama' && (
               <>
@@ -455,15 +466,9 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
                   <span style={{ fontSize: 13, color: '#cdd6f4' }}>Rerank search results</span>
                 </label>
                 <div style={{ fontSize: 11, color: '#6c7086', marginTop: 6, lineHeight: 1.5 }}>
-                  A cross-encoder reads your question together with each candidate passage and
-                  reorders the results. It changes their ORDER only — it cannot find a note the
-                  search missed. Costs seconds per search on CPU, and applies to the API and
-                  connected agents too, not just this window. Measure before trusting it: on the
-                  vault it was developed against it did not move a single correct note higher, and
-                  moved two lower. Whether it helps yours is a question about your notes, your
-                  language and your hardware — compare a search you know the answer to with the
-                  switch on and off, and treat it as an experiment to run rather than an
-                  improvement to switch on.
+                  Reorders results the search already found — it cannot surface a note search
+                  missed. Costs seconds per search on CPU, and applies to agents and the API, not
+                  just this window.
                 </div>
                 {rerank.enabled && (
                   <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #313244' }}>
@@ -479,15 +484,27 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
                       style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', outline: 'none' }}
                     />
                     <div style={{ fontSize: 11, color: '#6c7086', marginTop: 6, lineHeight: 1.5 }}>
-                      Results the reranker scores below this are dropped, so a question your notes
-                      don&apos;t answer can come back empty instead of returning the nearest
-                      unrelated thing. Left empty by default on purpose: the scale belongs to the
-                      reranker model, so there is no number that is right for every vault. Look at
-                      the scores on a question you know the answer to and one you know is absent,
-                      then pick something between them.
+                      Hits scoring below this are dropped: a question your notes cannot answer
+                      comes back empty instead of the nearest unrelated thing. Leave it empty to
+                      keep every result.
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {rerank && !rerank.available && (
+              <div style={{ fontSize: 11, color: '#585b70', background: '#11111b', border: '1px solid #313244', borderRadius: 6, padding: '8px 10px', marginBottom: 16, lineHeight: 1.6 }}>
+                {/* Muted, unlike the provider warning above: an embedding
+                    provider that is down means search is broken, while this is
+                    an optional extra nobody is obliged to run. It is here at
+                    all because the toggle simply did not exist before, which
+                    read as a missing feature rather than a service to start. */}
+                A cross-encoder can reorder results after search has found them. It is not in the
+                default install — another ~1 GB image, and seconds per search on CPU. Start it
+                with{' '}
+                <code style={{ background: '#1e1e2e', border: '1px solid #313244', borderRadius: 4, padding: '1px 5px', color: '#a6adc8', userSelect: 'all' }}>docker compose --profile rerank up -d</code>
+                {' '}and reload this page; a toggle appears here. Measure before trusting it.
               </div>
             )}
 

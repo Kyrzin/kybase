@@ -109,9 +109,23 @@ Open http://localhost:3000, log in with your `KYBASE_SECRET` — `grep
 KYBASE_SECRET .env` shows it, or `Select-String KYBASE_SECRET .env` on
 Windows — then [connect an agent](#connect-your-agent).
 
-> [!NOTE]
-> Notes and text search work immediately. Semantic search starts once Ollama
-> finishes downloading the embedding model (~620 MB, one time, automatic).
+That installs the app and its database — around 1 GB. Notes and text search
+work right away.
+
+**Semantic search needs an embedding provider.** Open Settings and pick one:
+
+- **Google or OpenAI** — paste an API key and you are done.
+- **Ollama, on your own machine** — start it once, then pick a model in
+  Settings:
+
+  ```
+  docker compose --profile ollama up -d
+  ```
+
+  It is not in the default install because its image carries NVIDIA and AMD
+  GPU runtimes whatever your hardware is — about 4 GB that someone using a
+  cloud provider would never run. Starting it later touches nothing else:
+  the app keeps running and no note is affected.
 
 ## Connect your agent
 

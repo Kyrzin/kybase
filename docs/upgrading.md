@@ -8,6 +8,40 @@ docker compose up -d --build
 That's the whole procedure. The rest of this page explains what happens
 underneath.
 
+## Ollama no longer starts by default
+
+Up to v1.4, `docker compose up -d` started a bundled Ollama. It does not any
+more: its image carries NVIDIA and AMD GPU runtimes whatever the host has, and
+that is roughly 4 GB nobody using Google or OpenAI embeddings would ever run.
+
+**If your vault uses local embeddings, add one line to `.env` before
+upgrading:**
+
+```
+COMPOSE_PROFILES=ollama
+```
+
+Without it, an already-running Ollama is not stopped — it is left out. A
+profile that is not selected is invisible to `up`, `down`, `pull` and
+`restart` alike, so the container keeps serving embeddings while no longer
+being managed: the next image bump passes it by, and nothing says so.
+
+Starting it explicitly puts it back under compose, and restarts nothing else:
+
+```
+docker compose --profile ollama up -d
+```
+
+To remove an orphan instead, name the profile so compose can see it:
+
+```
+docker compose --profile ollama down
+```
+
+Settings shows a warning, with the command, whenever the configured provider
+cannot be reached — so a vault that does end up without Ollama says so rather
+than quietly falling back to its text half.
+
 ## How migrations work
 
 Pending files from `db/migrations/` are applied automatically when the app

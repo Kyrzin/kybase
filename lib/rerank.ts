@@ -41,13 +41,55 @@ const num = (v: string | undefined, fallback: number) => {
 };
 
 /**
- * Whether a reranker service is installed at all — env only, no database
- * read. Separate from rerankConfig so a caller can tell "nothing to turn on"
- * from "turned off", which is the difference between a missing feature and a
- * deliberate choice, and the settings UI has to show them differently.
+ * Where the reranker lives when nothing says otherwise — the compose service
+ * name, so bringing the profile up is the whole setup. It used to take an
+ * env var as well, which meant two switches that knew nothing about each
+ * other: a started container with the variable unset showed no toggle at all,
+ * and a set variable with no container showed a toggle that silently did
+ * nothing.
+ */
+const DEFAULT_RERANK_URL = 'http://reranker:80';
+
+export function rerankUrl(): string {
+  return (process.env.KYBASE_RERANK_URL?.trim() || DEFAULT_RERANK_URL).replace(/\/+$/, '');
+}
+
+// Whether the service answered recently. Kept because the URL now has a
+// default: without a liveness check, an install that never starts the profile
+// would pay a connection timeout on every search to learn what it already
+// knew a second ago.
+let liveness: { ok: boolean; at: number } | null = null;
+let probeInFlight = false;
+const LIVENESS_TTL_MS = 60_000;
+const PROBE_TIMEOUT_MS = 2_000;
+
+/** Asks the service whether it is there. Awaited only off the search path. */
+export async function probeReranker(): Promise<boolean> {
+  try {
+    const res = await fetch(`${rerankUrl()}/health`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
+    liveness = { ok: res.ok, at: Date.now() };
+  } catch {
+    liveness = { ok: false, at: Date.now() };
+  }
+  return liveness.ok;
+}
+
+/**
+ * Whether a reranker is there, from the last probe — never awaiting one.
+ *
+ * A search must not wait to find out that nothing is listening: an install
+ * that never started the profile would otherwise pay the connection timeout
+ * on the first search of every minute. A stale answer costs at most one page
+ * ranked by rank fusion instead, which is the shipped default anyway.
  */
 export function rerankAvailable(): boolean {
-  return !!process.env.KYBASE_RERANK_URL?.trim();
+  if (!liveness || Date.now() - liveness.at > LIVENESS_TTL_MS) {
+    if (!probeInFlight) {
+      probeInFlight = true;
+      probeReranker().finally(() => { probeInFlight = false; });
+    }
+  }
+  return liveness?.ok ?? false;
 }
 
 /**
@@ -55,11 +97,13 @@ export function rerankAvailable(): boolean {
  * where nothing here runs at all) or the setting turns it off.
  */
 export async function rerankConfig(): Promise<RerankConfig | null> {
-  const url = process.env.KYBASE_RERANK_URL?.trim();
-  if (!url) return null;
+  // Configuration only — whether anything is answering at that URL is a
+  // separate question (rerankAvailable), asked by the caller. Keeping the two
+  // apart means this stays a pure read of settings and env, and a search can
+  // decide not to wait on a service it already knows is absent.
   if (!(await getRerankEnabled())) return null;
   return {
-    url: url.replace(/\/+$/, ''),
+    url: rerankUrl(),
     topN: Math.min(50, num(process.env.KYBASE_RERANK_TOP_N, 10)),
     perNote: Math.min(5, num(process.env.KYBASE_RERANK_PASSAGES_PER_NOTE, 2)),
     // Deliberately longer than any other outbound call in this codebase: on

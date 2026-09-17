@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
 import { setSetting, getEmbeddingConfig, getFtsLanguages, setFtsLanguages, getTagWeights, setTagWeights, getFolderWeights, setFolderWeights, getEmbeddingBands, setEmbeddingBands, getProviderKeyHealth, getRerankEnabled, setRerankEnabled, getRerankMinScore, setRerankMinScore } from '@/lib/settings';
-import { rerankAvailable } from '@/lib/rerank';
+import { probeReranker } from '@/lib/rerank';
 import { reconcileEmbeddingDimension, describeOutcome } from '@/lib/embedding-dim';
 import { parseRequestedDimensions } from '@/lib/settings';
 import { z } from 'zod';
@@ -73,6 +73,9 @@ export async function GET() {
   const [cfg, ftsLanguages, tagWeights, folderWeights, embeddingBands, keyHealth, rerankEnabled, rerankMinScore] = await Promise.all([
     getEmbeddingConfig(), getFtsLanguages(), getTagWeights(), getFolderWeights(), getEmbeddingBands(), getProviderKeyHealth(), getRerankEnabled(), getRerankMinScore(),
   ]);
+  // Asked for real here, not read from the search path's cache: the dialog is
+  // opened rarely and has to be right about what is running this second.
+  const rerankReachable = await probeReranker();
   return NextResponse.json({
     provider: cfg.provider,
     ollamaModel: cfg.ollamaModel,
@@ -98,7 +101,7 @@ export async function GET() {
     // Shipped as a pair: the toggle means nothing without a service behind
     // it, and the UI has to say "not installed" rather than showing a switch
     // that changes nothing.
-    rerankAvailable: rerankAvailable(),
+    rerankAvailable: rerankReachable,
     rerankEnabled,
     rerankMinScore,
   });

@@ -25,6 +25,19 @@ export type ModelListing = {
 
 const LIST_TIMEOUT_MS = 10_000;
 
+/**
+ * Ollama is off by default, so its absence is expected rather than a fault.
+ * Only "nothing is listening" is rewritten; a real failure keeps its message.
+ */
+export function unreachableHint(provider: EmbeddingProvider, err: unknown): string | null {
+  if (provider !== 'ollama') return null;
+  const message = err instanceof Error ? `${err.message} ${err.cause ?? ''}` : String(err);
+  if (!/ENOTFOUND|ECONNREFUSED|EAI_AGAIN|fetch failed|timed out|aborted/i.test(message)) return null;
+  return 'Ollama is not running. It is left out of the default install so that nobody pays for '
+    + 'a ~4 GB download to use Google or OpenAI embeddings. Start it with '
+    + '`docker compose --profile ollama up -d` — the app and your notes keep running — then reload this page.';
+}
+
 async function getJson(url: string, init?: RequestInit): Promise<unknown> {
   const res = await fetch(url, { ...init, signal: AbortSignal.timeout(LIST_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`${res.status} ${(await res.text()).slice(0, 160)}`);
@@ -103,6 +116,10 @@ export async function listEmbeddingModels(provider?: EmbeddingProvider): Promise
     }
     return { ...base, models: await ollamaModels() };
   } catch (err) {
-    return { ...base, models: [], error: err instanceof Error ? err.message : String(err) };
+    return {
+      ...base,
+      models: [],
+      error: unreachableHint(p, err) ?? (err instanceof Error ? err.message : String(err)),
+    };
   }
 }

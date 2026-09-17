@@ -1311,7 +1311,9 @@ export function createMcpServer(): McpServer {
     'pass that string to get_note\'s `section` to get that part alone. If a long hit has no ' +
     '`section`, get_note with limit:1000 returns its `headings` outline; pick one and re-read with ' +
     '`section`. For prose without headings, a hit\'s `excerpt_offset` goes to get_note as `offset`.\n' +
-    '- A hit is a candidate, not an answer. `matched_by` says which arms found it: semantic_score ' +
+    '- A hit is a candidate, not an answer. `relevance` is relative to the best hit in this ' +
+    'response, so the top result always reads 1.0 — an ordering, not a verdict; `best_score` is ' +
+    'that hit\'s own raw similarity. `matched_by` says which arms found it: semantic_score ' +
     'alone means "about something similar", never that it confirms your question. Quote the excerpt ' +
     'or open the note — a score is never evidence. `exact:true` means the query occurs verbatim in ' +
     'that note; `text_tier` of "or" or "substring" means the strict words missed and a looser pass ' +

@@ -11,94 +11,69 @@
   <img src="https://img.shields.io/badge/private-by%20default-success" alt="private by default">
 </p>
 
-**Every session starts from zero.** Your agent relearns your stack, your
-decisions and your preferences each time, then forgets them when the
-context window closes — and the agent in your other editor never knew
-them at all.
+<h3 align="center">Your AI forgets when the session ends. Kybase remembers.</h3>
 
-**Kybase is long-term memory for AI agents, running on your own machine.**
-Any MCP-speaking agent — Claude, Cursor, Windsurf — searches, reads and
-updates one persistent Markdown knowledge base, while **you** keep full
-control in the browser: read every note, edit anything, revoke access
-anytime. Hybrid search finds the right note, section-level reads avoid
-loading whole documents into context, and `[[wikilinks]]` keep the
-knowledge connected as it grows.
+Kybase gives Claude, Cursor, Windsurf and any other MCP-speaking agent a
+long-term memory you own: one Markdown knowledge base, running on your own
+machine, that every agent can search, read and update — and that you can
+open in a browser and edit by hand.
 
-PostgreSQL + pgvector + Ollama, one `docker compose up`. **No SaaS, no
-accounts, private by default** — cloud embeddings (Google, OpenAI) are
-optional, not required (see [Switching Embedding
-Providers](#switching-embedding-providers) for the trade-off).
+**Self-hosted. Private by default. Plain Markdown. Yours.**
 
 <p align="center">
   <img src="public/readme/demo.gif" width="100%" alt="Kybase in use: a markdown note with wikilinks, the knowledge graph with wikilink and semantic edges, then a plain-language question — 'what broke in production' — returning the right incident note first, even though none of those words appear in it.">
 </p>
 
-**[How you use it](#how-you-use-it) · [Why Kybase?](#why-kybase) · [How agents use it](#how-agents-use-it) · [Quick Start](#quick-start-docker) · [Environment variables](#environment-variables) · [Connect an MCP Client](#connect-an-mcp-client) · [Stack](#stack) · [Switching Embedding Providers](#switching-embedding-providers) · [Export & Import](#export--import) · [Sharing](#sharing-notes) · [Backups](#backups) · [Upgrading](#upgrading) · [Local development](#local-development) · [More documentation](#more-documentation) · [License](#license)**
+**[The problem](#the-problem) · [Quick start](#quick-start) · [Connect your agent](#connect-your-agent) · [What you get](#what-you-get) · [Settings](#settings) · [Sharing](#sharing-notes) · [Backups](#backups) · [Upgrading](#upgrading)**
 
-## How you use it
+## The problem
 
-**1. Point your agent at it.** One block in your MCP config — for a single
-local agent that is `npx -y kybase-mcp`, with nothing else to install. Full
-setup for every client: [Connect an MCP client](#connect-an-mcp-client).
+You tell your agent how the staging deploy works. It helps, and the
+session ends.
 
-**2. Work the way you already work.** Ask the agent to write a decision
-down, or to check what you agreed last month. It searches before it
-answers and saves what is worth keeping, as ordinary notes.
+Tomorrow you open a new one:
 
-**3. Look whenever you want.** Everything the agent wrote is a Markdown
-note in your browser: read it, correct it, re-file it, delete it. Nothing
-is a hidden memory blob — if the agent remembered something wrong, you
-edit the sentence that is wrong.
+> **You:** what did we decide about the staging database?
+>
+> **Agent:** I don't have that context — could you tell me again?
 
-**4. Come back tomorrow.** New session, new context window, same memory —
-and the same memory in every agent you connect, instead of one silo per
-tool.
+So you explain it again. Then you switch editors, and explain it there too.
 
-## Why Kybase?
+With Kybase, the knowledge lives outside the agent:
 
-Giving an agent persistent memory usually means assembling it yourself:
-a notes app, an MCP bridge, an embedding pipeline, and sync between them.
-Kybase is that whole stack as one `docker compose up`:
+> **You:** what did we decide about the staging database?
+>
+> **Agent:** *(searches Kybase)* You moved staging to its own Postgres
+> instance so migrations could be tested against real data first — that's
+> in "Staging environment", under "Database".
 
-- **Markdown, not an opaque memory blob** — every note is a plain `.md`
-  file with frontmatter; read it, edit it, `grep` it, back it up with `cp`
-- **MCP-native reads and writes** — an agent searches, reads, and updates
-  notes directly through MCP tools, not through a side-channel it can't use
-- **Hybrid search** — full-text and semantic search fused into one ranked
-  result, so an agent finds the right note whether it knows the exact
-  wording or not
-- **Section-level reads and writes** — an agent reads or edits the part
-  of a note it actually needs, not the whole file
-- **Backlinks and a knowledge graph** — `[[wikilinks]]` connect related
-  notes automatically; explicit and semantic edges are both visible in
-  the graph view
-- **Self-hosted, private by default** — your own Postgres, your own
-  Ollama; nothing leaves your machine unless you opt into a cloud
-  embedding provider
+New session, same memory. Different tool, same memory.
 
-## How agents use it
+## Quick start
 
-```text
-search_notes("deployment steps for staging")
-  → hit includes section: "Rollback"
-  → get_note(section: "Rollback")
-  → agent reads just that section, not the whole note
-  → append_to_note(section: "Rollback", text: "...")
+### One local agent
+
+Nothing to install, no Docker, no database to run:
+
+```json
+{
+  "mcpServers": {
+    "kybase": {
+      "command": "npx",
+      "args": ["-y", "kybase-mcp"]
+    }
+  }
+}
 ```
 
-Search returns which section of a note matched, not just which note. For
-a long note, reading one section instead of the whole file can mean
-reading a fraction of the content — cheaper for every step after the
-first search, and it's how the agent writes back too.
+Put that in your client's MCP config and restart it. Your notes live under
+`~/.kybase`, and `kybase-mcp export vault.zip` gets them back out as plain
+Markdown at any time.
 
-## Quick Start (Docker)
+### The full app
 
-> [!TIP]
-> **Just want memory for one local agent?** Skip all of this — `npx -y kybase-mcp`
-> runs the same MCP server with its own embedded database, no Docker and no
-> Postgres. See [stdio (no server at all)](#stdio-local-process). Everything
-> below is the full app: web UI, knowledge graph, sharing, several agents at
-> once.
+For the web UI, the graph view, share links, and several agents against one
+knowledge base:
 
 ```bash
 git clone https://github.com/Kyrzin/kybase.git
@@ -110,53 +85,20 @@ rm -f .env.bak
 docker compose pull && docker compose up -d
 ```
 
-That generates both required secrets in place (the `sed -i.bak` form
-works on both Linux and macOS) — nothing else in `.env` needs to change
-to get started.
-
-This pulls the prebuilt multi-arch image
-([`ghcr.io/kyrzin/kybase`](https://github.com/Kyrzin/kybase/pkgs/container/kybase),
-linux/amd64 + linux/arm64) from GitHub Packages, tagged `latest`. To build from
-source instead, run `docker compose up -d --build`.
-
-Open http://localhost:3000 and log in with your `KYBASE_SECRET` — then
-jump to [Connect an MCP Client](#connect-an-mcp-client) to point an agent
-at it.
-
-That's it. On startup the app applies `db/migrations/*.sql` automatically
-(tracked in the `schema_migrations` table) and Ollama downloads the
-embedding model (embeddinggemma, ~620 MB, one time).
-Change the host port with `KYBASE_PORT` in `.env`.
+Those two `sed` lines generate the only secrets you need. Open
+http://localhost:3000, log in with your `KYBASE_SECRET`, then
+[connect an agent](#connect-your-agent).
 
 > [!NOTE]
-> Notes and text search work immediately. Semantic search and semantic graph
-> edges activate once Ollama finishes pulling the model and notes get indexed
-> (automatic, in the background).
+> Notes and text search work immediately. Semantic search starts once Ollama
+> finishes downloading the embedding model (~620 MB, one time, automatic).
 
-### Environment variables
+## Connect your agent
 
-Everything below goes in `.env` (copied from `.env.example`). `KYBASE_SECRET` and `POSTGRES_PASSWORD` are required — the rest have working defaults.
+Kybase speaks MCP over Streamable HTTP at `/api/mcp`, so any client that
+speaks it can connect.
 
-| Variable | Default | Notes |
-|----------|---------|-------|
-| `KYBASE_SECRET` | *(required)* | UI login password and MCP/API bearer token. Generate with `openssl rand -hex 32`. |
-| `KYBASE_OAUTH_REDIRECT_URIS` | claude.ai's connector callback | Comma-separated extra OAuth `redirect_uri` values, matched in full — give the whole URL, not just a host. Loopback addresses are always allowed. Only relevant if an MCP client does its own hosted OAuth instead of a static Bearer token. |
-| `KYBASE_PORT` | `3000` | Host port the app is exposed on. |
-| `POSTGRES_PASSWORD` | *(required)* | Postgres is only reachable inside the compose network, but `docker compose up` refuses to start without one — no silent weak default. Generate with `openssl rand -hex 16`. |
-| `KYBASE_TAG` | `latest` | Prebuilt image tag from `ghcr.io/kyrzin/kybase`. `latest` always tracks the newest [release](https://github.com/Kyrzin/kybase/releases) tag; pin to a specific version (e.g. `1.4`) if you want upgrades to be a deliberate step. |
-| `EMBEDDING_PROVIDER` | `ollama` | `ollama`, `google`, or `openai` — see [Switching Embedding Providers](#switching-embedding-providers). |
-| `OLLAMA_URL` | `http://ollama:11434` | Point at an external Ollama instance instead of the bundled container. |
-| `OLLAMA_MODEL` | `embeddinggemma` | Or `nomic-embed-text`. |
-| `GOOGLE_API_KEY` / `GOOGLE_MODEL` | *(empty)* / `text-embedding-004` | Only used when `EMBEDDING_PROVIDER=google`. |
-| `OPENAI_API_KEY` | *(empty)* | Only used when `EMBEDDING_PROVIDER=openai`. |
-
-`DATABASE_URL` isn't something you set for the Docker path — compose derives it from `POSTGRES_PASSWORD` automatically. It's only relevant for [local development](#local-development) running the app directly on the host.
-
-## Connect an MCP Client
-
-The app exposes a Streamable HTTP MCP endpoint at `/api/mcp`. Any MCP client that speaks Streamable HTTP can connect — not just Claude. Clients that only speak stdio have a [local entrypoint](#stdio-local-process) instead.
-
-**Claude Code** — add to `.mcp.json` (or `claude mcp add`):
+**Claude Code** — `.mcp.json` in your project (or `claude mcp add`):
 
 ```json
 {
@@ -172,33 +114,21 @@ The app exposes a Streamable HTTP MCP endpoint at `/api/mcp`. Any MCP client tha
 }
 ```
 
-**Claude Desktop** — same JSON shape, in `claude_desktop_config.json`
+That's it — the agent can now search your notes, read them, write new ones,
+update existing ones and link them together.
+
+<details>
+<summary><b>Other clients</b> — Claude Desktop, claude.ai, Cursor, Windsurf</summary>
+
+**Claude Desktop** — the same JSON shape, in `claude_desktop_config.json`
 (macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`,
 Windows: `%APPDATA%\Claude\claude_desktop_config.json`).
 
-**claude.ai** — Settings → Connectors → Add custom connector, same URL
-(requires the instance to be reachable over HTTPS). No key to paste: the
-connector registers itself (RFC 7591), sends you to your own instance to enter
-the key once, and gets its own revocable OAuth token — see **Settings →
-Connected clients** in the web UI. A connector can only be sent back to a
-callback this server accepts, so registration cannot point one somewhere else.
+**Cursor** — the same shape without `"type"`, in `.cursor/mcp.json`
+(project) or `~/.cursor/mcp.json` (global).
 
-**Cursor** — add to `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` (global):
-
-```json
-{
-  "mcpServers": {
-    "kybase": {
-      "url": "https://your-domain/api/mcp",
-      "headers": {
-        "Authorization": "Bearer <KYBASE_SECRET>"
-      }
-    }
-  }
-}
-```
-
-**Windsurf** — add to `~/.codeium/windsurf/mcp_config.json`:
+**Windsurf** — `~/.codeium/windsurf/mcp_config.json`, with `serverUrl`
+instead of `url`:
 
 ```json
 {
@@ -213,193 +143,95 @@ callback this server accepts, so registration cannot point one somewhere else.
 }
 ```
 
-<a id="stdio-local-process"></a>
-**stdio (no server at all)** — for a local agent, or for clients that only speak
-stdio, the same MCP server runs as a single command with an embedded database:
+**claude.ai** — Settings → Connectors → Add custom connector, same URL
+(the instance has to be reachable over HTTPS). No key to paste: the
+connector registers itself, sends you to your own instance to enter the key
+once, and gets its own revocable token — see **Settings → Connected
+clients** in the web UI.
 
-```json
-{
-  "mcpServers": {
-    "kybase": {
-      "command": "npx",
-      "args": ["-y", "kybase-mcp"]
-    }
-  }
-}
+**Clients that only speak stdio** use the `npx -y kybase-mcp` block from
+[Quick start](#one-local-agent), in the same file.
+
+</details>
+
+## What you get
+
+- **Markdown, not an opaque memory blob** — every note is plain text; read
+  it, edit it, `grep` it, back it up with `cp`
+- **One knowledge base, every agent** — Claude, Cursor, Windsurf and the
+  web UI all look at the same notes
+- **Hybrid search** — full-text and meaning-based search fused into one
+  ranked result, so an agent finds the note whether it knows the exact
+  wording or not
+- **Section-level reads and writes** — an agent reads or edits the part of
+  a note it needs, not the whole file
+- **Backlinks and a knowledge graph** — `[[wikilinks]]` connect related
+  notes automatically
+- **Yours to take** — Settings → **Export .zip** gives plain Markdown with
+  folders as directories, readable by any editor, Obsidian included.
+  **Import .zip** merges one back.
+
+Obsidian and Notion are built for a person reading and writing. Kybase is
+built for the loop between **you ↔ your knowledge ↔ your agent**: you edit
+in the browser, an agent searches and updates over MCP, and both are looking
+at the same Markdown. If the agent remembered something wrong, you open the
+note and fix the sentence.
+
+## Private by default
+
+Kybase runs on your infrastructure. No SaaS account, no external memory
+service, no cloud database — your own Postgres, local embeddings through
+Ollama, and a secret you generate.
+
+Cloud embedding providers are optional. Choosing one sends your notes' full
+text to that provider to compute embeddings; Ollama keeps everything on your
+machine.
+
+## How agents use it
+
+```text
+search_notes("deployment steps for staging")
+  → hit includes section: "Rollback"
+  → get_note(section: "Rollback")
+  → agent reads just that section, not the whole note
+  → append_to_note(section: "Rollback", text: "...")
 ```
 
-No Docker and no Postgres to install: `kybase-mcp` keeps a local knowledge base
-under `~/.kybase`. Add `"env": {"OLLAMA_URL": "http://localhost:11434"}` to turn
-on semantic search, or `DATABASE_URL` to point it at an existing Kybase database
-instead of its own. Details: [packages/kybase-mcp](packages/kybase-mcp).
+Search says which *section* of a note matched, not just which note. On a long
+note that can mean reading a fraction of the content — cheaper for every step
+after the first search, and it is how the agent writes back too.
 
-The HTTP endpoint above is still the better choice when it's an option — it is
-the one with the web UI, authentication, revocable tokens, and shared access for
-several agents at once.
+The server ships with instructions that teach the agent to search before
+writing and to add `[[wikilinks]]` to related notes, so the graph grows as
+the agent works instead of filling up with orphans.
 
-### MCP tools (18)
+## Settings
 
-| Tool | Category | What it does for the agent |
-|------|----------|------------------------------|
-| `search_notes` | Search | Hybrid RRF search (pgvector + bilingual FTS); `exact` flags a literal substring match, `matched_by` shows which arms found it, `section` names which part of a long note matched |
-| `get_note` | Read | Fetch a note by id or fuzzy title; windowed for large notes, with a heading outline. `resolve_links:true` also resolves every `[[wikilink]]` inside it, one level deep, in the same round-trip |
-| `list_notes` | Read | Newest-first listing, filterable by folder/tag/updated date |
-| `list_tags` | Read | All tags in use with counts, so the agent reuses existing tags instead of coining duplicates |
-| `list_folders` | Read | Flat folder list for reconstructing the tree |
-| `get_backlinks` | Graph | Notes that link to a given note via `[[wikilinks]]` |
-| `get_neighbors` | Graph | What one note is connected to in the `[[wikilink]]` graph, out to `depth` hops — a flat list of titles, no whole-vault payload |
-| `get_graph` | Graph | The knowledge graph — wikilink edges plus semantic edges — scoped by folder or by hop count from a root note |
-| `create_note` | Write | Create a note; embedding is generated automatically in the background |
-| `update_note` | Write | Update fields; supports `expected_updated_at` to refuse a stale overwrite instead of silently clobbering a concurrent edit |
-| `append_to_note` | Write | Insert text at a note/section boundary (`at`: note/section start or end) without resending the rest — safe under concurrent writers (row-locked) |
-| `replace_in_note` | Write | Find-and-replace exact text; refuses unless the match count equals `expected_count`, so a loose `find` can't silently rewrite more than intended |
-| `delete_note` | Write | Soft-delete; recoverable with `restore_note` before it ages out of the trash |
-| `restore_note` | Write | Undo `delete_note` |
-| `create_folder` | Organize | Create a folder, optionally nested |
-| `update_folder` | Organize | Rename or move a folder; refuses a move that would create a cycle |
-| `delete_folder` | Organize | Delete a folder and its subtree; every note inside is soft-deleted along with it |
-| `indexing_status` | Diagnostics | How many notes are embedded vs. still pending, to tell "still indexing" from "done" |
+Everything else goes in `.env`, copied from `.env.example`, which documents
+each option. Only `KYBASE_SECRET` and `POSTGRES_PASSWORD` are required;
+`KYBASE_PORT` changes the host port, and `KYBASE_TAG` pins a version (e.g.
+`1.4`) instead of tracking `latest`.
 
-The server ships with MCP instructions that teach the agent to search before
-writing and to add `[[wikilinks]]` to related notes — so the knowledge graph
-grows as the agent uses it, instead of accumulating orphan notes.
-
-**How search works, in plain terms.** `search_notes` has three modes:
-`text` (exact words, filenames, identifiers), `semantic` (meaning, via
-embeddings), and `hybrid` (both, fused into one ranked list — the
-default, and usually the right choice). A few fields on each hit mean
-something narrower than they sound:
-
-- `exact: true` means the query is a literal, contiguous substring of
-  the note — good for finding a specific compound identifier or
-  filename, not a signal that "this is the right answer."
-- `relevance` ranks hits within this one response, relative to its own
-  best hit — it's not a confidence score or a probability.
-- A hit found only by the semantic arm means "similar topic," not
-  "confirms this fact." Read the excerpt before trusting it.
-- `coverage` measures how much of the query is literally present in a
-  hit — a low or zero value doesn't mean the hit is wrong, since a
-  cross-language or paraphrased match can legitimately share no words
-  with the question.
-- Semantic search returns candidates by default, not verdicts — nothing
-  is filtered out for being "too dissimilar" unless you configure a
-  minimum similarity yourself (see [Switching Embedding
-  Providers](#switching-embedding-providers)); an empty result means
-  the index found nothing at all.
-
-When a hit's `section` is set, `get_note(section:)` reads just that part
-instead of the whole note.
-
-## Stack
-
-| Layer | Tech |
-|-------|------|
-| Frontend | Next.js App Router, React 19 |
-| Database | PostgreSQL 16 + pgvector (direct `pg` connection) |
-| Embeddings | Ollama `embeddinggemma` (default, multilingual) / Google / OpenAI |
-| Search | RRF hybrid: pgvector HNSW cosine + bilingual FTS |
-| MCP | `@modelcontextprotocol/sdk` Streamable HTTP |
-| Auth | `KYBASE_SECRET` env var + revocable per-client OAuth tokens (MCP) |
-
----
-
-## Switching Embedding Providers
-
-You can switch the embedding provider (between local Ollama, Google, or OpenAI) and trigger re-indexing directly in the browser:
-
-1. Open the settings modal in the web UI.
-2. Select your provider, add the API key if needed, and click **Save & Apply** (switching the provider automatically re-indexes every note).
-3. **Reindex** only catches notes that were never embedded. After anything else that changes how embeddings are computed (e.g. an update to the embedding logic itself), use **Reindex all** to force-recompute every note.
-
-All supported providers use 768-dimensional embeddings, so switching does not require any database schema changes.
+**Embedding provider.** Open Settings in the web UI, pick a provider
+(Ollama, Google or OpenAI), choose a model, add an API key if it needs one,
+and click **Save & Apply**. Switching re-embeds every note, and the database
+adapts to the new model's vector size on its own.
 
 > [!IMPORTANT]
-> Ollama keeps everything on your machine — no note content leaves it. Google
-> and OpenAI are convenience options: picking either sends your notes' full
-> text to that provider's API to compute the embedding.
-
-**Local model choice.** The default local model is `embeddinggemma`
-(multilingual) — for multilingual vaults (e.g. Russian/German) it
-separates relevant from irrelevant notes far better than English-centric
-models. `nomic-embed-text` is a smaller, English-leaning alternative.
-
-**Semantic search returns candidates, not verdicts.** Kybase does not
-reject a semantic match for being "too dissimilar" — there is no built-in
-similarity cutoff, and an empty result means the index found nothing, not
-that something was filtered out. That is deliberate: a shipped per-model
-cutoff was measured and withdrawn, because it removed real answers
-(a cross-language match shares no words, so nothing else finds it) without
-reliably stopping confident near-misses. Each hit instead carries what you
-need to judge it — which arm found it, how much of your query literally
-appears in it, and the matching excerpt.
-
-If you have a homogeneous corpus and have measured your own model, you can
-set a minimum similarity as precision tuning; `indexing_status` reports
-whether one is in force. See `lib/embeddings.ts` for the measurements and
-the reasoning.
-
-> [!TIP]
-> **Already run Ollama?** On a host that already has an Ollama instance (e.g. a
-> GPU one), skip the bundled CPU container: set `OLLAMA_URL` in `.env` to your
-> instance (pull `OLLAMA_MODEL` there first) and start with the override file —
-> `docker compose -f docker-compose.yml -f docker-compose.external-ollama.yml up -d`.
-
-> [!TIP]
-> **CLI alternative.** If you prefer using the terminal, you can trigger re-indexing by calling the admin endpoint — only pending notes by default, add `?mode=all` to the URL to force every note instead:
-> ```bash
-> docker compose exec kybase node -e "
->   fetch('http://localhost:3000/api/admin/reindex', {
->     method: 'POST',
->     headers: { Authorization: 'Bearer <KYBASE_SECRET>' }
->   }).then(r => r.json()).then(console.log)
-> "
-> ```
-
----
-
-## Export & Import
-
-Your notes are never locked in. Settings → **Export .zip** downloads the
-whole vault as plain markdown files with frontmatter (title, tags, created/
-updated dates), folders as directories — readable by any editor, Obsidian
-included. **Import .zip** merges a vault back; notes whose titles already
-exist are skipped. A new note's creation date is restored from the file;
-its "last updated" timestamp is set to the moment it lands back in the
-vault rather than carried over — that field tracks when this server last
-changed the row, so a re-imported note showing up as recently touched is
-correct, not a bug. Imported notes are re-embedded automatically in the
-background.
-
-The same via API:
-
-```bash
-curl -H "Authorization: Bearer <KYBASE_SECRET>" -o vault.zip \
-  http://localhost:3000/api/export
-
-# mode=skip (default) keeps existing notes; mode=overwrite replaces them
-curl -X POST -H "Authorization: Bearer <KYBASE_SECRET>" \
-  --data-binary @vault.zip \
-  "http://localhost:3000/api/import?mode=skip"
-```
-
----
+> Ollama keeps everything on your machine. Google and OpenAI are convenience
+> options: picking either sends your notes' full text to that provider.
 
 ## Sharing notes
 
-The **Share** button on a note creates a public read-only link
-(`/share/<token>`) — rendered markdown, no login, wikilinks shown as plain
-text so nothing else in your vault is reachable. The threat model in one
-sentence: **the link is the access — revoke links you no longer need**
-(Settings → Active share links shows everything that is currently public).
-
----
+The **Share** button on a note creates a public read-only link — rendered
+Markdown, no login, wikilinks shown as plain text so nothing else in your
+vault is reachable. **The link is the access**: revoke links you no longer
+need under Settings → Active share links.
 
 ## Backups
 
-Everything lives in one Postgres volume — a nightly `pg_dump` is one line.
+Everything lives in one Postgres volume, so a nightly `pg_dump` is one line.
 Full recipe including cron and restore: [docs/backup.md](docs/backup.md).
-
----
 
 ## Upgrading
 
@@ -411,33 +243,15 @@ docker compose pull && docker compose up -d
 git pull && docker compose up -d --build
 ```
 
-Migrations apply automatically on startup. Details: [docs/upgrading.md](docs/upgrading.md).
-
----
-
-## Local development
-
-```bash
-# Postgres only (app runs on the host)
-docker compose up -d db
-cp .env.example .env.local
-# in .env.local: set KYBASE_SECRET and uncomment DATABASE_URL
-npm install
-npm run dev                  # http://localhost:3000
-
-npm run build     # Production build check
-npx tsc --noEmit  # Type check
-```
-
----
+Migrations apply automatically on startup. Details:
+[docs/upgrading.md](docs/upgrading.md).
 
 ## More documentation
 
-[SECURITY.md](SECURITY.md) (threat model, what's implemented) ·
-[CONTRIBUTING.md](CONTRIBUTING.md) · [docs/backup.md](docs/backup.md) ·
-[docs/upgrading.md](docs/upgrading.md)
-
----
+[SECURITY.md](SECURITY.md) (threat model) ·
+[CONTRIBUTING.md](CONTRIBUTING.md) (running it locally, opening a PR) ·
+[docs/backup.md](docs/backup.md) · [docs/upgrading.md](docs/upgrading.md) ·
+[packages/kybase-mcp](packages/kybase-mcp) (the standalone stdio package)
 
 ## License
 

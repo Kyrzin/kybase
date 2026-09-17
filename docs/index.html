@@ -87,7 +87,7 @@
       <p class="tagline">A personal, self-hosted knowledge base that your AI agent uses as native, persistent memory. Markdown notes, wikilink graph, hybrid semantic search — and a first-party MCP server.</p>
       <div class="cta">
         <a class="btn btn-primary" href="https://github.com/Kyrzin/kybase">View on GitHub</a>
-        <a class="btn btn-ghost" href="https://github.com/Kyrzin/kybase#quick-start-docker">Quick Start</a>
+        <a class="btn btn-ghost" href="https://github.com/Kyrzin/kybase#quick-start">Quick Start</a>
       </div>
     </header>
 
@@ -144,7 +144,7 @@ docker compose up -d --build</code></pre>
         <tr><th>Layer</th><th>Tech</th></tr>
         <tr><td>Frontend</td><td>Next.js App Router, React 19</td></tr>
         <tr><td>Database</td><td>PostgreSQL 16 + pgvector</td></tr>
-        <tr><td>Embeddings</td><td>Ollama <code>embeddinggemma</code> (default, multilingual) / Google / OpenAI (768-dim)</td></tr>
+        <tr><td>Embeddings</td><td>Ollama <code>embeddinggemma</code> (default, multilingual) / Google / OpenAI — model and vector size chosen in Settings</td></tr>
         <tr><td>Search</td><td>RRF hybrid: pgvector HNSW cosine + bilingual FTS</td></tr>
         <tr><td>MCP</td><td><code>@modelcontextprotocol/sdk</code> Streamable HTTP</td></tr>
       </table>

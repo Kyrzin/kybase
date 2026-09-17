@@ -48,6 +48,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   // provider still offers, and Google withdrew the one that used to be named
   // here while it was still the shipped default.
   const [modelList, setModelList] = useState<{ provider: string; models: { id: string }[]; error?: string; filtered: boolean } | null>(null);
+  const [pull, setPull] = useState<{ running: boolean; model?: string; completed?: number; total?: number; status?: string; error?: string } | null>(null);
   const [settingsSaving, setSettingsSaving]   = useState(false);
   const [settingsStatus, setSettingsStatus]   = useState<string | null>(null);
   const [settingsFailed, setSettingsFailed]   = useState(false);
@@ -112,6 +113,38 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
       .catch(() => {});
     return () => { cancelled = true; };
   }, [apiFetch, settingsProvider]);
+
+  // Polled rather than streamed: the download outlives the request that starts
+  // it, same shape as the reindex progress below.
+  useEffect(() => {
+    if (!pull?.running) return;
+    const id = setInterval(() => {
+      apiFetch('/api/settings/models/pull')
+        .then(r => (r.ok ? r.json() : null))
+        .then(d => {
+          if (!d) return;
+          setPull(d);
+          if (!d.running && !d.error) {
+            apiFetch(`/api/settings/models?provider=${settingsProvider}`)
+              .then(r => (r.ok ? r.json() : null))
+              .then(m => { if (m) setModelList({ provider: settingsProvider, models: m.models ?? [], error: m.error, filtered: !!m.filtered }); })
+              .catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }, 1500);
+    return () => clearInterval(id);
+  }, [apiFetch, pull?.running, settingsProvider]);
+
+  const startPull = async (model: string) => {
+    setPull({ running: true, model, status: 'starting' });
+    const res = await apiFetch('/api/settings/models/pull', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+    }).catch(() => null);
+    if (!res || !res.ok) setPull({ running: false, error: 'Could not start the download.' });
+  };
 
   // Saved on click, not on the modal's Save button: this is a switch, and a
   // switch that needs a second confirmation to take effect reads as broken.
@@ -416,6 +449,32 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
             <datalist id="embedding-model-options">
               {(modelList?.provider === settingsProvider ? modelList.models : []).map(m => <option key={m.id} value={m.id} />)}
             </datalist>
+
+            {settingsProvider === 'ollama' && modelList?.provider === 'ollama' && !modelList.error
+              && settingsOllamaModel.trim() !== ''
+              && !modelList.models.some(m => m.id === settingsOllamaModel.trim()) && !pull?.running && (
+              <div style={{ marginTop: -10, marginBottom: 16 }}>
+                <button
+                  onClick={() => startPull(settingsOllamaModel.trim())}
+                  style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '6px 12px', fontSize: 12, fontFamily: 'inherit', cursor: 'pointer' }}
+                >
+                  Download {settingsOllamaModel.trim()}
+                </button>
+                <span style={{ fontSize: 11, color: '#585b70', marginLeft: 10 }}>
+                  Ollama does not have it yet.
+                </span>
+              </div>
+            )}
+
+            {pull && (pull.running || pull.error) && (
+              <div style={{ fontSize: 11, color: pull.error ? '#f38ba8' : '#a6adc8', background: '#11111b', border: `1px solid ${pull.error ? 'rgba(243,139,168,0.3)' : '#313244'}`, borderRadius: 6, padding: '8px 10px', marginTop: -10, marginBottom: 16, lineHeight: 1.6 }}>
+                {pull.error
+                  ? pull.error
+                  : `Downloading ${pull.model} — ${pull.status}${
+                      pull.total ? ` ${Math.round(((pull.completed ?? 0) / pull.total) * 100)}%` : ''
+                    }`}
+              </div>
+            )}
             {/* An unreachable provider is not a footnote: semantic search is
                 off until it is dealt with, and the message carries the command
                 that deals with it. Styled to be read, with the command in a

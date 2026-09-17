@@ -389,7 +389,18 @@ async function ollamaEmbedOnce(url: string, model: string, input: string): Promi
   if (!res.ok) {
     // Include the body: Ollama's statusText is just "Bad Request", the real
     // cause ("input length exceeds the context length") is in the JSON.
-    const message = `Ollama error (${res.status}): ${(await res.text()).slice(0, 200)}`;
+    const body = (await res.text()).slice(0, 200);
+    // A model that is still downloading answers exactly like one that was
+    // never pulled, and "try pulling it first" reads as a fault when a first
+    // start is doing precisely that in the background.
+    if (res.status === 404 && /not found, try pulling it first/i.test(body)) {
+      throw new Error(
+        `Ollama does not have "${model}" yet. On a first start it downloads in the background — `
+        + 'wait for that to finish and try again. `docker compose exec ollama ollama list` shows '
+        + 'what is ready.'
+      );
+    }
+    const message = `Ollama error (${res.status}): ${body}`;
     if (res.status >= 500) throw new OllamaRetryableError(message);
     throw new Error(message);
   }

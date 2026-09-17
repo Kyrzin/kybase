@@ -1894,6 +1894,10 @@ async function applyRerank(
 ): Promise<{ results: HybridSearchResult[]; reranked: boolean }> {
   const unchanged = { results: fused, reranked: false };
   if (fused.length < 2) return unchanged;
+  // Liveness first: without it an install that never started the reranker
+  // profile would pay a connection timeout on every search to rediscover that
+  // nothing is there. rerankAvailable never awaits a probe of its own.
+  if (!rerankAvailable()) return unchanged;
   const cfg = await rerankConfig();
   if (!cfg) return unchanged;
 

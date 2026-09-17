@@ -4,8 +4,8 @@
 #   docker compose up -d --build
 #
 # The app applies db/migrations/*.sql automatically on startup (tracked in
-# the schema_migrations table), Ollama pulls the embedding model on first
-# start. Everything runs offline after that.
+# the schema_migrations table). Local embeddings are opt-in — see the ollama
+# service below — and everything runs offline once that model is pulled.
 
 services:
   db:
@@ -24,7 +24,15 @@ services:
       timeout: 5s
       retries: 12
 
+  # Local embeddings. Not started by default — bring it up with
+  #   docker compose --profile ollama up -d
+  # on an already-running stack; nothing else is restarted and no note is
+  # touched. Off by default because the image carries NVIDIA and AMD GPU
+  # runtimes whatever the host has, which is ~4 GB somebody using Google or
+  # OpenAI embeddings would never run. Settings says so, and gives the
+  # command, when a provider is selected that needs it.
   ollama:
+    profiles: ["ollama"]
     # Pinned: ':latest' makes fresh installs unreproducible and is a supply
     # chain liability. Bump deliberately.
     image: ollama/ollama:0.24.0
@@ -52,9 +60,10 @@ services:
 
   # Optional cross-encoder reranker. Not started by default — bring it up with
   #   docker compose --profile rerank up -d
-  # and point the app at it with KYBASE_RERANK_URL. Search works without it;
-  # see lib/rerank.ts for what it changes and what it costs (a full model pass
-  # per passage, on CPU measured in hundreds of milliseconds EACH).
+  # and that is the whole setup: the app looks for this service by name and
+  # notices when it answers. Search works without it; see lib/rerank.ts for
+  # what it changes and what it costs (a full model pass per passage, on CPU
+  # measured in hundreds of milliseconds EACH).
   reranker:
     profiles: ["rerank"]
     image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
@@ -67,15 +76,34 @@ services:
     # --auto-truncate: passages longer than the model's window are cut rather
     # than rejected — without it the service answers 413 and reranking is off
     # for exactly the long notes that need reordering most.
+    #
+    # --max-batch-tokens and --tokenization-workers are memory, not throughput.
+    # The defaults (16384 tokens, one worker per core) size the warm-up
+    # allocation for a machine with no limit; inside mem_limit below, on a
+    # host with many cores, the process is killed part-way through warming up
+    # and restarts forever. Kybase sends short passages — the default ten
+    # notes at two passages each is roughly 2500 tokens — so a quarter of that
+    # ceiling is still several times what a request needs.
     command:
       - --model-id
       - ${RERANK_MODEL:-cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
       - --auto-truncate
       - --max-client-batch-size
       - "64"
+      - --max-batch-tokens
+      - "4096"
+      - --tokenization-workers
+      - "4"
+    # Asks the service, rather than asserting it is fine. The previous check
+    # was `exit 0`, which cannot fail: it reported sixty-six consecutive
+    # restarts of a dead process as healthy. start_period covers the model
+    # download and warm-up, which take tens of seconds on a cold cache.
     healthcheck:
-      test: ["CMD-SHELL", "exit 0"]
-      interval: 30s
+      test: ["CMD-SHELL", "curl -fsS http://localhost:80/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
 
   kybase:
     # Prebuilt multi-arch image (amd64/arm64) from GitHub Packages.
@@ -104,9 +132,10 @@ services:
       # size and takes the model's own. Ollama ignores it — its models are
       # whatever width they are, and the schema follows them.
       EMBEDDING_DIM: ${EMBEDDING_DIM:-}
-      # Empty = reranking off, which is the default. Set it to the reranker
-      # service (http://reranker:80) to have a cross-encoder decide the order
-      # of the results rank fusion found.
+      # Only for a reranker somewhere other than the compose service — the
+      # app looks for http://reranker:80 by default and checks whether
+      # anything is answering there, so starting the profile is the whole
+      # setup.
       KYBASE_RERANK_URL: ${KYBASE_RERANK_URL:-}
       KYBASE_RERANK_TOP_N: ${KYBASE_RERANK_TOP_N:-}
       KYBASE_RERANK_PASSAGES_PER_NOTE: ${KYBASE_RERANK_PASSAGES_PER_NOTE:-}

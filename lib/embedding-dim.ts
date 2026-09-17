@@ -19,6 +19,8 @@
 // them from every search.
 import { getPool, queryOne } from './db';
 import { getEmbedding } from './embeddings';
+import { getEmbeddingConfig } from './settings';
+import { unreachableHint } from './provider-models';
 
 /**
  * pgvector's HNSW limit for the `vector` type. A wider model would have to
@@ -135,7 +137,10 @@ export async function reconcileEmbeddingDimension(): Promise<DimensionOutcome> {
   try {
     probed = await probeModelDimension();
   } catch (err) {
-    return { status: 'unknown', reason: err instanceof Error ? err.message : String(err) };
+    // A provider that is simply not started is the expected state, not a
+    // fault — say what to do about it rather than handing back `fetch failed`.
+    const hint = unreachableHint((await getEmbeddingConfig()).provider, err);
+    return { status: 'unknown', reason: hint ?? (err instanceof Error ? err.message : String(err)) };
   }
 
   if (probed === current) return { status: 'ok', dimensions: probed };

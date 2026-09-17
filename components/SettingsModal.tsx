@@ -27,6 +27,68 @@ type OAuthClient = { id: string; client_name: string | null; created_at: string;
 type ShareItem = { id: string; token: string | null; note_id: string; note_title: string; created_at: string; expires_at: string | null };
 type TrashedNote = { id: string; title: string; folder_id: string | null; deleted_at: string };
 
+type McpClient = 'claude-code' | 'claude-desktop' | 'cursor' | 'windsurf';
+type ClientOs = 'mac' | 'windows' | 'linux';
+
+const OS_LABEL: Record<ClientOs, string> = { mac: 'macOS', windows: 'Windows', linux: 'Linux' };
+
+/** The browser runs on the machine the config file has to land on. */
+function detectOs(): ClientOs {
+  if (typeof navigator === 'undefined') return 'mac';
+  const ua = `${(navigator as { userAgentData?: { platform?: string } }).userAgentData?.platform ?? ''} ${navigator.userAgent}`;
+  if (/win/i.test(ua)) return 'windows';
+  if (/mac|iphone|ipad/i.test(ua)) return 'mac';
+  return 'linux';
+}
+
+/** One path, for the reader's own system — listing every platform's is noise. */
+function clientPath(client: McpClient, os: ClientOs): string {
+  const home = os === 'windows' ? '%USERPROFILE%\\' : '~/';
+  switch (client) {
+    case 'claude-code':
+      return '.mcp.json in your project root';
+    case 'claude-desktop':
+      return os === 'windows'
+        ? '%APPDATA%\\Claude\\claude_desktop_config.json'
+        : os === 'mac'
+          ? '~/Library/Application Support/Claude/claude_desktop_config.json'
+          : '~/.config/Claude/claude_desktop_config.json';
+    case 'cursor':
+      return os === 'windows' ? `${home}.cursor\\mcp.json` : `${home}.cursor/mcp.json`;
+    case 'windsurf':
+      return os === 'windows'
+        ? `${home}.codeium\\windsurf\\mcp_config.json`
+        : `${home}.codeium/windsurf/mcp_config.json`;
+  }
+}
+
+/** The address the browser reached this instance on is the one an agent needs. */
+function mcpOrigin(): string {
+  return typeof window === 'undefined' ? 'https://your-domain' : window.location.origin;
+}
+
+function mcpSnippet(client: McpClient): string {
+  const url = `${mcpOrigin()}/api/mcp`;
+  // Windsurf calls the field serverUrl and takes no type; Cursor takes the
+  // url but no type. Getting either wrong fails with a bare connection error.
+  const withType = client === 'claude-code' || client === 'claude-desktop';
+  const inner = client === 'windsurf'
+    ? `      "serverUrl": "${url}",`
+    : `${withType ? '      "type": "http",\n' : ''}      "url": "${url}",`;
+  return [
+    '{',
+    '  "mcpServers": {',
+    '    "kybase": {',
+    inner,
+    '      "headers": {',
+    '        "Authorization": "Bearer <KYBASE_SECRET>"',
+    '      }',
+    '    }',
+    '  }',
+    '}',
+  ].join('\n');
+}
+
 export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders, onShareRevoked }: {
   apiFetch: (path: string, init?: RequestInit) => Promise<Response>;
   onClose: () => void;
@@ -56,7 +118,10 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   const [reindexProgress, setReindexProgress] = useState<ReindexProgress | null>(null);
   const [stopping, setStopping]               = useState(false);
   const [importRunning, setImportRunning]     = useState(false);
-  const [settingsTab, setSettingsTab]         = useState<'embeddings' | 'access'>('embeddings');
+  const [settingsTab, setSettingsTab]         = useState<'embeddings' | 'connect' | 'access'>('embeddings');
+  const [mcpClient, setMcpClient] = useState<McpClient>('claude-code');
+  const [clientOs] = useState<ClientOs>(detectOs);
+  const [mcpCopied, setMcpCopied] = useState(false);
   const [keyStatus, setKeyStatus] = useState<{ google: string; openai: string } | null>(null);
   // null until /api/settings answers — the toggle must not flicker through a
   // guessed state, because it changes how every search behaves.
@@ -381,7 +446,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
             </div>
 
             <div style={{ display: 'flex', gap: 4, borderBottom: '1px solid #313244', marginBottom: 18 }}>
-              {([['embeddings', 'Embeddings'], ['access', `Access (${shares.length + oauthClients.length})`]] as const).map(([tab, label]) => (
+              {([['embeddings', 'Embeddings'], ['connect', 'Connect'], ['access', `Access (${shares.length + oauthClients.length})`]] as const).map(([tab, label]) => (
                 <button
                   key={tab}
                   onClick={() => setSettingsTab(tab)}
@@ -673,6 +738,55 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
               </div>
             </div>
             </>
+            )}
+
+            {settingsTab === 'connect' && (
+            <div style={{ marginBottom: 20 }}>
+              <label style={{ fontSize: 12, color: '#a6adc8', display: 'block', marginBottom: 6 }}>Connect an agent</label>
+              <select
+                value={mcpClient}
+                onChange={e => { setMcpClient(e.target.value as typeof mcpClient); setMcpCopied(false); }}
+                style={{ width: '100%', background: '#11111b', border: '1px solid #313244', borderRadius: 6, color: '#cdd6f4', padding: '8px 10px', fontSize: 13, fontFamily: 'inherit', marginBottom: 8, outline: 'none' }}
+              >
+                <option value="claude-code">Claude Code</option>
+                <option value="claude-desktop">Claude Desktop</option>
+                <option value="cursor">Cursor</option>
+                <option value="windsurf">Windsurf</option>
+              </select>
+              <div style={{ fontSize: 11, color: '#585b70', marginBottom: 6 }}>
+                Put this in{' '}
+                <code style={{ color: '#a6adc8', userSelect: 'all' }}>{clientPath(mcpClient, clientOs)}</code>
+                {/* Only the absolute paths differ per system; a project-relative one does not. */}
+                {mcpClient !== 'claude-code' && ` — ${OS_LABEL[clientOs]}`}
+              </div>
+              <pre style={{ background: '#11111b', border: '1px solid #313244', borderRadius: 6, padding: '10px 12px', fontSize: 11, color: '#cdd6f4', margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: 1.5 }}>
+{mcpSnippet(mcpClient)}
+              </pre>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 8 }}>
+                <button
+                  onClick={() => {
+                    navigator.clipboard?.writeText(mcpSnippet(mcpClient)).then(() => {
+                      setMcpCopied(true);
+                      setTimeout(() => setMcpCopied(false), 2000);
+                    }).catch(() => {});
+                  }}
+                  style={{ background: '#313244', border: '1px solid #45475a', borderRadius: 6, color: '#cdd6f4', padding: '6px 12px', fontSize: 12, fontFamily: 'inherit', cursor: 'pointer' }}
+                >
+                  {mcpCopied ? 'Copied' : 'Copy'}
+                </button>
+                <span style={{ fontSize: 11, color: '#585b70' }}>
+                  {/* The secret is not filled in here on purpose: it is the
+                      key to the whole vault, and a session cookie is a weaker
+                      thing to guard it behind than the secret itself. */}
+                  Replace &lt;KYBASE_SECRET&gt; with the value you logged in with.
+                </span>
+              </div>
+              <div style={{ fontSize: 11, color: '#585b70', marginTop: 8, lineHeight: 1.6 }}>
+                claude.ai needs none of this — add a custom connector pointing at{' '}
+                <code style={{ color: '#a6adc8', userSelect: 'all' }}>{mcpOrigin()}/api/mcp</code> and it registers
+                itself, appearing under Connected clients on the Access tab with a token you can revoke.
+              </div>
+            </div>
             )}
 
             {settingsTab === 'access' && (

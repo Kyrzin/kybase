@@ -123,6 +123,11 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
   const [clientOs] = useState<ClientOs>(detectOs);
   const [mcpCopied, setMcpCopied] = useState(false);
   const [keyStatus, setKeyStatus] = useState<{ google: string; openai: string } | null>(null);
+  // Which stemmers this vault uses, and which this Postgres build offers.
+  const [ftsLanguages, setFtsLanguages] = useState<string[]>([]);
+  /** What the server last confirmed, so a save can tell an edit from a no-op. */
+  const [savedLanguages, setSavedLanguages] = useState<string[]>([]);
+  const [availableLanguages, setAvailableLanguages] = useState<string[]>([]);
   // null until /api/settings answers — the toggle must not flicker through a
   // guessed state, because it changes how every search behaves.
   const [rerank, setRerank] = useState<{ available: boolean; enabled: boolean } | null>(null);
@@ -146,6 +151,9 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
       setKeyStatus({ google: data.googleKeyStatus ?? 'unset', openai: data.openaiKeyStatus ?? 'unset' });
       setRerank({ available: !!data.rerankAvailable, enabled: !!data.rerankEnabled });
       setRerankMinScore(data.rerankMinScore === null || data.rerankMinScore === undefined ? '' : String(data.rerankMinScore));
+      setFtsLanguages(Array.isArray(data.ftsLanguages) ? data.ftsLanguages : []);
+      setSavedLanguages(Array.isArray(data.ftsLanguages) ? data.ftsLanguages : []);
+      setAvailableLanguages(Array.isArray(data.availableLanguages) ? data.availableLanguages : []);
     });
     apiFetch('/api/oauth/clients')
       .then(r => (r.ok ? r.json() : []))
@@ -179,8 +187,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
     return () => { cancelled = true; };
   }, [apiFetch, settingsProvider]);
 
-  // Polled rather than streamed: the download outlives the request that starts
-  // it, same shape as the reindex progress below.
+  // Polled, not streamed — the download outlives the request that starts it.
   useEffect(() => {
     if (!pull?.running) return;
     const id = setInterval(() => {
@@ -365,7 +372,9 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
     setSettingsSaving(true);
     setSettingsStatus(null);
     try {
-      const body: Record<string, string> = { provider: settingsProvider, ollamaModel: settingsOllamaModel };
+      const body: Record<string, string | string[]> = { provider: settingsProvider, ollamaModel: settingsOllamaModel };
+      // Only when it differs: a save carrying it rebuilds every search_vector.
+      if (ftsLanguages.length && ftsLanguages.join(',') !== savedLanguages.join(',')) body.ftsLanguages = ftsLanguages;
       if (settingsGoogleModel) body.googleModel = settingsGoogleModel;
       if (settingsOpenaiModel) body.openaiModel = settingsOpenaiModel;
       // Only for the providers that have a width parameter at all.
@@ -375,6 +384,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
       const res = await apiFetch('/api/settings', { method: 'PUT', body: JSON.stringify(body) });
       const data = await res.json();
       setSettingsFailed(false);
+      setSavedLanguages(ftsLanguages);
       const saved = data.reindexTriggered
         ? `Saved. ${data.pendingCount ?? 0} notes marked for reindex — click "Reindex" below to run it.`
         : 'Settings saved.';
@@ -540,11 +550,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
                     }`}
               </div>
             )}
-            {/* An unreachable provider is not a footnote: semantic search is
-                off until it is dealt with, and the message carries the command
-                that deals with it. Styled to be read, with the command in a
-                box a single click selects whole. Everything else here is a
-                genuine aside and stays muted. */}
+            {/* Loud, not muted: semantic search is off until this is dealt with. */}
             {modelList?.provider === settingsProvider && modelList.error ? (
               <div style={{ fontSize: 12, color: '#f9e2af', background: 'rgba(249,226,175,0.08)', border: '1px solid rgba(249,226,175,0.3)', borderRadius: 6, padding: '10px 12px', marginBottom: 16, marginTop: -10, lineHeight: 1.6 }}>
                 {modelList.error.split('`').map((part, i) => (i % 2 === 1
@@ -619,16 +625,49 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
 
             {rerank && !rerank.available && (
               <div style={{ fontSize: 11, color: '#585b70', background: '#11111b', border: '1px solid #313244', borderRadius: 6, padding: '8px 10px', marginBottom: 16, lineHeight: 1.6 }}>
-                {/* Muted, unlike the provider warning above: an embedding
-                    provider that is down means search is broken, while this is
-                    an optional extra nobody is obliged to run. It is here at
-                    all because the toggle simply did not exist before, which
-                    read as a missing feature rather than a service to start. */}
+                {/* Muted: an optional extra, not a broken install. */}
                 A cross-encoder can reorder results after search has found them. It is not in the
                 default install — another ~1 GB image, and seconds per search on CPU. Start it
                 with{' '}
                 <code style={{ background: '#1e1e2e', border: '1px solid #313244', borderRadius: 4, padding: '1px 5px', color: '#a6adc8', userSelect: 'all' }}>docker compose --profile rerank up -d</code>
                 {' '}and reload this page; a toggle appears here. Measure before trusting it.
+              </div>
+            )}
+
+            {availableLanguages.length > 0 && (
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 12, color: '#a6adc8', display: 'block', marginBottom: 6 }}>
+                  Note languages
+                </label>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+                  {availableLanguages.map(lang => {
+                    const on = ftsLanguages.includes(lang);
+                    return (
+                      <button
+                        key={lang}
+                        onClick={() => setFtsLanguages(prev => (
+                          // Never empty: no stemmer means exact word forms only.
+                          on ? (prev.length > 1 ? prev.filter(l => l !== lang) : prev) : [...prev, lang]
+                        ))}
+                        style={{
+                          background: on ? '#313244' : '#11111b',
+                          border: `1px solid ${on ? '#89b4fa' : '#313244'}`,
+                          borderRadius: 6,
+                          color: on ? '#cdd6f4' : '#6c7086',
+                          padding: '4px 9px', fontSize: 12, fontFamily: 'inherit', cursor: 'pointer',
+                        }}
+                      >
+                        {lang}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize: 11, color: '#6c7086', lineHeight: 1.5 }}>
+                  Keyword search matches word forms — with German on,
+                  &quot;Einrichtung&quot; is found by &quot;einrichten&quot;. Pick the languages your
+                  notes are actually written in; saving rebuilds the text index.
+                  Embeddings are not affected.
+                </div>
               </div>
             )}
 
@@ -775,9 +814,7 @@ export default function SettingsModal({ apiFetch, onClose, setNotes, setFolders,
                   {mcpCopied ? 'Copied' : 'Copy'}
                 </button>
                 <span style={{ fontSize: 11, color: '#585b70' }}>
-                  {/* The secret is not filled in here on purpose: it is the
-                      key to the whole vault, and a session cookie is a weaker
-                      thing to guard it behind than the secret itself. */}
+                  {/* Not filled in: it is the key to the whole vault. */}
                   Replace &lt;KYBASE_SECRET&gt; with the value you logged in with.
                 </span>
               </div>

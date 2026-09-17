@@ -70,8 +70,11 @@ const UpdateSettingsSchema = z.object({
 // stopped sending it (see the session-cookie change): the browser started
 // getting 401s here even though proxy.ts had already let it through.
 export async function GET() {
-  const [cfg, ftsLanguages, tagWeights, folderWeights, embeddingBands, keyHealth, rerankEnabled, rerankMinScore] = await Promise.all([
+  const [cfg, ftsLanguages, tagWeights, folderWeights, embeddingBands, keyHealth, rerankEnabled, rerankMinScore, availableLanguages] = await Promise.all([
     getEmbeddingConfig(), getFtsLanguages(), getTagWeights(), getFolderWeights(), getEmbeddingBands(), getProviderKeyHealth(), getRerankEnabled(), getRerankMinScore(),
+    // Which stemmers exist is a property of this Postgres build. 'simple' is
+    // not a choice — the trigger adds it to every note anyway.
+    query<{ cfgname: string }>("select cfgname from pg_ts_config where cfgname <> 'simple' order by cfgname"),
   ]);
   // Asked for real here, not read from the search path's cache: the dialog is
   // opened rarely and has to be right about what is running this second.
@@ -95,6 +98,7 @@ export async function GET() {
     googleKeyStatus: keyHealth.googleApiKey,
     openaiKeyStatus: keyHealth.openaiApiKey,
     ftsLanguages,
+    availableLanguages: availableLanguages.map((r) => r.cfgname),
     tagWeights,
     folderWeights,
     embeddingBands,

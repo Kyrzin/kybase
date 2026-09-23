@@ -1,0 +1,75 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.Kyrzin/kybase",
+  "title": "Kybase",
+  "description": "Self-hosted Markdown memory for AI agents: notes you can read and edit, with hybrid search.",
+  "websiteUrl": "https://kyrzin.github.io/kybase/",
+  "repository": {
+    "url": "https://github.com/Kyrzin/kybase",
+    "source": "github",
+    "subfolder": "packages/kybase-mcp"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "kybase-mcp",
+      "version": "0.2.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "KYBASE_DATA_DIR",
+          "description": "Where the embedded database and instance secret live. Defaults to ~/.kybase",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "EMBEDDING_PROVIDER",
+          "description": "Embedding provider for semantic search",
+          "isRequired": false,
+          "format": "string",
+          "choices": ["ollama", "google", "openai"],
+          "default": "ollama"
+        },
+        {
+          "name": "OLLAMA_URL",
+          "description": "Ollama endpoint for local embeddings. Without any provider, full-text search still works",
+          "isRequired": false,
+          "format": "string",
+          "placeholder": "http://localhost:11434"
+        },
+        {
+          "name": "OLLAMA_MODEL",
+          "description": "Ollama embedding model",
+          "isRequired": false,
+          "format": "string",
+          "default": "embeddinggemma"
+        },
+        {
+          "name": "GOOGLE_API_KEY",
+          "description": "Google API key, when EMBEDDING_PROVIDER=google. Sends note text to Google",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "OPENAI_API_KEY",
+          "description": "OpenAI API key, when EMBEDDING_PROVIDER=openai. Sends note text to OpenAI",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "DATABASE_URL",
+          "description": "Use an existing Kybase Postgres instead of the embedded one (migrations are left to the app)",
+          "isRequired": false,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

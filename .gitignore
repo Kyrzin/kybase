@@ -33,6 +33,10 @@ packages/*/dist
 packages/kybase-mcp/migrations
 # tarballs from `npm pack`, rebuilt on demand
 packages/*/*.tgz
+# MCPB bundles and their staging directory — produced by build-mcpb.mjs and
+# attached to a GitHub release, never committed
+packages/*/*.mcpb
+packages/*/mcpb-staging
 
 # misc
 .DS_Store

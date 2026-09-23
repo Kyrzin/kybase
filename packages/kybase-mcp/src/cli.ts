@@ -37,6 +37,23 @@ const note = (msg: string) => process.stderr.write(`[kybase-mcp] ${msg}\n`);
 console.log = (...args: unknown[]) => note(args.map(String).join(' '));
 console.info = console.log;
 
+// Hosts that build the environment from a settings form — an MCPB bundle's
+// user_config, a registry-driven installer — hand an optional field the user
+// left blank over as an empty string, and some pass the unfilled placeholder
+// through verbatim. The library reads these with `??`, so either would win
+// over the default: an empty OLLAMA_URL is not "no Ollama", it is an invalid
+// URL, and an empty EMBEDDING_PROVIDER is an unknown provider. Unset is what
+// the user meant, so that is what the rest of the process sees.
+for (const key of [
+  'KYBASE_DATA_DIR', 'KYBASE_SECRET', 'DATABASE_URL', 'EMBEDDING_PROVIDER',
+  'OLLAMA_URL', 'OLLAMA_MODEL', 'GOOGLE_API_KEY', 'OPENAI_API_KEY',
+]) {
+  const value = process.env[key];
+  if (value !== undefined && (value.trim() === '' || value.includes('${user_config.'))) {
+    delete process.env[key];
+  }
+}
+
 function resolveDataDir(): string {
   return process.env.KYBASE_DATA_DIR || path.join(os.homedir(), '.kybase');
 }

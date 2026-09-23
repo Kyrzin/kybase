@@ -1,6 +1,7 @@
 {
   "name": "kybase-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
+  "mcpName": "io.github.Kyrzin/kybase",
   "description": "Persistent markdown memory for AI agents over MCP. Runs standalone with an embedded Postgres — no Docker, no server.",
   "license": "AGPL-3.0-only",
   "type": "module",
@@ -32,7 +33,8 @@
   "homepage": "https://github.com/Kyrzin/kybase",
   "scripts": {
     "build": "node build.mjs",
-    "prepare": "node build.mjs"
+    "prepare": "node build.mjs",
+    "build:mcpb": "node build-mcpb.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.28.1"

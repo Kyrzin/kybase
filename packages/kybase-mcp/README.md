@@ -40,6 +40,13 @@ Windows: `%APPDATA%\Claude\claude_desktop_config.json`).
 Restart the client and ask it to remember something. It gets 18 tools for
 reading, searching, writing, and linking notes.
 
+**Claude Desktop, one click** — download `kybase-mcp-<version>.mcpb` from
+[Releases](https://github.com/Kyrzin/kybase/releases) and open it; the
+data folder and embedding provider are set in the extension's settings.
+
+The server is listed in the official MCP Registry as
+`io.github.Kyrzin/kybase`.
+
 ## Search
 
 Full-text search works immediately, in English and Russian, accent- and
@@ -117,8 +124,9 @@ embedded database is a full Postgres, and it lives inside it. Pointing
 `DATABASE_URL` at a Postgres you already run avoids that entirely.
 
 Note content is plain Markdown and every note is readable through the MCP
-tools, so an agent can always read the whole vault back out. The `.zip`
-Markdown export lives in the full app's web UI, not in this package.
+tools, so an agent can always read the whole vault back out, and
+`kybase-mcp export` writes it out as files — see
+[Reading your notes](#reading-your-notes).
 
 ## License
 

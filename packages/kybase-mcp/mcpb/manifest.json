@@ -1,0 +1,107 @@
+{
+  "manifest_version": "0.3",
+  "name": "kybase",
+  "display_name": "Kybase",
+  "version": "0.0.0",
+  "description": "Persistent Markdown memory for AI agents: notes you can read and edit, with hybrid search.",
+  "long_description": "Kybase gives your agent a long-term memory you own: a Markdown knowledge base with [[wikilinks]], searched by keyword and by meaning. Notes live in an embedded Postgres on your machine (no Docker, no server) and leave it only if you pick a cloud embedding provider. `kybase-mcp export vault.zip` writes them out as plain Markdown; the full Kybase app adds a web editor, a graph view and access for several agents at once.",
+  "author": {
+    "name": "Denis Kurzin",
+    "url": "https://github.com/Kyrzin"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kyrzin/kybase"
+  },
+  "homepage": "https://kyrzin.github.io/kybase/",
+  "documentation": "https://github.com/Kyrzin/kybase/tree/main/packages/kybase-mcp",
+  "support": "https://github.com/Kyrzin/kybase/issues",
+  "license": "AGPL-3.0-only",
+  "keywords": ["memory", "knowledge-base", "markdown", "notes", "semantic-search", "pgvector"],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/cli.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/cli.js"],
+      "env": {
+        "KYBASE_DATA_DIR": "${user_config.data_dir}",
+        "EMBEDDING_PROVIDER": "${user_config.embedding_provider}",
+        "OLLAMA_URL": "${user_config.ollama_url}",
+        "OLLAMA_MODEL": "${user_config.ollama_model}",
+        "GOOGLE_API_KEY": "${user_config.google_api_key}",
+        "OPENAI_API_KEY": "${user_config.openai_api_key}"
+      }
+    }
+  },
+  "user_config": {
+    "data_dir": {
+      "type": "string",
+      "title": "Data folder",
+      "description": "Where the knowledge base lives. Created on first start.",
+      "default": "${HOME}/.kybase",
+      "required": false
+    },
+    "embedding_provider": {
+      "type": "string",
+      "title": "Embedding provider",
+      "description": "ollama (local), google or openai. Needed for search by meaning; keyword search works without it.",
+      "default": "ollama",
+      "required": false
+    },
+    "ollama_url": {
+      "type": "string",
+      "title": "Ollama URL",
+      "description": "Local Ollama endpoint. Run `ollama pull embeddinggemma` once.",
+      "default": "http://localhost:11434",
+      "required": false
+    },
+    "ollama_model": {
+      "type": "string",
+      "title": "Ollama model",
+      "description": "Embedding model served by Ollama.",
+      "default": "embeddinggemma",
+      "required": false
+    },
+    "google_api_key": {
+      "type": "string",
+      "title": "Google API key",
+      "description": "Only with provider google. Sends note text to Google to compute embeddings.",
+      "sensitive": true,
+      "required": false
+    },
+    "openai_api_key": {
+      "type": "string",
+      "title": "OpenAI API key",
+      "description": "Only with provider openai. Sends note text to OpenAI to compute embeddings.",
+      "sensitive": true,
+      "required": false
+    }
+  },
+  "tools": [
+    { "name": "search_notes", "description": "Hybrid keyword + meaning search that returns ranked excerpts and the section each came from" },
+    { "name": "get_note", "description": "Read a note by id or title, whole, windowed or one section" },
+    { "name": "list_notes", "description": "List notes newest first, filtered by folder, tag or date" },
+    { "name": "create_note", "description": "Create a Markdown note" },
+    { "name": "update_note", "description": "Update a note, refusing to overwrite a change made in between" },
+    { "name": "append_to_note", "description": "Add text to a note or one of its sections without resending the rest" },
+    { "name": "replace_in_note", "description": "Replace exact text in a note, one edit or a batch" },
+    { "name": "delete_note", "description": "Move a note to the trash" },
+    { "name": "restore_note", "description": "Bring a note back from the trash" },
+    { "name": "list_tags", "description": "Tags in use, most-used first" },
+    { "name": "list_folders", "description": "Folders with their full paths" },
+    { "name": "create_folder", "description": "Create a folder" },
+    { "name": "update_folder", "description": "Rename or move a folder" },
+    { "name": "delete_folder", "description": "Delete a folder; its notes go to the trash" },
+    { "name": "get_backlinks", "description": "Notes that link to a note" },
+    { "name": "get_neighbors", "description": "Notes around one note in the wikilink graph" },
+    { "name": "get_graph", "description": "Notes and the links between them, scoped to a folder or a note" },
+    { "name": "indexing_status", "description": "Progress of the semantic index" }
+  ],
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  }
+}

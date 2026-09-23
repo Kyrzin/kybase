@@ -37,6 +37,9 @@ Windows: `%APPDATA%\Claude\claude_desktop_config.json`).
 
 **Cursor** — the same block in `.cursor/mcp.json` or `~/.cursor/mcp.json`.
 
+Several clients on one machine can use it at once: the first process to
+start owns the database, and the others connect to that process.
+
 Restart the client and ask it to remember something. It gets 18 tools for
 reading, searching, writing, and linking notes.
 

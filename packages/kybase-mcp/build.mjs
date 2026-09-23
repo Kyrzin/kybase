@@ -1,5 +1,6 @@
 // packages/kybase-mcp/build.mjs — bundles src/cli.ts together with the lib/
-// modules it reaches, and copies the migrations the package has to ship.
+// modules it reaches, and copies the migrations and the license text the
+// package has to ship.
 //
 // Only first-party code is bundled. Everything in dependencies stays
 // external: pg and the MCP SDK because they resolve fine on their own, and
@@ -23,6 +24,8 @@ const sql = fs.readdirSync(migrationsIn).filter((f) => f.endsWith('.sql'));
 for (const file of sql) {
   fs.copyFileSync(path.join(migrationsIn, file), path.join(migrationsOut, file));
 }
+
+fs.copyFileSync(path.join(repoRoot, 'LICENSE'), path.join(here, 'LICENSE'));
 
 await build({
   entryPoints: [path.join(here, 'src', 'cli.ts')],

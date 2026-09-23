@@ -26,11 +26,12 @@ docs/search-baseline.md
 # production
 /build
 
-# packages/kybase-mcp build output — both are produced by its build.mjs
-# (the bundle, and a copy of db/migrations), so committing them would only
-# create a second copy that can drift from the source.
+# packages/kybase-mcp build output — all produced by its build.mjs (the
+# bundle, and copies of db/migrations and LICENSE), so committing them would
+# only create a second copy that can drift from the source.
 packages/*/dist
 packages/kybase-mcp/migrations
+packages/kybase-mcp/LICENSE
 # tarballs from `npm pack`, rebuilt on demand
 packages/*/*.tgz
 # MCPB bundles and their staging directory — produced by build-mcpb.mjs and

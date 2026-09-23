@@ -8,7 +8,8 @@
 //
 //   unset — an embedded Postgres (PGlite, WASM) stored under ~/.kybase.
 //           Nothing to install: pgvector, unaccent and the full-text
-//           configurations all come with it. This is the default.
+//           configurations all come with it. This is the default. One
+//           process owns it; others on the same folder connect to that one.
 //   set   — talk to an existing Kybase database instead. The app owns that
 //           schema, so migrations are NOT run in this mode; letting a
 //           package version apply migrations the running app does not know
@@ -54,6 +55,14 @@ for (const key of [
   }
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Shutdown must finish even when a step hangs: the socket server's close
+// waits for connections that arrive while it is stopping, which may be never.
+async function atMost(work: Promise<unknown>, ms: number): Promise<void> {
+  await Promise.race([work.catch(() => {}), new Promise((resolve) => setTimeout(resolve, ms).unref())]);
+}
+
 function resolveDataDir(): string {
   return process.env.KYBASE_DATA_DIR || path.join(os.homedir(), '.kybase');
 }
@@ -97,7 +106,29 @@ function freeLoopbackPort(): Promise<number> {
   });
 }
 
-async function startEmbeddedDatabase(dir: string): Promise<() => Promise<void>> {
+// The kernel caps a unix socket path at 108 bytes on Linux and 104 on macOS.
+const SOCKET_PATH_LIMIT = 100;
+
+// Every process sharing the database brings its own pg pool of up to 10.
+const MAX_CONNECTIONS = 100;
+
+type Address = { socket: string } | { port: number };
+
+function databaseUrl(address: Address): string {
+  // The user is spelled out: without one, node-postgres takes it from $USER,
+  // which a host that starts servers with a bare environment leaves unset.
+  return 'port' in address
+    ? `postgresql://postgres:postgres@127.0.0.1:${address.port}/postgres`
+    : `postgresql://postgres@/postgres?host=${encodeURIComponent(path.dirname(address.socket))}`;
+}
+
+function connectTo(address: Address): net.Socket {
+  return 'port' in address
+    ? net.connect({ host: '127.0.0.1', port: address.port })
+    : net.connect({ path: address.socket });
+}
+
+async function startEmbeddedDatabase(dir: string): Promise<{ address: Address; stop: () => Promise<void> }> {
   const { PGlite } = await import('@electric-sql/pglite');
   const { vector } = await import('@electric-sql/pglite-pgvector');
   const { unaccent } = await import('@electric-sql/pglite/contrib/unaccent');
@@ -107,64 +138,289 @@ async function startEmbeddedDatabase(dir: string): Promise<() => Promise<void>> 
   const dataDir = path.join(dir, 'pgdata');
   const db = await PGlite.create({ dataDir, extensions: { vector, unaccent, moddatetime } });
 
+  // node-postgres derives the socket filename from the port, so the name
+  // is fixed and the directory is what varies.
+  const socket = path.join(dir, 'run', '.s.PGSQL.5432');
+  const tooLong = Buffer.byteLength(socket) > SOCKET_PATH_LIMIT;
+  if (tooLong) note(`${socket} is too long for a unix socket, so the database listens on a loopback port`);
+
   // KYBASE_EMBEDDED_TCP forces the loopback path on Unix too — for a data
   // directory on a filesystem that cannot host a socket (some network
   // mounts), and so this branch is testable off Windows.
-  const useLoopback = process.platform === 'win32' || process.env.KYBASE_EMBEDDED_TCP === '1';
+  const useLoopback = process.platform === 'win32' || process.env.KYBASE_EMBEDDED_TCP === '1' || tooLong;
 
   let server: InstanceType<typeof PGLiteSocketServer>;
+  let address: Address;
   if (useLoopback) {
     const port = await freeLoopbackPort();
-    server = new PGLiteSocketServer({ db, host: '127.0.0.1', port, maxConnections: 10 });
+    server = new PGLiteSocketServer({ db, host: '127.0.0.1', port, maxConnections: MAX_CONNECTIONS });
     await server.start();
-    process.env.DATABASE_URL = `postgresql://postgres:postgres@127.0.0.1:${port}/postgres`;
+    address = { port };
   } else {
-    const runDir = path.join(dir, 'run');
-    fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
-    // node-postgres derives the socket filename from the port, so the name
-    // is fixed and the directory is what varies.
-    const socket = path.join(runDir, '.s.PGSQL.5432');
+    fs.mkdirSync(path.dirname(socket), { recursive: true, mode: 0o700 });
+    // Only the lock holder gets here, so a socket file already in place was
+    // left by a process that is gone.
     if (fs.existsSync(socket)) fs.rmSync(socket, { force: true });
-    server = new PGLiteSocketServer({ db, path: socket, maxConnections: 10 });
+    server = new PGLiteSocketServer({ db, path: socket, maxConnections: MAX_CONNECTIONS });
     await server.start();
-    process.env.DATABASE_URL = `postgresql:///postgres?host=${encodeURIComponent(runDir)}`;
+    address = { socket };
   }
 
+  process.env.DATABASE_URL = databaseUrl(address);
   note(`embedded database ready at ${dataDir}`);
 
-  return async () => {
-    try { await server.stop(); } catch { /* shutting down anyway */ }
-    try { await db.close(); } catch { /* shutting down anyway */ }
+  return {
+    address,
+    stop: async () => {
+      await atMost(server.stop(), 2_000);
+      await atMost(db.close(), 5_000);
+    },
   };
 }
 
-type OpenDatabase = { external: boolean; firstRun: boolean; shutdown: () => Promise<void> };
+// Two processes opening one pgdata corrupt it, and PGlite's files carry no
+// lock of their own. lock.json names the process that owns the folder; any
+// other started on it connects to that owner's server instead, once the
+// owner has written its address there.
+type Lock = { pid: number; startedAt: string; socket?: string; port?: number };
+
+const OWNER_WAIT_MS = 20_000;
+
+function readText(file: string): string | null {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function parseLock(text: string | null): Lock | null {
+  try {
+    const lock = text ? JSON.parse(text) : null;
+    return lock && typeof lock.pid === 'number' ? lock : null;
+  } catch {
+    return null;
+  }
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+function lockAddress(lock: Lock): Address | null {
+  if (typeof lock.socket === 'string') return { socket: lock.socket };
+  if (typeof lock.port === 'number') return { port: lock.port };
+  return null;
+}
+
+// Opens the way every Postgres client does, with an SSLRequest. The owner's
+// server answers with one byte; whatever else may hold the address by now,
+// such as a port reused after a crash, does not.
+function answers(address: Address): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = connectTo(address);
+    const done = (ok: boolean) => {
+      probe.destroy();
+      resolve(ok);
+    };
+    probe.setTimeout(2_000, () => done(false));
+    probe.once('error', () => done(false));
+    probe.once('close', () => done(false));
+    probe.once('connect', () => {
+      const sslRequest = Buffer.alloc(8);
+      sslRequest.writeInt32BE(8, 0);
+      sslRequest.writeInt32BE(80877103, 4);
+      probe.write(sslRequest);
+    });
+    probe.once('data', (reply) => done(reply[0] === 0x4e || reply[0] === 0x53));
+  });
+}
+
+/**
+ * Deletes a lock left by a dead process, but only while it still holds
+ * exactly the text judged stale, checked under a guard file. Without the
+ * guard, two newcomers could both delete it, the second removing the fresh
+ * lock the first had just taken, and both would open the database.
+ */
+function clearStaleLock(file: string, stale: string): void {
+  const guard = `${file}.takeover`;
+  let fd: number;
+  try {
+    fd = fs.openSync(guard, 'wx');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    // A guard this old belongs to a process that died holding it.
+    const age = Date.now() - (fs.statSync(guard, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
+    if (age > 10_000) fs.rmSync(guard, { force: true });
+    return;
+  }
+  try {
+    if (readText(file) === stale) fs.rmSync(file, { force: true });
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(guard, { force: true });
+  }
+}
+
+type Claim =
+  | { owner: true; file: string; lock: Lock }
+  | { owner: false; pid: number; address: Address };
+
+async function claimDatabase(dir: string): Promise<Claim> {
+  const file = path.join(dir, 'lock.json');
+  const deadline = Date.now() + OWNER_WAIT_MS;
+  for (;;) {
+    const mine: Lock = { pid: process.pid, startedAt: new Date().toISOString() };
+    try {
+      const fd = fs.openSync(file, 'wx', 0o600);
+      try {
+        fs.writeSync(fd, JSON.stringify(mine));
+      } finally {
+        fs.closeSync(fd);
+      }
+      return { owner: true, file, lock: mine };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+
+    const text = readText(file);
+    const lock = parseLock(text);
+    let waitingFor = 'is being released';
+    if (lock) {
+      const address = lockAddress(lock);
+      // A server answering at the published address is the owner, however its
+      // pid looks from here: one in another PID namespace (a container sharing
+      // this folder) can read as dead while it runs.
+      if (address && (await answers(address))) return { owner: false, pid: lock.pid, address };
+      if (lock.pid === process.pid || !pidAlive(lock.pid)) {
+        note(`${file} was left by process ${lock.pid}, which is gone; taking over`);
+        clearStaleLock(file, text as string);
+      } else {
+        waitingFor = address
+          ? `is held by process ${lock.pid}, whose database does not answer; if no kybase-mcp is running, delete it`
+          : `is held by process ${lock.pid}, which has not finished opening the database`;
+      }
+    } else if (text !== null) {
+      // Created but never written: its process died in between.
+      const age = Date.now() - (fs.statSync(file, { throwIfNoEntry: false })?.mtimeMs ?? Date.now());
+      if (age > 5_000) clearStaleLock(file, text);
+    }
+
+    if (Date.now() > deadline) throw new Error(`${file} ${waitingFor}`);
+    await sleep(200);
+  }
+}
+
+async function publishLock(file: string, lock: Lock): Promise<void> {
+  // Replaced by rename, so a reader never sees half a file. Windows refuses
+  // the rename for the instant another process has the file open to read it.
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(lock), { mode: 0o600 });
+  for (let attempt = 1; ; attempt++) {
+    try {
+      fs.renameSync(tmp, file);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (attempt >= 20 || !['EPERM', 'EBUSY', 'EACCES'].includes(code ?? '')) throw err;
+      await sleep(50);
+    }
+  }
+}
+
+/**
+ * Keeps one idle connection to the owner's server. The owner closes it when
+ * it stops and the kernel does if it dies; either way this process has lost
+ * its database, and says so instead of failing every call that follows.
+ */
+function watchOwner(address: Address, pid: number): () => void {
+  let stopped = false;
+  let current: net.Socket | undefined;
+  const attach = () => {
+    const socket = connectTo(address);
+    let connected = false;
+    socket.unref();
+    socket.on('connect', () => { connected = true; });
+    socket.on('error', () => { /* 'close' follows and decides */ });
+    socket.on('close', () => {
+      if (stopped) return;
+      // A connection that was up gets one reconnect before the owner is
+      // declared gone.
+      if (connected) {
+        setTimeout(attach, 500).unref();
+        return;
+      }
+      note(`lost the database: process ${pid}, which owned it, has stopped. Restart this server to open it again.`);
+      process.exit(1);
+    });
+    current = socket;
+  };
+  attach();
+  return () => {
+    stopped = true;
+    current?.destroy();
+  };
+}
+
+type OpenDatabase = {
+  role: 'owner' | 'client' | 'external';
+  firstRun: boolean;
+  shutdown: () => Promise<void>;
+};
 
 async function openDatabase(): Promise<OpenDatabase> {
-  const external = Boolean(process.env.DATABASE_URL);
-  let shutdown: () => Promise<void> = async () => {};
-  let firstRun = false;
-
-  if (external) {
+  if (process.env.DATABASE_URL) {
     note('using DATABASE_URL; leaving schema migrations to the app that owns it');
-  } else {
-    const dir = resolveDataDir();
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const secret = ensureSecret(dir);
-    process.env.KYBASE_SECRET = secret.secret;
-    firstRun = secret.firstRun;
-    shutdown = await startEmbeddedDatabase(dir);
+    return { role: 'external', firstRun: false, shutdown: async () => {} };
   }
+
+  const dir = resolveDataDir();
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const claim = await claimDatabase(dir);
+
+  if (!claim.owner) {
+    process.env.KYBASE_SECRET = ensureSecret(dir).secret;
+    process.env.DATABASE_URL = databaseUrl(claim.address);
+    note(`the database in ${dir} is open in process ${claim.pid}; connecting to it`);
+    const unwatch = watchOwner(claim.address, claim.pid);
+    return { role: 'client', firstRun: false, shutdown: async () => unwatch() };
+  }
+
+  const release = () => {
+    try {
+      if (parseLock(readText(claim.file))?.pid === process.pid) fs.rmSync(claim.file, { force: true });
+    } catch {
+      // Best effort: a lock left behind is taken over by the next start.
+    }
+  };
+  process.on('exit', release);
+
+  const secret = ensureSecret(dir);
+  process.env.KYBASE_SECRET = secret.secret;
+  const database = await startEmbeddedDatabase(dir);
 
   if (!process.env.KYBASE_MIGRATIONS_DIR) {
     process.env.KYBASE_MIGRATIONS_DIR = path.join(here, '..', 'migrations');
   }
-  if (!external) {
-    const { runMigrations } = await import('../../../lib/migrate');
-    await runMigrations();
-  }
+  const { runMigrations } = await import('../../../lib/migrate');
+  await runMigrations();
 
-  return { external, firstRun, shutdown };
+  // Only now, so a process that connects never meets a half-migrated schema.
+  await publishLock(claim.file, { ...claim.lock, ...database.address });
+
+  return {
+    role: 'owner',
+    firstRun: secret.firstRun,
+    shutdown: async () => {
+      await database.stop();
+      release();
+    },
+  };
 }
 
 /**
@@ -222,6 +478,16 @@ async function serve(): Promise<void> {
   await createMcpServer().connect(new StdioServerTransport());
   note('ready');
 
+  // Reindexing and trash purges run where the database lives: in its owner,
+  // not in processes connected to it, and not against an app's DATABASE_URL.
+  let upkeep: Promise<void> = Promise.resolve();
+  if (db.role === 'owner') {
+    const { startMaintenance } = await import('../../../lib/startup');
+    upkeep = startMaintenance().catch((err) => {
+      note(`background upkeep did not start: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  }
+
   if (db.firstRun) {
     // Otherwise nobody discovers that these notes are readable at all: the
     // embedded database is not a folder of .md files, and the UI that makes
@@ -230,9 +496,24 @@ async function serve(): Promise<void> {
     note('to read and edit them in a browser, with the graph and sharing: https://github.com/Kyrzin/kybase');
   }
 
-  const stop = async () => { await db.shutdown(); process.exit(0); };
+  let stopping = false;
+  const stop = async () => {
+    if (stopping) return;
+    stopping = true;
+    // Queries already running finish; no new connection reaches the server
+    // while it stops.
+    await atMost(upkeep, 3_000);
+    const { getPool } = await import('../../../lib/db');
+    await atMost(getPool().end(), 3_000);
+    await db.shutdown();
+    // Exit once whatever is already queued for stdout has been written.
+    process.stdout.write('', () => process.exit(0));
+    setTimeout(() => process.exit(0), 1_000).unref();
+  };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+  // Closing stdin is how an MCP client stops a stdio server.
+  process.stdin.on('end', stop);
 }
 
 async function main() {

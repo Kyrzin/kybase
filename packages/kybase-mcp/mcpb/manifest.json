@@ -78,26 +78,7 @@
       "required": false
     }
   },
-  "tools": [
-    { "name": "search_notes", "description": "Hybrid keyword + meaning search that returns ranked excerpts and the section each came from" },
-    { "name": "get_note", "description": "Read a note by id or title, whole, windowed or one section" },
-    { "name": "list_notes", "description": "List notes newest first, filtered by folder, tag or date" },
-    { "name": "create_note", "description": "Create a Markdown note" },
-    { "name": "update_note", "description": "Update a note, refusing to overwrite a change made in between" },
-    { "name": "append_to_note", "description": "Add text to a note or one of its sections without resending the rest" },
-    { "name": "replace_in_note", "description": "Replace exact text in a note, one edit or a batch" },
-    { "name": "delete_note", "description": "Move a note to the trash" },
-    { "name": "restore_note", "description": "Bring a note back from the trash" },
-    { "name": "list_tags", "description": "Tags in use, most-used first" },
-    { "name": "list_folders", "description": "Folders with their full paths" },
-    { "name": "create_folder", "description": "Create a folder" },
-    { "name": "update_folder", "description": "Rename or move a folder" },
-    { "name": "delete_folder", "description": "Delete a folder; its notes go to the trash" },
-    { "name": "get_backlinks", "description": "Notes that link to a note" },
-    { "name": "get_neighbors", "description": "Notes around one note in the wikilink graph" },
-    { "name": "get_graph", "description": "Notes and the links between them, scoped to a folder or a note" },
-    { "name": "indexing_status", "description": "Progress of the semantic index" }
-  ],
+  "tools_generated": true,
   "compatibility": {
     "platforms": ["darwin", "win32", "linux"],
     "runtimes": {

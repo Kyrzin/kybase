@@ -1,6 +1,6 @@
 {
   "name": "kybase-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "mcpName": "io.github.Kyrzin/kybase",
   "description": "Persistent markdown memory for AI agents over MCP. Runs standalone with an embedded Postgres — no Docker, no server.",
   "license": "AGPL-3.0-only",
@@ -11,7 +11,8 @@
   "files": [
     "dist",
     "migrations",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"

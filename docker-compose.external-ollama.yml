@@ -1,0 +1,17 @@
+# Use an Ollama you already run (e.g. a GPU instance on the host) instead of
+# the bundled CPU container — avoids a duplicate service and a second copy of
+# the embedding model.
+#
+#   1. In .env set OLLAMA_URL to your instance, e.g.
+#        OLLAMA_URL=http://host.docker.internal:11434   # Ollama on the Docker host
+#      and make sure the model in OLLAMA_MODEL is pulled there:
+#        ollama pull embeddinggemma
+#   2. Start with both files:
+#        docker compose -f docker-compose.yml -f docker-compose.external-ollama.yml up -d
+#
+# The profile below parks the bundled `ollama` service under an inactive
+# profile, so it is not started (the app never depends on it directly — it
+# talks to whatever OLLAMA_URL points at).
+services:
+  ollama:
+    profiles: ["bundled-ollama-disabled"]

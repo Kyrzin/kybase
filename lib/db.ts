@@ -1,0 +1,188 @@
+// lib/db.ts — server-side only Postgres pool
+// NEVER import from client components (no 'use client' files)
+import { Pool } from 'pg';
+
+// Lazy: created on first query, so `next build` needs no DATABASE_URL.
+let pool: Pool | undefined;
+
+// Both were unset (0 = no timeout) — a runaway query or a transaction left
+// open by a crashed request would otherwise hold its connection forever,
+// eventually exhausting the pool. pg applies these via `SET` on each new
+// connection, so they don't require touching DATABASE_URL / query strings.
+const STATEMENT_TIMEOUT_MS = 30_000;
+const IDLE_IN_TRANSACTION_TIMEOUT_MS = 30_000;
+
+export function getPool(): Pool {
+  if (!pool) {
+    const connectionString = process.env.DATABASE_URL;
+    if (!connectionString) throw new Error('DATABASE_URL env var is missing');
+    pool = new Pool({
+      connectionString,
+      statement_timeout: STATEMENT_TIMEOUT_MS,
+      idle_in_transaction_session_timeout: IDLE_IN_TRANSACTION_TIMEOUT_MS,
+    });
+    // node-postgres's own documented gotcha: an idle client whose connection
+    // dies underneath it (Postgres restarted, a DBA/pg_terminate_backend
+    // killed the backend, a network blip) emits 'error' on the Pool as a
+    // plain EventEmitter event, not a rejected query promise anywhere. With
+    // no listener, Node's default EventEmitter behavior for an unhandled
+    // 'error' event is to throw — crashing the whole process on a transient
+    // connection issue that every other client in the pool would have
+    // survived. It surfaces as an uncaught "Connection terminated
+    // unexpectedly" exception, which is why the listener below exists even
+    // though it only logs.
+    pool.on('error', (err) => {
+      console.error('[db] idle client error (connection likely dropped by the server):', err instanceof Error ? err.message : err);
+    });
+  }
+  return pool;
+}
+
+/** Run a parameterized query and return the rows. */
+export async function query<T = Record<string, unknown>>(
+  text: string,
+  params: unknown[] = []
+): Promise<T[]> {
+  const { rows } = await getPool().query(text, params);
+  return rows as T[];
+}
+
+/** Like query(), but returns the single row or null. */
+export async function queryOne<T = Record<string, unknown>>(
+  text: string,
+  params: unknown[] = []
+): Promise<T | null> {
+  const rows = await query<T>(text, params);
+  return rows[0] ?? null;
+}
+
+/**
+ * Who a write is attributed to in note history (migration 032): `actor` is
+ * recorded as changed_by / created_by, `kind` replaces 'edit' as the kind of
+ * a content change (a revert). Both reach the notes triggers as
+ * transaction-local settings, so they end with the transaction and never
+ * carry over to the next user of a pooled connection.
+ */
+export type WriteAttribution = { actor?: string; kind?: string };
+
+/**
+ * Run `fn` inside a single transaction; rolls back on any throw.
+ * Multi-statement invariants (e.g. rename + backlink rewrite) must go
+ * through this — two pool queries can interleave or half-fail.
+ * Anything that writes to notes passes an attribution.
+ */
+export async function withTransaction<T>(
+  fn: (client: import('pg').PoolClient) => Promise<T>,
+  attribution: WriteAttribution = {}
+): Promise<T> {
+  const client = await getPool().connect();
+  try {
+    await client.query('begin');
+    if (attribution.actor || attribution.kind) {
+      await client.query(
+        "select set_config('kybase.actor', $1, true), set_config('kybase.change_kind', $2, true)",
+        [attribution.actor ?? '', attribution.kind ?? '']
+      );
+    }
+    const result = await fn(client);
+    await client.query('commit');
+    return result;
+  } catch (err) {
+    await client.query('rollback');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * queryOne() for a single write to notes: its own one-statement transaction,
+ * so the actor that note history records lives exactly as long as the write.
+ */
+export async function queryOneAs<T = Record<string, unknown>>(
+  actor: string,
+  text: string,
+  params: unknown[] = []
+): Promise<T | null> {
+  return withTransaction(async (client) => {
+    const { rows } = await client.query(text, params);
+    return (rows[0] as T | undefined) ?? null;
+  }, { actor });
+}
+
+/**
+ * Advisory-lock key serializing folder reparenting (REST and MCP alike).
+ * The cycle check (walk ancestors of the proposed parent) and the write that
+ * acts on it are two separate statements — without a shared lock, two
+ * concurrent moves (e.g. A into B and B into A at the same time) can each
+ * read a cycle-free tree and both commit, producing a real A -> B -> A cycle
+ * that no single request's check caught. Take with
+ * `select pg_advisory_xact_lock($1)` inside the same transaction as the
+ * check + write; it releases automatically on commit or rollback.
+ */
+export const FOLDER_REPARENT_LOCK_KEY = 0x666f6c64; // 'fold'
+
+/**
+ * Advisory-lock key admitting one bulk reindex at a time (lib/reindex.ts).
+ * Three callers can otherwise overlap on the same notes — the Settings
+ * buttons, a second click after the page was reloaded mid-run, and the
+ * hourly sweep in instrumentation.ts — each paying the provider's metered
+ * quota for work another one is already doing.
+ *
+ * Session-scoped (`pg_try_advisory_lock` on a dedicated client, released in
+ * a finally), not xact-scoped like the key above: a bulk run is hundreds of
+ * provider round trips long, far too much to hold a transaction open for.
+ * Chosen over an in-process flag because that flag dies with the process —
+ * a container restart mid-run would let the next caller start a second run
+ * over the same notes with no memory of the first.
+ *
+ * Shares the single-key advisory space with the hashtext() per-note keys in
+ * lib/indexing.ts (as FOLDER_REPARENT_LOCK_KEY already does): a collision is
+ * possible in principle and costs one spurious "already running", never a
+ * lost update.
+ */
+export const REINDEX_LOCK_KEY = 0x7265696e; // 'rein'
+
+/**
+ * Advisory-lock key admitting one link-index refresh at a time
+ * (lib/note-links.ts).
+ *
+ * The refresh reads the stale set, then per note deletes its rows and
+ * re-inserts them. Two callers that read the same stale set both delete and
+ * both insert, and the second one dies on note_links_pkey — which surfaces to
+ * a caller as a tool call that simply failed. Parallel tool calls are the
+ * normal way an agent works, so "get_graph and get_backlinks at once" was
+ * enough to trigger it whenever the index had drifted.
+ *
+ * Xact-scoped like FOLDER_REPARENT_LOCK_KEY, not session-scoped like the
+ * reindex above: this is a parse over already-loaded rows, short enough to
+ * hold a transaction for, and releasing on rollback is exactly what should
+ * happen if it fails. The stale set is re-read inside the lock, so the caller
+ * that waited does the work the first one did not, rather than repeating it.
+ */
+export const LINK_INDEX_LOCK_KEY = 0x6c696e6b; // 'link'
+
+/** True when the error is a Postgres unique-constraint violation. */
+export function isUniqueViolation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: string }).code === '23505';
+}
+
+/**
+ * True for a malformed literal — most often an id that is not a uuid.
+ * Callers report it as a bad request; letting it surface as 500 would blame
+ * the server for a client typo.
+ */
+export function isInvalidTextRepresentation(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: string }).code === '22P02';
+}
+
+/**
+ * Serialize an embedding for a vector-typed parameter.
+ * pgvector accepts the '[0.1,0.2,...]' text form; cast with ::vector in SQL.
+ */
+export function toVector(embedding: number[]): string {
+  return JSON.stringify(embedding);
+}
+
+// Re-export shared types (defined in lib/types.ts for client use)
+export type { Note, Folder } from './types';

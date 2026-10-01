@@ -1,0 +1,150 @@
+# Kybase — self-contained stack: app + Postgres(pgvector) + Ollama embeddings.
+#
+#   cp .env.example .env    # set KYBASE_SECRET and POSTGRES_PASSWORD
+#   docker compose up -d --build
+#
+# The app applies db/migrations/*.sql automatically on startup (tracked in
+# the schema_migrations table). Local embeddings are opt-in — see the ollama
+# service below — and everything runs offline once that model is pulled.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    mem_limit: 512m
+    environment:
+      POSTGRES_USER: kybase
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: kybase
+    volumes:
+      - kybase-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kybase -d kybase"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Local embeddings. Not started by default — bring it up with
+  #   docker compose --profile ollama up -d
+  # on an already-running stack; nothing else is restarted and no note is
+  # touched. Off by default because the image carries NVIDIA and AMD GPU
+  # runtimes whatever the host has, which is ~4 GB somebody using Google or
+  # OpenAI embeddings would never run. Settings says so, and gives the
+  # command, when a provider is selected that needs it.
+  ollama:
+    profiles: ["ollama"]
+    # Pinned: ':latest' makes fresh installs unreproducible and is a supply
+    # chain liability. Bump deliberately.
+    image: ollama/ollama:0.24.0
+    restart: unless-stopped
+    mem_limit: 1024m
+    volumes:
+      - kybase-ollama:/root/.ollama
+    # Serve, wait for the API to actually answer, then ensure the embedding
+    # model is present (no-op if cached). Waiting on `ollama list` instead of a
+    # fixed `sleep` means the pull can't fire before the server is up on a slow
+    # cold start. `sed` strips the pull progress bar's ANSI cursor codes so
+    # `docker logs` / Dozzle stay readable without hiding any error text.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        until ollama list >/dev/null 2>&1; do sleep 1; done
+        ollama pull "${OLLAMA_MODEL:-embeddinggemma}" 2>&1 | sed -u 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/\r/\n/g'
+        wait
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # Optional cross-encoder reranker, not started by default:
+  #   docker compose --profile rerank up -d
+  # The app finds the service by name. It costs a full model pass per passage.
+  reranker:
+    profiles: ["rerank"]
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.8
+    restart: unless-stopped
+    mem_limit: 2048m
+    volumes:
+      - kybase-rerank:/data
+    environment:
+      HF_HOME: /data
+    # --auto-truncate: passages longer than the model's window are cut rather
+    # than rejected — without it the service answers 413 and reranking is off
+    # for exactly the long notes that need reordering most.
+    #
+    # --max-batch-tokens and --tokenization-workers are memory, not throughput.
+    # The defaults (16384 tokens, one worker per core) size the warm-up
+    # allocation for a machine with no limit; inside mem_limit below, on a
+    # host with many cores, the process is killed part-way through warming up
+    # and restarts forever. Kybase sends short passages — the default ten
+    # notes at two passages each is roughly 2500 tokens — so a quarter of that
+    # ceiling is still several times what a request needs.
+    command:
+      - --model-id
+      - ${RERANK_MODEL:-cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
+      - --auto-truncate
+      - --max-client-batch-size
+      - "64"
+      - --max-batch-tokens
+      - "4096"
+      - --tokenization-workers
+      - "4"
+    # Asks the service, rather than asserting it is fine. The previous check
+    # was `exit 0`, which cannot fail: it reported sixty-six consecutive
+    # restarts of a dead process as healthy. start_period covers the model
+    # download and warm-up, which take tens of seconds on a cold cache.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:80/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 180s
+
+  kybase:
+    # Prebuilt multi-arch image (amd64/arm64) from GitHub Packages.
+    # `docker compose pull` fetches it; `--build` rebuilds from source instead.
+    image: ghcr.io/kyrzin/kybase:${KYBASE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    mem_limit: 512m
+    ports:
+      - "${KYBASE_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      DATABASE_URL: postgres://kybase:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/kybase
+      KYBASE_SECRET: ${KYBASE_SECRET:?set KYBASE_SECRET in .env}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
+      OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-embeddinggemma}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      GOOGLE_MODEL: ${GOOGLE_MODEL:-gemini-embedding-001}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-text-embedding-3-small}
+      # How many dimensions to ask Google or OpenAI for; `native` sends no
+      # size and takes the model's own. Ollama ignores it — its models are
+      # whatever width they are, and the schema follows them.
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-}
+      # Only for a reranker somewhere other than the compose service — the
+      # app looks for http://reranker:80 by default and checks whether
+      # anything is answering there, so starting the profile is the whole
+      # setup.
+      KYBASE_RERANK_URL: ${KYBASE_RERANK_URL:-}
+      KYBASE_RERANK_TOP_N: ${KYBASE_RERANK_TOP_N:-}
+      KYBASE_RERANK_PASSAGES_PER_NOTE: ${KYBASE_RERANK_PASSAGES_PER_NOTE:-}
+      KYBASE_RERANK_TIMEOUT_MS: ${KYBASE_RERANK_TIMEOUT_MS:-}
+      # Hybrid ordering: arbiter (default), legacy or rrf.
+      KYBASE_SEARCH_FUSION: ${KYBASE_SEARCH_FUSION:-}
+      KYBASE_ARBITER_SEM_THRESHOLD: ${KYBASE_ARBITER_SEM_THRESHOLD:-}
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  kybase-db:
+  kybase-ollama:
+  kybase-rerank:

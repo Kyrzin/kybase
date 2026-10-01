@@ -1,0 +1,20 @@
+.git
+.next
+node_modules
+npm-debug.log*
+.env
+.env.local
+.env*.local
+docs
+README.md
+# README artwork is served by GitHub, never by the running app — the plain
+# `node_modules` line above only matches the root one, so name these too.
+public/readme
+packages
+# Tests are not part of the image, and the build would otherwise typecheck
+# them against devDependencies the image does not need.
+**/*.test.ts
+lib/__itest__
+vitest.config.ts
+vitest.integration.config.ts
+/coverage

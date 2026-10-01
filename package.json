@@ -1,0 +1,47 @@
+{
+  "name": "kybase",
+  "version": "1.4.1",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "reindex": "tsx scripts/reindex.ts",
+    "reindex:all": "tsx scripts/reindex.ts --all",
+    "smoke-test": "tsx scripts/smoke-test.mts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@thednp/dommatrix": "^3.1.1",
+    "diff": "^9.0.0",
+    "jszip": "^3.10.1",
+    "mammoth": "^1.12.1",
+    "next": "^16.3.0",
+    "pdfjs-dist": "^6.2.108",
+    "pg": "^8.16.3",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "turndown": "^7.2.4",
+    "turndown-plugin-gfm": "^1.0.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/pg": "^8.15.4",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/turndown": "^5.0.6",
+    "dotenv": "^17.4.2",
+    "eslint": "^9",
+    "eslint-config-next": "^16.3.0",
+    "tailwindcss": "^4",
+    "tsx": "^4.22.3",
+    "typescript": "^5"
+  },
+  "overrides": {
+    "postcss": "^8.5.10"
+  }
+}

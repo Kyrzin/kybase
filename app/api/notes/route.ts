@@ -1,0 +1,117 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { query, queryOneAs, isUniqueViolation } from '@/lib/db';
+import { indexNoteAsync } from '@/lib/indexing';
+import { MAX_NOTE_CONTENT_CHARS, stripNulBytes } from '@/lib/types';
+import { requestActor } from '@/lib/route-auth';
+import { folderIdFromPath, FolderPathNotFoundError } from '@/lib/folders';
+import { escapeLike } from '@/lib/sql';
+import { z } from 'zod';
+
+const NOTE_SELECT = 'id, title, content, folder_id, tags, embedding_pending, created_at, updated_at';
+// For ?content=false: the list without note text.
+const NOTE_SELECT_NO_CONTENT = 'id, title, folder_id, tags, embedding_pending, created_at, updated_at';
+
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const folder_id = searchParams.get('folder_id');
+  const tag       = searchParams.get('tag');
+  const q         = searchParams.get('q') ?? '';
+  const withContent = searchParams.get('content') !== 'false';
+  // Optional pagination — the bundled UI loads the whole vault for the tree,
+  // so no default limit; API consumers with large vaults pass limit/offset.
+  const limit  = Math.min(Math.max(parseInt(searchParams.get('limit')  ?? '', 10) || 0, 0), 1000);
+  const offset = Math.max(parseInt(searchParams.get('offset') ?? '', 10) || 0, 0);
+
+  const conds: string[] = ['deleted_at is null'];
+  const params: unknown[] = [];
+  if (folder_id) { params.push(folder_id); conds.push(`folder_id = $${params.length}`); }
+  if (tag)       { params.push([tag]);     conds.push(`tags @> $${params.length}`); }
+  // Plain case-insensitive substring: escapeLike makes %, _ and \ literal.
+  if (q.trim()) {
+    params.push(`%${escapeLike(q)}%`);
+    const p = `$${params.length}`;
+    conds.push(`(title ilike ${p} or content ilike ${p} or exists (select 1 from unnest(tags) t where t ilike ${p}))`);
+  }
+
+  let paging = '';
+  if (limit > 0) { params.push(limit);  paging += ` limit $${params.length}`; }
+  if (offset > 0) { params.push(offset); paging += ` offset $${params.length}`; }
+
+  try {
+    // content_updated_at only for the ORDER BY — a rename elsewhere
+    // rewriting a [[link]] to a note must not float it to the top of the
+    // sidebar. updated_at itself stays untouched in NOTE_SELECT: the
+    // browser editor's optimistic-concurrency guard (expected_updated_at)
+    // still needs the broad "did anything about this note's storable
+    // state change" signal (migration 020).
+    const data = await query(
+      `select ${withContent ? NOTE_SELECT : NOTE_SELECT_NO_CONTENT} from notes
+       where ${conds.join(' and ')}
+       order by content_updated_at desc${paging}`,
+      params
+    );
+    return NextResponse.json(data);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Query failed';
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+const CreateNoteSchema = z.object({
+  // trim: invisible padding would create a title that looks like a duplicate
+  // but dodges the unique index and never matches its own export
+  title:     z.string().trim().min(1).max(500),
+  content:   z.string().max(MAX_NOTE_CONTENT_CHARS).default(''),
+  folder_id: z.string().uuid().nullable().optional(),
+  // Alternative to folder_id, e.g. "Projects/Kybase"; nullable like folder_id.
+  folder_path: z.string().nullable().optional(),
+  tags:      z.array(z.string()).default([]),
+});
+
+export async function POST(req: NextRequest) {
+  const body   = await req.json().catch(() => ({}));
+  const parsed = CreateNoteSchema.safeParse(body);
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.format() }, { status: 400 });
+  }
+
+  const { title, folder_id, folder_path, tags } = parsed.data;
+  if (folder_id && folder_path) {
+    return NextResponse.json({ error: 'Provide either folder_id or folder_path, not both' }, { status: 400 });
+  }
+  let folderId = folder_id ?? null;
+  if (folder_path) {
+    try {
+      folderId = await folderIdFromPath(folder_path);
+    } catch (err) {
+      if (err instanceof FolderPathNotFoundError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      const message = err instanceof Error ? err.message : 'Query failed';
+      return NextResponse.json({ error: message }, { status: 500 });
+    }
+  }
+  const content = stripNulBytes(parsed.data.content);
+  let note;
+  try {
+    note = await queryOneAs<{ id: string; title: string; content: string }>(
+      await requestActor(req),
+      `insert into notes (title, content, folder_id, tags, embedding_pending)
+       values ($1, $2, $3, $4, true)
+       returning ${NOTE_SELECT}`,
+      [title, content, folderId, tags]
+    );
+  } catch (err) {
+    if (isUniqueViolation(err)) {
+      return NextResponse.json({ error: 'A note with this title already exists' }, { status: 409 });
+    }
+    const message = err instanceof Error ? err.message : 'Insert failed';
+    return NextResponse.json({ error: message }, { status: 500 });
+  }
+  if (!note) return NextResponse.json({ error: 'Insert failed' }, { status: 500 });
+
+  // Non-blocking index — failure leaves embedding_pending=true for reindex
+  indexNoteAsync(note.id, note.title, note.content);
+
+  return NextResponse.json(note, { status: 201 });
+}

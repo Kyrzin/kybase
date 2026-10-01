@@ -1,0 +1,46 @@
+name: Bug report
+description: Something broke — a crash, wrong behavior, data issue
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, what happened instead?
+      placeholder: |
+        1. Created a note titled …
+        2. Clicked …
+        3. Expected …, got …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "`docker compose logs kybase --tail 50` around the failure (redact your secret if it appears)."
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: "`git rev-parse --short HEAD` in your checkout"
+      placeholder: 9510b2f
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Embedding provider
+      options:
+        - Ollama (default)
+        - Google
+        - OpenAI
+        - Not embedding-related
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, how deployed (bundled compose / own setup / behind a proxy)
+      placeholder: Ubuntu 24.04, bundled docker compose, behind Traefik

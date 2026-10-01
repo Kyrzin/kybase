@@ -1,0 +1,422 @@
+// lib/settings.ts — DB-backed settings with env var fallback
+import { query, queryOne } from './db';
+import { encryptWithSecret, decryptWithSecret, isEncrypted } from './secret-box';
+
+export type EmbeddingProvider = 'ollama' | 'google' | 'openai';
+
+export interface EmbeddingConfig {
+  provider: EmbeddingProvider;
+  googleApiKey?: string;
+  openaiApiKey?: string;
+  // One per provider rather than a single `model`: switching provider and back
+  // should not lose the model that was chosen for the first one.
+  ollamaModel?: string;
+  googleModel?: string;
+  openaiModel?: string;
+  /**
+   * Width to ask Google or OpenAI for; null means send no size and take the
+   * model's own. NOT per provider — the schema holds one width at a time, so
+   * two stored values would only disagree with each other.
+   *
+   * Resolved here rather than read where it is used, so embeddingModelKey()
+   * can stay synchronous: it is called on the search path, and making it
+   * await a settings read would spread async through every caller.
+   */
+  requestedDimensions: number | null;
+}
+
+/**
+ * The width Google and OpenAI are asked for when nothing says otherwise.
+ * Both can serve a requested size, so Kybase has always asked for the one its
+ * schema shipped with; keeping that as the default means an existing vault
+ * gets the same vectors after an upgrade as before it.
+ */
+export const DEFAULT_REQUESTED_DIMENSIONS = 768;
+
+/**
+ * A stored or env-provided width, as a number or null for "send no size".
+ *
+ * `native` exists because a requested size is not universally accepted:
+ * OpenAI's text-embedding-ada-002 rejects the parameter outright, so there has
+ * to be a way to omit it rather than only to change it.
+ *
+ * Lives here, not in lib/embeddings.ts, only because that module imports this
+ * one — putting it there and reading settings from it would close a cycle.
+ */
+export function parseRequestedDimensions(raw: string | null | undefined): number | null {
+  const v = raw?.trim();
+  if (!v) return DEFAULT_REQUESTED_DIMENSIONS;
+  if (v.toLowerCase() === 'native') return null;
+  const n = Number(v);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`Embedding width must be a positive integer or 'native', got '${v}'`);
+  }
+  return n;
+}
+
+// Provider API keys are encrypted at rest (lib/secret-box.ts) — a DB dump
+// alone shouldn't hand over working Google/OpenAI credentials. Other
+// settings (provider choice, model name) aren't secret and stay plaintext.
+const ENCRYPTED_SETTING_KEYS = new Set(['google_api_key', 'openai_api_key']);
+
+function requireSecret(): string {
+  const secret = process.env.KYBASE_SECRET;
+  if (!secret) throw new Error('KYBASE_SECRET env var is missing');
+  return secret;
+}
+
+// Tolerant read: a DB hiccup falls back to env vars (same contract the
+// UI and embedding pipeline always had) instead of failing the caller.
+async function getSetting(key: string): Promise<string | null> {
+  try {
+    const row = await queryOne<{ value: string }>(
+      'select value from settings where key = $1',
+      [key]
+    );
+    if (!row) return null;
+    // A key entered before encryption shipped is still plain text in the
+    // DB — read it as-is rather than failing; it's re-encrypted the next
+    // time it's written (setSetting always encrypts going forward).
+    if (ENCRYPTED_SETTING_KEYS.has(key) && isEncrypted(row.value)) {
+      return decryptWithSecret(row.value, requireSecret());
+    }
+    return row.value;
+  } catch (err) {
+    console.warn(`[settings] read '${key}' failed:`, err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+// Which provider+model last actually indexed the vault (see
+// lib/embeddings.ts's embeddingModelKey) — set only by
+// instrumentation.ts's startup drift check. Changing the provider/model
+// through the settings UI already marks every note pending on its own
+// (app/api/settings/route.ts's providerChanged); this covers the gap that
+// left open — a .env edit (EMBEDDING_PROVIDER, OLLAMA_MODEL, GOOGLE_MODEL,
+// OPENAI_MODEL) plus a container restart, which getEmbeddingConfig() picks
+// up silently since it falls back to process.env.* with nothing in the
+// write path to notice.
+export async function getLastIndexedModel(): Promise<string | null> {
+  return getSetting('last_indexed_model');
+}
+
+export async function setLastIndexedModel(key: string): Promise<void> {
+  await setSetting('last_indexed_model', key);
+}
+
+export type KeyStatus = 'unset' | 'ok' | 'undecryptable';
+
+// Distinguishes "never set" from "set but can't be decrypted with the
+// current KYBASE_SECRET" — getSetting()/getEmbeddingConfig() collapse both
+// into a silent null (falls back to the env var, keeps the hot embedding
+// path from throwing), which is right for that path but hides a real
+// problem: a stored key that used to work has gone dark, usually because
+// KYBASE_SECRET was rotated after it was saved. Read directly rather than
+// reusing getSetting so this stays a diagnostic, not a second silent
+// fallback — the settings UI needs to tell the two states apart, not
+// paper over the second one too.
+async function getEncryptedKeyStatus(key: string): Promise<KeyStatus> {
+  const row = await queryOne<{ value: string }>(
+    'select value from settings where key = $1',
+    [key]
+  );
+  if (!row) return 'unset';
+  if (!isEncrypted(row.value)) return 'ok'; // pre-encryption plaintext, still readable
+  try {
+    decryptWithSecret(row.value, requireSecret());
+    return 'ok';
+  } catch {
+    return 'undecryptable';
+  }
+}
+
+export async function getProviderKeyHealth(): Promise<{ googleApiKey: KeyStatus; openaiApiKey: KeyStatus }> {
+  const [googleApiKey, openaiApiKey] = await Promise.all([
+    getEncryptedKeyStatus('google_api_key'),
+    getEncryptedKeyStatus('openai_api_key'),
+  ]);
+  return { googleApiKey, openaiApiKey };
+}
+
+export async function setSetting(key: string, value: string): Promise<void> {
+  const stored = ENCRYPTED_SETTING_KEYS.has(key) ? encryptWithSecret(value, requireSecret()) : value;
+  await query(
+    `insert into settings (key, value, updated_at) values ($1, $2, now())
+     on conflict (key) do update set value = excluded.value, updated_at = now()`,
+    [key, stored]
+  );
+  // Simplest correct invalidation: any settings write drops the whole
+  // cache, not just the key that changed. setSetting isn't on a hot path
+  // (a handful of calls per session, from the settings UI/API), unlike
+  // getEmbeddingConfig()/getTagWeights()/getFolderWeights() below.
+  cachedEmbeddingConfig = null;
+  cachedTagWeights = null;
+  cachedFolderWeights = null;
+  cachedRerankEnabled = null;
+  cachedRerankMinScore = null;
+}
+
+// Which text search configs notes_search_vector_trigger/search_notes_fts
+// combine on top of 'simple' (migration 016) — comma-separated, e.g.
+// 'russian,english,german'. Defaults match the hardcoded pair migration
+// 013 shipped with, so an install that never touches this setting behaves
+// exactly as before; adding a language is a data change (this key), not a
+// migration or a fork.
+const DEFAULT_FTS_LANGUAGES = ['russian', 'english'];
+
+export async function getFtsLanguages(): Promise<string[]> {
+  const raw = await getSetting('fts_languages');
+  if (!raw) return DEFAULT_FTS_LANGUAGES;
+  const langs = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  return langs.length ? langs : DEFAULT_FTS_LANGUAGES;
+}
+
+// Comma-separated, matching the trigger's own parsing (string_to_array on
+// ',') — no per-language validation here; an unregistered Postgres text
+// search config is caught and skipped per-language inside the trigger
+// itself (it must not be able to break every note write on a typo).
+export async function setFtsLanguages(languages: string[]): Promise<void> {
+  await setSetting('fts_languages', languages.map((s) => s.trim()).filter(Boolean).join(','));
+}
+
+// Whether the configured reranker is actually used (lib/rerank.ts). The
+// service URL stays an env var — that is infrastructure, "is a reranker
+// installed" — while this is the decision to use it, which belongs where a
+// user can change it: no redeploy, and it applies to MCP and the REST API at
+// once, not just the browser tab that flipped it.
+//
+// Defaults to ON when a URL is configured. Setting the URL is already the
+// deliberate act; making someone then find a second switch to get any effect
+// would just look broken.
+//
+// Cached on the same short TTL and for the same reason as the weights below:
+// every hybrid search reads it.
+const RERANK_CACHE_TTL_MS = 5_000;
+let cachedRerankEnabled: { value: boolean; expiresAt: number } | null = null;
+
+export async function getRerankEnabled(): Promise<boolean> {
+  if (cachedRerankEnabled && Date.now() < cachedRerankEnabled.expiresAt) {
+    return cachedRerankEnabled.value;
+  }
+  const raw = await getSetting('rerank_enabled');
+  const value = raw === null ? true : raw === 'true';
+  cachedRerankEnabled = { value, expiresAt: Date.now() + RERANK_CACHE_TTL_MS };
+  return value;
+}
+
+export async function setRerankEnabled(enabled: boolean): Promise<void> {
+  await setSetting('rerank_enabled', enabled ? 'true' : 'false');
+}
+
+// Optional floor on the reranker's score; hits below it are dropped. No
+// default: the scale belongs to the model, so a number has to be measured for it.
+let cachedRerankMinScore: { value: number | null; expiresAt: number } | null = null;
+
+export async function getRerankMinScore(): Promise<number | null> {
+  if (cachedRerankMinScore && Date.now() < cachedRerankMinScore.expiresAt) {
+    return cachedRerankMinScore.value;
+  }
+  const raw = await getSetting('rerank_min_score');
+  const n = raw === null ? NaN : Number(raw);
+  // Re-validated on read, like the weights: a bad stored value degrades to
+  // "no floor", never to a filter that silently empties every search.
+  const value = Number.isFinite(n) && n > 0 && n < 1 ? n : null;
+  cachedRerankMinScore = { value, expiresAt: Date.now() + RERANK_CACHE_TTL_MS };
+  return value;
+}
+
+/** null clears the floor. */
+export async function setRerankMinScore(score: number | null): Promise<void> {
+  await setSetting('rerank_min_score', score === null ? '' : String(score));
+}
+
+export type BandOverride = { gate?: number };
+
+// Optional semantic similarity floor per embedding model key; empty by default.
+// Cached like the weights below: search reads it on every semantic call.
+const BANDS_CACHE_TTL_MS = 5_000;
+let cachedBands: { value: Record<string, BandOverride>; expiresAt: number } | null = null;
+
+/**
+ * Every stored band, validated the same way a single lookup is. A settings
+ * write needs the full map to merge one model's band in without overwriting
+ * the others', and the settings UI needs it to show what is stored.
+ */
+export async function getEmbeddingBands(): Promise<Record<string, BandOverride>> {
+  if (!cachedBands || Date.now() >= cachedBands.expiresAt) {
+    cachedBands = { value: await getBandsUncached(), expiresAt: Date.now() + BANDS_CACHE_TTL_MS };
+  }
+  return cachedBands.value;
+}
+
+export async function getBandOverride(modelKey: string): Promise<BandOverride | null> {
+  return (await getEmbeddingBands())[modelKey] ?? null;
+}
+
+async function getBandsUncached(): Promise<Record<string, BandOverride>> {
+  const raw = await getSetting('embedding_bands');
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+  const out: Record<string, BandOverride> = {};
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== 'object' || value === null) continue;
+    const v = value as Record<string, unknown>;
+    const band: BandOverride = {};
+    // A cosine band only makes sense inside [0, 1), and the floor has to sit
+    // ABOVE the gate or the fraction the ladder computes from them inverts.
+    // A hand-edited row must degrade to "unmeasured" (the ladder then refuses
+    // to claim full corroboration), never to a silently inverted scale.
+    if (typeof v.gate === 'number' && Number.isFinite(v.gate) && v.gate >= 0 && v.gate < 1) band.gate = v.gate;
+    if (band.gate !== undefined) out[key] = band;
+  }
+  return out;
+}
+
+export async function setEmbeddingBands(bands: Record<string, BandOverride>): Promise<void> {
+  await setSetting('embedding_bands', JSON.stringify(bands));
+  cachedBands = null;
+}
+
+export type TagWeights = Record<string, number>;
+
+// Mechanic lives in code (lib/search.ts multiplies a hit's raw score by
+// this before normalizing), vocabulary lives here — empty default, so an
+// install that never sets this behaves exactly as before (weight 1 for
+// every tag is a no-op on the multiply). No vault-specific tag name is
+// hardcoded anywhere: a vault's own canonical/ephemeral split, if the
+// owner wants it, is a value in this JSON blob, not a constant in the
+// product.
+// JSON, not comma-separated like fts_languages: this is a map, not a list.
+// Cached like getEmbeddingConfig — textSearch reads this on every call, and
+// an OR-cascade search can mean two search_notes_fts round trips per
+// request, each with zero chance the setting changed mid-request.
+const TAG_WEIGHTS_CACHE_TTL_MS = 5_000;
+let cachedTagWeights: { value: TagWeights; expiresAt: number } | null = null;
+
+export async function getTagWeights(): Promise<TagWeights> {
+  if (cachedTagWeights && Date.now() < cachedTagWeights.expiresAt) {
+    return cachedTagWeights.value;
+  }
+  const weights = await getTagWeightsUncached();
+  cachedTagWeights = { value: weights, expiresAt: Date.now() + TAG_WEIGHTS_CACHE_TTL_MS };
+  return weights;
+}
+
+async function getTagWeightsUncached(): Promise<TagWeights> {
+  const raw = await getSetting('tag_weights');
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+  const weights: TagWeights = {};
+  for (const [tag, value] of Object.entries(parsed as Record<string, unknown>)) {
+    // A weight has to stay positive and finite: 0 or negative flips a
+    // multiplicative score's sign/ordering rather than just nudging it,
+    // and a corrupted or hand-edited settings row must not be able to
+    // break every search silently — skip that one entry, keep the rest.
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) weights[tag] = value;
+  }
+  return weights;
+}
+
+export async function setTagWeights(weights: TagWeights): Promise<void> {
+  await setSetting('tag_weights', JSON.stringify(weights));
+}
+
+export type FolderWeights = Record<string, number>;
+
+// Same shape and reasoning as TagWeights above, keyed by folder_id (a
+// folder's id is stable across renames; its name isn't, and two sibling
+// folders can share a name under different parents — migration 010). Text
+// search only, same as tag weights (migration 021's own comment): weighting
+// semantic search risks corrupting semanticSearch's best/signalMargin
+// absolute noise-floor check.
+const FOLDER_WEIGHTS_CACHE_TTL_MS = 5_000;
+let cachedFolderWeights: { value: FolderWeights; expiresAt: number } | null = null;
+
+export async function getFolderWeights(): Promise<FolderWeights> {
+  if (cachedFolderWeights && Date.now() < cachedFolderWeights.expiresAt) {
+    return cachedFolderWeights.value;
+  }
+  const weights = await getFolderWeightsUncached();
+  cachedFolderWeights = { value: weights, expiresAt: Date.now() + FOLDER_WEIGHTS_CACHE_TTL_MS };
+  return weights;
+}
+
+async function getFolderWeightsUncached(): Promise<FolderWeights> {
+  const raw = await getSetting('folder_weights');
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
+  const weights: FolderWeights = {};
+  for (const [folderId, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) weights[folderId] = value;
+  }
+  return weights;
+}
+
+export async function setFolderWeights(weights: FolderWeights): Promise<void> {
+  await setSetting('folder_weights', JSON.stringify(weights));
+}
+
+// Hot path (every embed call); a short TTL bounds a stale read to seconds even
+// if a write path forgets to clear the cache.
+const EMBEDDING_CONFIG_CACHE_TTL_MS = 5_000;
+let cachedEmbeddingConfig: { value: EmbeddingConfig; expiresAt: number } | null = null;
+
+export async function getEmbeddingConfig(): Promise<EmbeddingConfig> {
+  if (cachedEmbeddingConfig && Date.now() < cachedEmbeddingConfig.expiresAt) {
+    return cachedEmbeddingConfig.value;
+  }
+
+  const [provider, googleApiKey, openaiApiKey, ollamaModel, googleModel, openaiModel, embeddingDim] = await Promise.all([
+    getSetting('embedding_provider'),
+    getSetting('google_api_key'),
+    getSetting('openai_api_key'),
+    getSetting('ollama_model'),
+    getSetting('google_model'),
+    getSetting('openai_model'),
+    getSetting('embedding_dim'),
+  ]);
+
+  // The literal fallbacks are the ones lib/embeddings.ts used to inline, kept
+  // exactly: embeddingModelKey is built from these, and a key that changed
+  // shape would tell every existing vault its model had changed and cost it a
+  // full, pointless reindex.
+  const cfg: EmbeddingConfig = {
+    provider: (provider ?? process.env.EMBEDDING_PROVIDER ?? 'ollama') as EmbeddingProvider,
+    googleApiKey:  googleApiKey  ?? process.env.GOOGLE_API_KEY,
+    openaiApiKey:  openaiApiKey  ?? process.env.OPENAI_API_KEY,
+    ollamaModel:   ollamaModel   ?? process.env.OLLAMA_MODEL ?? 'embeddinggemma',
+    googleModel:   googleModel   ?? process.env.GOOGLE_MODEL ?? 'gemini-embedding-001',
+    openaiModel:   openaiModel   ?? process.env.OPENAI_MODEL ?? 'text-embedding-3-small',
+    // A bad stored value must not take the whole config down with it — the
+    // embedding path would stop dead over one mistyped field. Fall back to the
+    // default and say so; the settings route validates on the way in.
+    requestedDimensions: (() => {
+      try {
+        return parseRequestedDimensions(embeddingDim ?? process.env.EMBEDDING_DIM);
+      } catch (err) {
+        console.warn(`[settings] ${err instanceof Error ? err.message : err} — using ${DEFAULT_REQUESTED_DIMENSIONS}`);
+        return DEFAULT_REQUESTED_DIMENSIONS;
+      }
+    })(),
+  };
+  cachedEmbeddingConfig = { value: cfg, expiresAt: Date.now() + EMBEDDING_CONFIG_CACHE_TTL_MS };
+  return cfg;
+}

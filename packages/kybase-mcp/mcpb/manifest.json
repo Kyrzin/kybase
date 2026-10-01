@@ -1,0 +1,88 @@
+{
+  "manifest_version": "0.3",
+  "name": "kybase",
+  "display_name": "Kybase",
+  "version": "0.0.0",
+  "description": "Persistent Markdown memory for AI agents: notes you can read and edit, with hybrid search.",
+  "long_description": "Kybase gives your agent a long-term memory you own: a Markdown knowledge base with [[wikilinks]], searched by keyword and by meaning. Notes live in an embedded Postgres on your machine (no Docker, no server) and leave it only if you pick a cloud embedding provider. `kybase-mcp export vault.zip` writes them out as plain Markdown; the full Kybase app adds a web editor, a graph view and access for several agents at once.",
+  "author": {
+    "name": "Denis Kurzin",
+    "url": "https://github.com/Kyrzin"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Kyrzin/kybase"
+  },
+  "homepage": "https://kyrzin.github.io/kybase/",
+  "documentation": "https://github.com/Kyrzin/kybase/tree/main/packages/kybase-mcp",
+  "support": "https://github.com/Kyrzin/kybase/issues",
+  "license": "AGPL-3.0-only",
+  "keywords": ["memory", "knowledge-base", "markdown", "notes", "semantic-search", "pgvector"],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/cli.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/cli.js"],
+      "env": {
+        "KYBASE_DATA_DIR": "${user_config.data_dir}",
+        "EMBEDDING_PROVIDER": "${user_config.embedding_provider}",
+        "OLLAMA_URL": "${user_config.ollama_url}",
+        "OLLAMA_MODEL": "${user_config.ollama_model}",
+        "GOOGLE_API_KEY": "${user_config.google_api_key}",
+        "OPENAI_API_KEY": "${user_config.openai_api_key}"
+      }
+    }
+  },
+  "user_config": {
+    "data_dir": {
+      "type": "string",
+      "title": "Data folder",
+      "description": "Where the knowledge base lives. Created on first start.",
+      "default": "${HOME}/.kybase",
+      "required": false
+    },
+    "embedding_provider": {
+      "type": "string",
+      "title": "Embedding provider",
+      "description": "ollama (local), google or openai. Needed for search by meaning; keyword search works without it.",
+      "default": "ollama",
+      "required": false
+    },
+    "ollama_url": {
+      "type": "string",
+      "title": "Ollama URL",
+      "description": "Local Ollama endpoint. Run `ollama pull embeddinggemma` once.",
+      "default": "http://localhost:11434",
+      "required": false
+    },
+    "ollama_model": {
+      "type": "string",
+      "title": "Ollama model",
+      "description": "Embedding model served by Ollama.",
+      "default": "embeddinggemma",
+      "required": false
+    },
+    "google_api_key": {
+      "type": "string",
+      "title": "Google API key",
+      "description": "Only with provider google. Sends note text to Google to compute embeddings.",
+      "sensitive": true,
+      "required": false
+    },
+    "openai_api_key": {
+      "type": "string",
+      "title": "OpenAI API key",
+      "description": "Only with provider openai. Sends note text to OpenAI to compute embeddings.",
+      "sensitive": true,
+      "required": false
+    }
+  },
+  "tools_generated": true,
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  }
+}

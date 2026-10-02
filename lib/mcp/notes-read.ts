@@ -38,11 +38,8 @@ export function registerNoteReadTools(server: McpServer): void {
       // Same either/or as search_notes: two spellings of one filter, and
       // accepting both would leave the caller guessing which one won.
       if (folder_id && folder_path) throw new Error('Provide either folder_id or folder_path, not both');
-      // limit + 1 rather than a second count(*): the only question the caller
-      // has is "is there more", and one extra row answers it for the cost of
-      // one extra row. Both branches build the same envelope — a shape that
-      // changed between trashed and live modes would be a worse trap than the
-      // bare array it replaces.
+      // limit + 1 rather than a second count(*): one extra row answers "is there
+      // more". Both branches return the same envelope.
       if (trashed) {
         const rows = await query<{ id: string; title: string; folder_id: string | null; deleted_at: string }>(
           'select id, title, folder_id, deleted_at from notes where deleted_at is not null order by deleted_at desc limit $1 offset $2',
@@ -145,9 +142,8 @@ export function registerNoteReadTools(server: McpServer): void {
       ]);
       if (!data) throw new Error('Note not found');
 
-      // Links are resolved from the note's full, unwindowed content — same
-      // as the old dedicated tool did — so requesting a `section` narrows
-      // what comes back as `content` without narrowing which links count.
+      // Links are resolved from the note's full content, so a `section` narrows the
+      // returned `content` without narrowing which links count.
       let linkFields: { linked_notes: Record<string, unknown>[]; unresolved_links: string[] } | null = null;
       if (resolve_links) {
         // Titles-only, no content — cheap even on a large vault — so a link

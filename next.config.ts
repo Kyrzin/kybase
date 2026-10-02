@@ -30,9 +30,7 @@ const CSP = CSP_DIRECTIVES.join('; ');
 // land the browser on ANOTHER origin — the client's OAuth callback. Chrome
 // applies form-action across the redirect a submission produces, so
 // "form-action 'self'" silently kills the last step of the flow: the button
-// appears to do nothing. Measured live 2026-08-20, with a client whose
-// callback was http://localhost:43231 — the authorization only completed on a
-// ctrl-click, which opens a new context and escapes the check.
+// appears to do nothing.
 //
 // Two CSP headers are enforced as an intersection, so the route cannot loosen
 // this by sending its own — the global rule has to stop applying here, and

@@ -7,30 +7,13 @@ import { folderIdFromPath } from '../folders';
 import { uuid, QUERY_REQUIRED, morePage } from './shared';
 
 export function registerSearchTools(server: McpServer): void {
-  // Rounding for display only — the underlying number is still full
-  // precision wherever code (not a human) consumes it. relevance/threshold/
-  // best_score are ratios/thresholds (2 decimals is already more precision
-  // than the numbers carry any real meaning at); raw scores (ts_rank,
-  // cosine, RRF) get 3, since they're compared against each other more than
-  // read on their own.
+  // Display rounding only: ratios get 2 decimals, raw scores (ts_rank, cosine,
+  // RRF) get 3, since they are compared against each other.
   const round2 = (n: number) => Math.round(n * 100) / 100;
   const round3 = (n: number) => Math.round(n * 1000) / 1000;
 
-  // What actually made the old output unreadable wasn't lack of
-  // indentation on its own — real newlines inside a JSON string aren't
-  // achievable at all (RFC 8259 requires \n escaped), so a markdown table
-  // in an excerpt looks the same either way. It was ~41% of every response
-  // being debug numbers at 17 significant digits (relevance:
-  // 0.9488824385394478, two of which are ever meaningful) that a client
-  // showing the raw string — not every MCP client pretty-prints JSON
-  // itself — had no way to skip past. Fix: drop rrf_score/text_score/
-  // semantic_score/created_at from the default shape (still available via
-  // explain:true, for debugging the ranking itself), round what's left,
-  // and pretty-print with JSON.stringify(_, null, 2) so a client that
-  // doesn't reformat still sees structure. Trimmed debug fields (~40% per
-  // measurement) outweigh indentation's own overhead (~25%), so the net
-  // response is smaller as well as more readable
-  //.
+  // Display shape: raw arm scores and created_at only under explain, numbers
+  // rounded, JSON pretty-printed for clients that show the raw string.
   function toDisplayResult(r: SearchResult | HybridSearchResult, explain: boolean): Record<string, unknown> {
     const hybrid = r as Partial<HybridSearchResult>;
     const out: Record<string, unknown> = {
@@ -57,10 +40,7 @@ export function registerSearchTools(server: McpServer): void {
     // so this excerpt may be from the previous version. get_note returns the
     // live text.
     //
-    // Both of these carry their own instruction rather than relying on the
-    // tool description to have explained them in advance: the rule costs
-    // nothing on the responses where the condition never fires, which is
-    // nearly all of them, instead of riding in every request forever.
+    // The hint travels with the field instead of riding in every tool description.
     if (r.index_pending) {
       out.index_pending = true;
       out.hint = 'Excerpt is from a previous version of this note; read it with get_note before quoting.';
@@ -77,13 +57,9 @@ export function registerSearchTools(server: McpServer): void {
     // fields. Absent whenever reranking did not run.
     if (r.rerank_score !== undefined) out.rerank_score = round3(r.rerank_score);
     if (explain) {
-      // Hybrid results carry text_score/semantic_score directly (rrfMerge
-      // sets them per contributing arm). A plain (non-hybrid) result has no
-      // such split — its own `score` field IS that one arm's raw number
-      // (ts_rank for type:"text", cosine for type:"semantic") — so surface
-      // it under the same name the hybrid shape uses, keyed off text_tier
-      // (set only by the text arm) to know which. Without this, explain:true
-      // on type:"text"/"semantic" showed nothing to debug ranking with at all.
+      // Hybrid results carry text_score/semantic_score per arm. A plain result's
+      // `score` is its one arm's raw number, surfaced under the same field name;
+      // text_tier (set only by the text arm) tells which.
       const plain = r as Partial<SearchResult>;
       if (hybrid.text_score !== undefined) out.text_score = round3(hybrid.text_score);
       else if (plain.score !== undefined && plain.text_tier !== undefined) out.text_score = round3(plain.score);
@@ -161,11 +137,7 @@ export function registerSearchTools(server: McpServer): void {
         createdAfter: created_after, createdBefore: created_before,
         updatedAfter: updated_after, updatedBefore: updated_before,
       };
-      // One run through the same entry point the UI and REST use, with the
-      // diagnostics of that same execution — rather than three direct calls
-      // plus a second embedding of the query (bestSemanticScore) that ran
-      // unfiltered and could report a best score from outside the folder the
-      // caller asked about.
+      // One run through the shared entry point, with diagnostics from the same execution.
       let results: SearchResult[];
       let diagnostics: SearchDiagnostics;
       try {
@@ -204,10 +176,7 @@ export function registerSearchTools(server: McpServer): void {
       const displayResults = results.map((r) => toDisplayResult(r, explain));
 
       if (type === 'text') {
-        // Always {results: [...]}, same top-level shape as hybrid/semantic
-        // below — a caller no longer needs a type-keyed branch just to read
-        // the hit list (found independently by both an
-        // external audit and an independent-agent test).
+        // Always {results: [...]}, the same top-level shape as the other modes.
         return { content: [{ type: 'text' as const, text: JSON.stringify({
           results: displayResults,
           ...morePage(diagnostics.has_more, limit, offset),

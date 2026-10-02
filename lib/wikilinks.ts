@@ -53,9 +53,7 @@ export function maskCode(text: string): string {
  * themselves (extractAllWikilinks does, buildWikilinkEdges deliberately does
  * not, since it counts repeats).
  *
- * The single place the link pattern lives. lib/graph.ts used to carry its
- * own copy of the same regular expression, which is exactly how one of the
- * two passes ends up fixed and the other forgotten.
+ * The single place the link pattern lives, so every pass agrees on it.
  */
 export function rawWikilinks(text: string): string[] {
   return wikilinkOccurrences(text).map(o => o.raw);

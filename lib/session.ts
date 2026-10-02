@@ -1,13 +1,8 @@
 // lib/session.ts — stateless, signed UI session cookies.
 //
-// The browser login used to store KYBASE_SECRET itself in localStorage and
-// replay it as the bearer token on every request. Any script running on the
-// page (an XSS payload, a compromised dependency) could read it with one
-// line, and unlike a session it can't be revoked short of rotating the
-// secret and restarting the server. A session token here is instead an
-// expiry, HMAC-signed with the server secret, held in a cookie the page's
-// own JS can never read (httpOnly) — the worst a leak-that-never-happens
-// costs is one 30-day cookie, not the root credential.
+// The browser never holds KYBASE_SECRET. A session token is an expiry,
+// HMAC-signed with the server secret, in an httpOnly cookie page scripts
+// cannot read: a leaked cookie is one 30-day session, not the root credential.
 //
 // No database: proxy.ts verifies this on every protected request and is
 // meant to stay independent of the main app (see lib/tokens.ts) — the

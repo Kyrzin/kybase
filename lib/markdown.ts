@@ -66,8 +66,7 @@ export function unpairedFenceIndex(lines: string[]): number {
  * parseMarkdown puts on the rendered <h1>–<h6> ids. Skips headings inside
  * fenced code blocks — mirroring both the renderer (fences are extracted to
  * placeholders before heading markup runs) and the chunker's fence handling
- * (lib/chunking.ts already split sections on #{1,6} before this did — this
- * just catches extractHeadings/parseMarkdown up to the same depth).
+ * (lib/chunking.ts), which splits sections on the same #{1,6} levels.
  */
 export function extractHeadings(content: string): Heading[] {
   const out: Heading[] = [];

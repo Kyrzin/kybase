@@ -7,24 +7,16 @@ import { getEmbeddingConfig } from './settings';
 import { chunkNote } from './chunking';
 import { invalidateSemanticEdgesCache } from './semantic-edges';
 
-// The whole-note embedding sees only the head of very long notes — the
-// chunks cover the rest. The provider's context window depends on server
-// config we can't see (Ollama defaults to 2048 tokens ≈ 4000 chars of dense
-// Cyrillic), and overflow hard-fails (400: "input length exceeds the context
-// length") — which used to abort indexNote before any chunks were written,
-// silently dropping long notes from semantic search entirely. So: start
-// with an 8000-char head and halve until the provider accepts it.
+// The whole-note embedding sees only the head of very long notes; chunks cover
+// the rest. The provider's context window is not known here (Ollama defaults to
+// 2048 tokens) and overflow is a hard error, so start with an 8000-char head and
+// halve until the provider accepts it.
 const NOTE_EMBED_MAX_CHARS = 8000;
 const NOTE_EMBED_MIN_CHARS = 1000;
 
-// Deliberately loose (`token` alone matches plenty), because the providers
-// word this differently and a missed overflow means a long note silently
-// absent from semantic search. The looseness is safe ONLY because
-// isQuotaExhausted is consulted first below — Google's 429 bodies name
-// token-based quota metrics, so this test matches them too, and without
-// that guard a rate-limited note would walk down the halve-the-budget path
-// spending four extra requests per note mid-quota-storm, then store a
-// truncated embedding on whichever attempt happened to get through.
+// Deliberately loose, since providers word overflow differently. Safe only
+// because isQuotaExhausted is checked first: quota errors mention tokens too and
+// must not be retried with a smaller head.
 function isContextOverflow(err: unknown): boolean {
   return err instanceof Error && /context length|maximum context|too (long|large)|token/i.test(err.message);
 }
@@ -113,21 +105,10 @@ export async function indexNote(id: string, title: string, content: string, isCa
   const client = await getPool().connect();
   try {
     await client.query('begin');
-    // Serialize concurrent indexNote() calls for the SAME note. Two
-    // overlapping content changes to one note (e.g. two concurrent
-    // append_to_note calls) each schedule their own indexNoteAsync —
-    // without a lock here, their DELETE-then-INSERT sequences on
-    // note_chunks below can interleave: whichever commits second can
-    // collide with rows the first one just inserted, throwing
-    // note_chunks_note_id_chunk_index_key — reproducible with two
-    // concurrent append_to_note calls on the same note; the failing call's
-    // error is caught and logged by
-    // indexNoteAsync, not surfaced anywhere a caller would see it, so the
-    // note's semantic index could silently end up reflecting only one of
-    // the two edits). xact-scoped, like FOLDER_REPARENT_LOCK_KEY — releases
-    // automatically on commit or rollback, and is a no-op wait (near-zero
-    // cost) for the overwhelmingly common case of no concurrent index for
-    // the same note.
+    // Serialize concurrent indexNote() calls for the same note: two overlapping
+    // edits would otherwise interleave their DELETE-then-INSERT on note_chunks and
+    // collide on note_chunks_note_id_chunk_index_key. Transaction-scoped, so it is
+    // released on commit or rollback.
     await client.query('select pg_advisory_xact_lock(hashtext($1))', [id]);
 
     // The lock above serializes two concurrent index writes; it does not
@@ -183,7 +164,7 @@ const ANNOUNCE_ABOVE_CHARS = 50_000;
  * until it commits there is nothing to look at: chunks are written in one
  * transaction at the end, so a job ten minutes from finishing and a job that
  * died look identical from the outside — no rows, no output, embedding_pending
- * still true. That ambiguity cost a full investigation of a working import.
+ * still true.
  */
 export function indexNoteAsync(id: string, title: string, content: string): void {
   const long = content.length >= ANNOUNCE_ABOVE_CHARS;

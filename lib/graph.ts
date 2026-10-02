@@ -64,28 +64,12 @@ export type IndexedGraph = {
 };
 
 /**
- * Re-shapes a graph for MCP output: edges reference nodes by array index
- * instead of repeating their 36-char UUID twice per edge. Two full UUIDs per
- * edge is most of what get_graph costs — 490 edges on a live vault is
- * ~48KB of ids an agent cannot act on without joining back to nodes anyway.
- * Not used by the REST route or MiniGraph — both key edges by id directly
- * (MiniGraph's hover/layout logic reads edge.from/to as ids throughout), so
- * changing their shape would mean rewriting the renderer for no reader who
- * asked for it. This is purely an MCP tool's own output transform.
- * An edge whose endpoint isn't in `nodes` (shouldn't happen — buildGraph
- * only ever edges within its own node set) is dropped rather than emitted
- * with a dangling index a consumer can't resolve.
- *
- * A node's own array position IS the index edges reference — an `i` field
- * repeating that position inside each node object added ~1000 chars (~6% of
- * a get_graph response) for a value a consumer never needs to read.
- *
- * Nodes carry the title and not the id, for the same reason edges carry an
- * index: nothing in this response resolves through a node id. Edges address
- * nodes positionally, titles are unique at the database level (migration
- * 006), and every tool an agent reaches for next — get_note, get_neighbors,
- * get_backlinks — accepts a title. The id was a third of the whole payload
- * and answered no question the response itself poses.
+ * Re-shapes a graph for MCP output: edges reference nodes by array index and
+ * nodes carry their title, not their UUID, since ids are most of the payload and
+ * nothing in the response resolves through them. Titles are unique (migration
+ * 006) and every follow-up tool (get_note, get_neighbors, get_backlinks) takes
+ * one. The REST route and MiniGraph keep id-keyed edges. An edge whose endpoint
+ * is missing from `nodes` is dropped rather than emitted with a dangling index.
  */
 export function indexedForm(graph: {
   nodes: GraphNode[];

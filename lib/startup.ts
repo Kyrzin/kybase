@@ -12,15 +12,9 @@ const PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const REINDEX_INTERVAL_MS = 60 * 60 * 1000;
 
 export async function startMaintenance(): Promise<void> {
-  // Catches the one path the settings UI's own provider-switch guard
-  // (app/api/settings/route.ts's providerChanged) can't see: an env var
-  // (EMBEDDING_PROVIDER, OLLAMA_MODEL, GOOGLE_MODEL, OPENAI_MODEL) edited in
-  // .env, picked up silently on the restart that follows — getEmbeddingConfig()
-  // falls back to process.env.* with nothing in that read path to notice a
-  // change. First run ever (nothing recorded yet) just records the current
-  // model rather than reindexing — there's no prior model to have drifted
-  // from, and the notes already reflect whatever was live before this check
-  // existed.
+  // Catches a model change made in .env and picked up on restart, which the
+  // settings UI's provider-switch guard cannot see. On the first run the current
+  // model is only recorded: there is no previous one to have drifted from.
   const currentModelKey = embeddingModelKey(await getEmbeddingConfig());
   const lastModelKey = await getLastIndexedModel();
   let widthSettled = true;

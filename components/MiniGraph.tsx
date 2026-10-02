@@ -637,11 +637,10 @@ export default function MiniGraph({
       const energy = nodes.filter(n => n.type !== 'folder').reduce((s, n) => s + n.vx * n.vx + n.vy * n.vy, 0);
       const camLive = Math.abs(cam.x - tgt.x) + Math.abs(cam.y - tgt.y) + Math.abs(cam.zoom - tgt.zoom) > 0.3;
 
-      // Gate sleep on hoveredRef, NOT hovId: hovId falls back to activeNoteId,
-      // which is almost always set, so the loop never slept and burned CPU the
-      // whole time the graph was open. Only a live hover needs continuous
-      // frames; the active-note spotlight (and its edge particles) freeze into
-      // a static focus frame until the next hover/select/drag wakes the loop.
+      // Gate sleep on hoveredRef, not hovId: hovId falls back to activeNoteId, which
+      // is almost always set, so the loop would never sleep. Only a live hover needs
+      // continuous frames; the active-note spotlight freezes into a static frame
+      // until the next hover, select or drag.
       if (!ctrl.paused && energy < 0.02 && !drag.nodeId && !drag.panning && !camLive && !hoveredRef.current) {
         sleeping = true;
         return;

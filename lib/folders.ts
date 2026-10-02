@@ -37,11 +37,9 @@ export class FolderPathNotFoundError extends Error {}
  * The folder id for a human-written path like "Projects/Kybase", matched
  * case-insensitively and forgiving of leading/trailing slashes.
  *
- * Exists so a caller with a path in hand does not have to fetch the whole
- * folder tree just to translate it into a UUID — the round-trip every
- * folder-scoped search used to start with. Throws with real examples rather
- * than returning null: a mistyped path that silently searched the whole vault
- * would look like a working search with wrong results.
+ * Saves a caller with a path from fetching the whole folder tree. Throws with
+ * examples rather than returning null: a mistyped path that silently searched
+ * the whole vault would look like a working search with wrong results.
  */
 export async function folderIdFromPath(folderPath: string): Promise<string> {
   const paths = await folderPathMap();

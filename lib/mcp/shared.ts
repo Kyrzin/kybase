@@ -4,30 +4,19 @@ import { escapeLike } from '../sql';
 import { extractAllWikilinks } from '../wikilinks';
 
 /**
- * A UUID parameter.
- *
- * Not `uuid()`, which emits `format: "uuid"` AND a 166-character
- * `pattern` restating it — seventeen times across this server's tools, 706
- * tokens of identical machine-generated regex an agent reads on every
- * session and learns nothing from. The refinement validates exactly what
- * that pattern did (verified against it, nil UUID included) and is invisible
- * to JSON Schema, so `format` is declared explicitly and carries the meaning
- * on its own.
+ * A UUID parameter. Not z.uuid(), which also emits a long `pattern` into every
+ * tool schema; this refinement accepts the same values (nil UUID included) and
+ * declares `format: "uuid"` explicitly.
  */
 const UUID_RE = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
 export const uuid = () => z.string().refine((v) => UUID_RE.test(v), 'must be a UUID').meta({ format: 'uuid' });
 
 
 
-// get_note(title=...) is the shortcut past search_notes, but real titles are long
-// and composite (" — Kybase: Move-folder + sidebar UX polish"), and
-// an agent almost never reproduces one verbatim from memory. Exact-only matching
-// made that shortcut a coin flip: title "Kybase" returned a bare "Note not found"
-// while seven notes started with "Kybase — ". An exact (case-insensitive) hit
-// still wins outright; only when there is none do we widen to prefix, then
-// substring — resolving when exactly one note matches and listing the candidates
-// when several do. Wikilink resolution stays exact: a fuzzy match there would
-// wire up an edge the author never wrote.
+// get_note(title=...): an exact case-insensitive match wins; otherwise prefix,
+// then substring, resolving when exactly one note matches and listing the
+// candidates when several do. Wikilink resolution stays exact: a fuzzy match
+// there would create an edge the author never wrote.
 const TITLE_CANDIDATE_LIMIT = 10;
 const TITLE_HINT_LIMIT = 5;
 
@@ -77,11 +66,8 @@ export async function findNoteByTitle<T>(title: string, cols: string): Promise<T
   );
 }
 
-// A note's full content used to go out unconditionally — a ~60k-char note
-// (~25k+ tokens, worse for dense Cyrillic) hard-fails the MCP host's
-// response-size limit with no way to retrieve the rest. 20000 chars keeps
-// the JSON response comfortably under that even for Cyrillic-heavy text;
-// most notes are far smaller and pass through untouched.
+// Default get_note window: a whole long note can exceed an MCP host's response
+// size limit, and 20000 chars stays under it even for dense Cyrillic.
 export const DEFAULT_CONTENT_LIMIT = 20_000;
 // get_note_with_links can pull in many linked notes at once — each is capped
 // tighter than a standalone get_note so a handful of large linked notes

@@ -1,8 +1,8 @@
 // lib/tokens.ts — revocable OAuth access tokens for MCP clients.
 //
 // Scope, deliberately: these tokens authenticate the MCP endpoint only.
-// The browser UI and REST API keep using the master secret (verified
-// stateless in proxy.ts — Next's own guidance is to avoid DB/shared-module
+// The browser UI and REST API keep using the master secret (checked
+// statelessly in proxy.ts — Next's own guidance is to avoid DB/shared-module
 // dependencies there, since Proxy can run isolated from the main app, e.g.
 // deployed to a CDN). The master secret is also always accepted at the MCP
 // endpoint, so existing deployments keep working untouched.

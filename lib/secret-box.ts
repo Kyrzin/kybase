@@ -17,8 +17,8 @@ import crypto from 'crypto';
 const ALGORITHM = 'aes-256-gcm';
 const IV_BYTES = 12; // GCM's standard 96-bit nonce
 // Prefix, not a try/decrypt-and-catch: lets callers tell a migrated value
-// apart from a pre-migration plaintext value (e.g. an API key typed in
-// before this existed) without risking a false "successful" decrypt of
+// apart from a plaintext value saved before encryption was introduced, without
+// risking a false "successful" decrypt of
 // data that was never ciphertext in the first place.
 const PREFIX = 'enc:v1:';
 

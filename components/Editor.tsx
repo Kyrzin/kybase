@@ -2,8 +2,8 @@
 
 // components/Editor.tsx — note view/edit surface: toolbar (rename note &
 // folder, move, share, wikilink picker, tags) and the editor/preview body
-// with wikilink autocomplete. Extracted from KybaseApp. The editor-only
-// refs and insertWikilink live here; everything shared comes in as props.
+// with wikilink autocomplete. The editor-only refs and insertWikilink live
+// here; everything shared comes in as props.
 import { useRef, useCallback } from 'react';
 import type { ListedNote, Folder } from '@/lib/types';
 import { Icons } from './Icons';

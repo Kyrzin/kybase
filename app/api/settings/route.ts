@@ -25,10 +25,9 @@ const UpdateSettingsSchema = z.object({
     (v) => { try { parseRequestedDimensions(v); return true; } catch { return false; } },
     { message: "must be a positive integer or 'native'" },
   ).optional(),
-  // migration 016 — notes_search_vector_trigger/search_notes_fts combine
-  // these (plus 'simple', always) instead of the old hardcoded ru+en pair.
-  // No per-language validation here — an unregistered Postgres text search
-  // config name is caught and skipped inside the trigger itself, not here.
+  // migration 016: the search trigger and search_notes_fts combine these (plus
+  // 'simple', always). An unknown text search config is skipped inside the
+  // trigger, so it is not validated here.
   ftsLanguages: z.array(z.string().min(1)).min(1).optional(),
   // Mechanic (lib/search.ts multiplies a hit's raw rank by this before
   // normalizing) is in code; the tags and their weights are entirely this
@@ -60,11 +59,7 @@ const UpdateSettingsSchema = z.object({
   rerankMinScore: z.number().gt(0).lt(1).nullable().optional(),
 });
 
-// Auth is proxy.ts.ts (session cookie or master-secret bearer) — this
-// route used to re-check the bearer itself too, which only re-verified the
-// same secret through a second code path and went stale the moment the UI
-// stopped sending it (see the session-cookie change): the browser started
-// getting 401s here even though proxy.ts had already let it through.
+// Auth is proxy.ts (session cookie or master-secret bearer).
 export async function GET() {
   const [cfg, ftsLanguages, tagWeights, folderWeights, embeddingBands, keyHealth, rerankEnabled, rerankMinScore, availableLanguages] = await Promise.all([
     getEmbeddingConfig(), getFtsLanguages(), getTagWeights(), getFolderWeights(), getEmbeddingBands(), getProviderKeyHealth(), getRerankEnabled(), getRerankMinScore(),
@@ -141,11 +136,8 @@ export async function PUT(req: NextRequest) {
   if (body.rerankEnabled !== undefined) await setRerankEnabled(body.rerankEnabled);
   if (body.rerankMinScore !== undefined) await setRerankMinScore(body.rerankMinScore);
 
-  // Mark all live notes for reindex when provider changes. Used to also
-  // kick off /api/admin/reindex itself right here — a single Save click
-  // silently re-embedding the whole vault against a fresh API key/quota
-  // with no confirmation. Now it only flags the notes; the caller decides
-  // whether to run "Reindex" right away.
+  // A provider change only marks live notes for reindex; running the reindex,
+  // which may spend API quota, is the caller's choice.
   let pendingCount = 0;
   let dimensionNote: string | null = null;
   if (providerChanged) {

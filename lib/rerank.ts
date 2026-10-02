@@ -26,14 +26,7 @@ const num = (v: string | undefined, fallback: number) => {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 };
 
-/**
- * Where the reranker lives when nothing says otherwise — the compose service
- * name, so bringing the profile up is the whole setup. It used to take an
- * env var as well, which meant two switches that knew nothing about each
- * other: a started container with the variable unset showed no toggle at all,
- * and a set variable with no container showed a toggle that silently did
- * nothing.
- */
+/** The compose service name, so starting the profile is the whole setup; KYBASE_RERANK_URL overrides it. */
 const DEFAULT_RERANK_URL = 'http://reranker:80';
 
 export function rerankUrl(): string {

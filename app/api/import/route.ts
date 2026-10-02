@@ -163,14 +163,9 @@ export async function POST(req: NextRequest) {
       // folders as a side effect of a path it's about to abandon.
       const folderId = await ensureFolderPath(segments, folderCache);
       if (existing) {
-        // "Take the vault away and bring it back" (export, then re-import
-        // over itself) used to unconditionally set embedding_pending and
-        // drop folder_id/created_at on every matched note — a full-vault
-        // round trip meant a full re-embed even when nothing changed, and
-        // silently lost each note's folder placement and original creation
-        // date. Skip entirely when content/tags/folder already match; when
-        // they don't, carry folder_id and created_at through same as a
-        // fresh insert does.
+        // Re-importing an export over itself must not re-embed unchanged notes or lose
+        // their folder and creation date: skip notes whose content, tags and folder
+        // already match, otherwise carry folder_id and created_at like a fresh insert.
         const unchanged = existing.content === content
           && existing.folder_id === folderId
           && JSON.stringify(existing.tags) === JSON.stringify(tags);

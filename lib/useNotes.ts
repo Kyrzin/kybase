@@ -1,12 +1,9 @@
 'use client';
 
-// lib/useNotes.ts — the data layer extracted from KybaseApp: notes/folders
-// loading, the editor buffer (activeNoteId + editMode/editTitle/editContent),
-// folder expansion, autosave, and every CRUD action. Pure data + its
-// mutations live here; UI reactions that a data action must trigger (closing
-// the mobile sidebar, dismissing the share popover, clearing transient
-// toolbar state, restoring the persisted focus) are passed in as callbacks so
-// this hook owns no view state.
+// lib/useNotes.ts — the data layer for KybaseApp: notes/folders loading, the
+// editor buffer (activeNoteId + editMode/editTitle/editContent), folder
+// expansion, autosave, and every CRUD action. UI reactions a data action must
+// trigger are passed in as callbacks, so this hook owns no view state.
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { flushSync } from 'react-dom';
 import type { Note, Folder, ListedNote, NoteSummary } from './types';
@@ -87,17 +84,12 @@ export function useNotes(cb: UseNotesCallbacks) {
   type SendResult<T> = { ok: true; data: T } | { ok: false; status: number | null };
 
   /**
-   * Every write here used to treat "request sent" as "server agreed": the
-   * local state updated regardless of the reply. A note trashed in another
-   * tab or by the agent answers 404, and the editor went on showing edits as
-   * saved that never reached the database. Callers now only commit to local
-   * state when this reports ok, and the failure reaches the screen.
+   * Callers commit to local state only when this reports ok; a failure (a 404
+   * for a note trashed elsewhere, for example) reaches the screen.
    *
-   * Returns the parsed body on success (not just a boolean) — callers that
-   * write updated_at into local state need the server's value, not a client
-   * clock guess: a locally-fabricated timestamp would never match what the
-   * database actually stored, and comparing against it (see saveActiveNote's
-   * expected_updated_at) would reject every second save.
+   * Returns the parsed body: callers that keep updated_at need the server's
+   * value, since a client-made timestamp would make expected_updated_at reject
+   * the next save.
    */
   const send = useCallback(async <T = unknown>(
     path: string, init: RequestInit, whatFailed: string

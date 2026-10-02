@@ -1,20 +1,11 @@
 // lib/pdf-import.ts — PDF → Markdown, structure-aware (not just text dump).
 //
-// Why this exists: pasting PDF-extracted text straight into a note gives
-// chunkNote/extractHeadings nothing to work with — no headings means chunks
-// split by raw size instead of section, and get_note(section:) has nothing
-// to navigate. Worse, some books use a leading `#` in code-comment examples
-// ("# Remove stopped containers") which extractHeadings' own H1 regex reads
-// as a real markdown heading. On a technical book that yields dozens of
-// "headings", all fake, none of them an actual chapter title.
 //
-// Scope, deliberately narrow: this module fixes headings and running
-// header/footer noise. It does NOT attempt to fix mid-word character
-// spacing some PDFs extract with ("std i o . write l n") or reconstruct
-// diagrams/figures (they extract as unordered text fragments, sometimes
-// literal U+FFFD) — both are real problems, but a different, fuzzier kind
-// of fix than "where do headings go", and were explicitly left out of this
-// pass rather than bolted on half-working.
+// Plain extracted text has no headings, so chunks would split by size and
+// get_note(section:) would have nothing to navigate; a code comment starting
+// with "#" would even read as a heading. This module recovers headings and
+// removes running headers and footers. It does not repair mid-word spacing or
+// reconstruct figures.
 import './pdf-polyfills'; // must run before pdfjs-dist — see that file
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 
@@ -38,18 +29,12 @@ function timeout(ms: number, message: string): Promise<never> {
 }
 
 /**
- * Thin I/O wrapper around pdfjs-dist — not unit tested directly (needs a
- * real PDF), kept minimal so the actual conversion logic below (pure
- * functions over plain data) can be tested without one. No `worker` option
- * is passed — the legacy Node build (pdfjs-dist/legacy/build/pdf.mjs) runs
- * parsing on the main thread by itself when nothing spawns a real Worker,
- * which is the case here (no browser, no separate worker file to point at).
- * A book-length PDF parses in seconds this way, with no worker involved.
+ * Thin I/O wrapper around pdfjs-dist; the conversion logic below is pure
+ * functions over plain data. The legacy Node build parses on the main thread
+ * when no Worker is spawned, so no `worker` option is passed.
  *
- * The timeout races the whole extraction, not just the initial getDocument()
- * call — pdfjs yields to the event loop between pages (each is its own
- * await), so a race can actually preempt a slow multi-page document instead
- * of only catching a slow initial parse.
+ * The timeout races the whole extraction, not just getDocument(): pdfjs
+ * yields between pages, so a slow multi-page document can be preempted.
  */
 export async function extractPdfPages(buffer: Buffer): Promise<PdfPage[]> {
   return Promise.race([
@@ -85,11 +70,9 @@ async function extractPdfPagesUnbounded(buffer: Buffer): Promise<PdfPage[]> {
   return pages;
 }
 
-// A gap between two items wider than this fraction of the font size is a
-// real inter-word space the extractor represented as item positioning
-// instead of a literal " " character — verified against real PDFs where
-// most inter-word gaps land around 0.25-0.4em. Narrower than that is
-// kerning within one run, not a space.
+// A gap wider than this fraction of the font size is an inter-word space the
+// extractor expressed as positioning (typical word gaps are 0.25-0.4em);
+// narrower is kerning within a run.
 const SPACE_GAP_EM = 0.2;
 
 function joinLineText(items: PdfTextItem[]): string {
@@ -200,10 +183,9 @@ export function findHeaderFooterLines(pages: PdfPage[]): Set<string> {
   return result;
 }
 
-// A heading candidate must be at least this much larger than body text —
-// verified against a real book where the actual section-heading size sat
-// ~20% over body (11pt body, 13.15pt heading); 15% leaves margin without
-// catching body-adjacent sizes (e.g. a slightly-larger figure caption).
+// A heading candidate must be at least this much larger than body text: section
+// headings typically sit ~20% above body size, and 15% still excludes slightly
+// larger captions.
 const HEADING_SIZE_RATIO = 1.15;
 // Headings are short by nature. This also rejects the real failure mode
 // found: some books render individual emphasized terms mid-sentence
@@ -215,16 +197,10 @@ const HEADING_SIZE_RATIO = 1.15;
 // is a pull-quote/callout sentence, not a heading.
 const MAX_HEADING_WORDS = 12;
 
-// A word needs this many actual letters (any script — \p{L} is Unicode-
-// general, not tied to Latin/Cyrillic/etc.) to count as "real text" rather
-// than layout noise. Formulas, table remnants, and diagram fragments (single
-// letters, repeated glyphs, digit runs, stray punctuation) routinely pass
-// every other heading check — same isolated-uniform-large-font shape as a
-// real heading, verified on multiple books, different noise each time.
-// The one thing they don't have in common with real headings, in any
-// language: an actual multi-letter word. "1.1 Introduction" and "1.1 First
-// Program" both clear this; "i", "J J J J J J J J", "4<0xFFFD>", "::::: 9.21034."
-// don't, regardless of what book they came from.
+// A word needs this many letters (any script, \p{L}) to count as text rather
+// than layout noise. Formulas, table remnants and diagram fragments can look
+// like headings (isolated, uniform, large) but lack a multi-letter word:
+// "1.1 Introduction" passes, "J J J J" and "::::: 9.21034." do not.
 const MIN_SUBSTANTIAL_WORD_LETTERS = 3;
 const REPLACEMENT_CHAR = '�'; // U+FFFD — pdf.js's marker for a glyph with no Unicode mapping; corruption in any language.
 
@@ -308,15 +284,8 @@ export function pagesToMarkdown(pages: PdfPage[]): string {
   const flushParagraph = () => {
     if (paragraph.length) {
       const text = paragraph.join(' ').replace(/\s+/g, ' ').trim();
-      // A body/code line that happens to start a paragraph with a literal
-      // "#" (a shell/Python comment marker, most often) is exactly the bug
-      // this whole module exists to fix, just from the PDF-import side
-      // instead of copy-paste — verified: real book code comments
-      // ("# Array initialization...") landed at a paragraph's start often
-      // enough to matter. extractHeadings/chunkNote read `^#{1,6}\s` as a
-      // real heading with no way to know it came from inside a code
-      // listing; escaping it here is the same fix a human editor would
-      // apply by hand.
+      // A body or code line starting with "#" (a code comment in a listing) would be
+      // read as a markdown heading by extractHeadings/chunkNote; escape it.
       out.push(/^#{1,6}\s/.test(text) ? `\\${text}` : text);
     }
     paragraph = [];

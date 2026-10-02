@@ -2,16 +2,10 @@
 // /.well-known/oauth-protected-resource via a rewrite (next.config.ts), the
 // same way the authorization-server document is.
 //
-// This is the document an MCP client looks for FIRST. It does not guess that
-// the MCP endpoint and its authorization server live on the same origin: it
-// asks the resource which authorization servers it trusts, and only then reads
-// that server's own metadata. Measured against a deployed
-// instance: this path returned 404, /api/mcp answered 401 with no
-// WWW-Authenticate header to point anywhere, and claude.ai's connector gave up
-// with "Automatic client registration isn't supported" — a message about the
-// step it never got to, not the step that actually failed. Adding dynamic
-// registration alone did not fix it, because the client could not find the
-// authorization server that offers the registration in the first place.
+// This is the document an MCP client reads first: it asks the resource which
+// authorization servers it trusts instead of assuming they share its origin,
+// then reads that server's metadata. Without it (and the WWW-Authenticate
+// header on a 401 from /api/mcp) a client cannot find the registration endpoint.
 import { NextRequest, NextResponse } from 'next/server';
 
 export const dynamic = 'force-dynamic';

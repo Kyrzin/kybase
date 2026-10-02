@@ -1,11 +1,8 @@
 // lib/oauth-clients.ts — clients registered through RFC 7591 (migration 027).
 //
-// Exists because hosted MCP clients refuse to talk to an authorization server
-// without a registration endpoint: claude.ai's connector reports "Incompatible
-// auth server: does not support dynamic client registration" and never reaches
-// the consent page. It also finally makes "the client's registered redirect
-// URIs" a real thing here, which is what OAuth 2.1 wants compared against —
-// before this, a client_id was any string the caller invented.
+// Hosted MCP clients will not authorize against a server without a registration
+// endpoint. Registration also gives each client the list of redirect URIs that
+// OAuth 2.1 compares against.
 import crypto from 'crypto';
 import { query as dbQuery } from './db';
 
@@ -33,11 +30,11 @@ export async function registerClient(clientName: string | null, redirectUris: st
 }
 
 /**
- * A registered client, or null. Null is not an error: this server has always
- * accepted a made-up client_id, and installs that connected before migration
- * 027 still hold one. Those fall back to the server-wide callback list, which
- * is the same gate registration itself enforces — so an unregistered client is
- * never able to reach a callback a registered one couldn't.
+ * A registered client, or null. Null is not an error: unregistered client_ids
+ * are still accepted for clients that connected before registration existed.
+ * They fall back to the server-wide callback list, the same gate registration
+ * enforces, so an unregistered client never reaches a callback a registered
+ * one couldn't.
  */
 export async function getClient(clientId: string): Promise<OAuthClient | null> {
   if (!clientId) return null;

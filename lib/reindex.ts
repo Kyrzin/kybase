@@ -139,9 +139,9 @@ async function runLocked(current: ReindexProgress, mode: 'pending' | 'all'): Pro
 /**
  * Starts a reindex in the background unless one is already running (in
  * which case this just returns the run already in progress — the caller
- * can poll getReindexProgress() either way). Guards against the same storm
- * that used to happen on a double-click, a page reload mid-run, or the
- * hourly sweep landing while a manual "Reindex all" is still going.
+ * can poll getReindexProgress() either way). Guards against overlapping runs:
+ * a double-click, a reload mid-run, or the hourly sweep during a manual
+ * "Reindex all".
  */
 export function startReindex(mode: 'pending' | 'all'): { started: boolean; progress: ReindexProgress } {
   if (progress?.running) return { started: false, progress };

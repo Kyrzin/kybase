@@ -16,10 +16,8 @@ export async function DELETE(
     if (!revoked) return NextResponse.json({ error: 'Not found' }, { status: 404 });
     return new NextResponse(null, { status: 204 });
   } catch (err) {
-    // shareId now compares against a uuid column (it used to be free-form
-    // text, the token itself) — a malformed id (a stale bookmark, a client
-    // still sending the old secret-token param) throws here instead of just
-    // failing to match. Report it as the client error it is, not a 500.
+    // shareId is a uuid column: a malformed id (a stale bookmark, an old client
+    // sending the token) is a client error, not a 500.
     if (isInvalidTextRepresentation(err)) {
       return NextResponse.json({ error: 'Malformed share id' }, { status: 400 });
     }

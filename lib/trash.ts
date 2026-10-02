@@ -1,19 +1,13 @@
 // lib/trash.ts — soft delete for notes (see db/migrations/011).
 //
-// delete_note used to be instant and permanent, callable by anything holding
-// the master secret or an MCP token, with no confirmation. Notes are also
-// populated by an agent from external content, so a prompt-injected "clean
-// up the vault" instruction could wipe real data with nothing to recover.
-// softDeleteNote just hides the row (deleted_at); every read path across the
-// app filters deleted_at is null, so a trashed note behaves as gone
-// everywhere except restore_note/listTrash.
 //
-// purgeExpiredTrash also runs opportunistically here on every delete (same
-// pattern as lib/tokens.ts's oauth_tokens cleanup), but that alone doesn't
-// actually guarantee the "30 days" the UI promises: a vault where nothing
-// else ever gets deleted would keep one trashed note forever. instrumentation.ts
-// also runs it on a daily interval so the retention window is a real
-// guarantee, not just a side effect of unrelated activity.
+// Notes are written by agents from external content, so a prompt-injected
+// "clean up the vault" must not be able to destroy data: deleting hides the row
+// (deleted_at) and every read path filters deleted_at is null, so a trashed
+// note is gone everywhere except restore_note/listTrash.
+//
+// purgeExpiredTrash runs on every delete and daily from lib/startup.ts, so the
+// retention window holds even in a vault where nothing else is deleted.
 import { query, queryOne, queryOneAs } from './db';
 import { invalidateSemanticEdgesCache } from './semantic-edges';
 
@@ -75,17 +69,12 @@ export async function purgeNote(id: string): Promise<boolean> {
 }
 
 /**
- * Soft-deletes every live note inside a folder AND its full descendant
- * subtree — called before the folder row itself is deleted, in the same
- * transaction (hence the explicit client: this must not commit unless the
- * folder delete that follows also succeeds). Folders cascade on delete
- * (parent_id references folders(id) on delete cascade) and notes used to
- * just get orphaned to root (folder_id set null) when their folder
- * disappeared; deleting a folder now sends its notes to the trash instead,
- * recoverable for TRASH_RETENTION_DAYS like any other delete. Already-
- * trashed notes in the subtree are left alone (their own deleted_at stands).
- * Note history attributes the deletes to the actor of the caller's
- * transaction (withTransaction's attribution).
+ * Soft-deletes every live note in a folder and its whole subtree, before the
+ * folder row is deleted and in the same transaction (hence the explicit
+ * client: this must not commit unless the folder delete does). The notes go to
+ * the trash, recoverable for TRASH_RETENTION_DAYS; already-trashed notes keep
+ * their own deleted_at. Note history attributes the deletes to the caller's
+ * transaction actor.
  */
 export async function trashFolderNotes(
   folderId: string,

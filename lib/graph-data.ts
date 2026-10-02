@@ -7,8 +7,7 @@ import { getSemanticEdges, type SemanticEdge } from './semantic-edges';
 import { dedupeEdges, type GraphNode, type GraphEdge } from './graph';
 import { wikilinkEdges } from './note-links';
 
-// Semantic edges: undirected embedding-similarity pairs. Same parameters the
-// API route and MCP tool used before this was unified.
+// Semantic edges: undirected embedding-similarity pairs.
 const SEMANTIC_THRESHOLD = 0.75;
 const SEMANTIC_MAX_NEIGHBORS = 5;
 
@@ -92,16 +91,10 @@ export async function buildGraph(opts: BuildGraphOptions = {}): Promise<Graph> {
     subtreeIds = [...ids];
   }
 
-  // Content is no longer selected here: links come from the stored index
-  // (lib/note-links.ts), so rendering a graph stops costing a full read of
-  // every note's text. On a live vault that was 1.2 MB fetched and
-  // re-parsed per call to produce a few hundred edges.
-  //
-  // rootTitle has to see the whole link graph to walk out from its root, so
-  // only the result can be bounded there. Every other call — including the
-  // unfiltered one that used to return the entire vault — is bounded by the
-  // query itself. Ordering by recency makes the cut deterministic and keeps
-  // the half of the vault someone is actually working in.
+  // Links come from the stored index (lib/note-links.ts), so a graph does not
+  // read every note's text. rootTitle has to see the whole link graph to walk out
+  // from its root, so only its result is bounded; every other call is bounded in
+  // the query, ordered by recency so the cut is deterministic.
   const params: unknown[] = [];
   const conds = ['deleted_at is null'];
   if (subtreeIds) { params.push(subtreeIds); conds.push(`folder_id = any($${params.length})`); }

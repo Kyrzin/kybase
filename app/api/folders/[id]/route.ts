@@ -103,7 +103,6 @@ export async function DELETE(
     const message = err instanceof Error ? err.message : 'Delete failed';
     return NextResponse.json({ error: message }, { status: 500 });
   }
-  // The count the UI needs to say what just happened — a folder delete now
-  // reaches every note in the subtree, which a confirm dialog cannot show.
+  // How many notes in the subtree went to the trash, for the UI to report.
   return NextResponse.json({ trashed }, { status: 200 });
 }

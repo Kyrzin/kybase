@@ -115,10 +115,8 @@ export function resolveInsertOffset(
 
 /**
  * Splices `addition` into `content` at `offset`, blank-line-separated from
- * whatever is on either side. Exactly reproduces append_to_note's original
- * two shapes (offset = content.length for a whole-note append, offset =
- * range.end for a section append) as special cases of one rule, so neither
- * had to change to gain the other four `at` positions.
+ * whatever is on either side. A whole-note append (offset = content.length)
+ * and a section append (offset = range.end) are special cases of this rule.
  */
 export function insertAddition(content: string, offset: number, addition: string): string {
   const head = content.slice(0, offset).trimEnd();

@@ -22,11 +22,9 @@ function esc(s: string) {
 //     RFC 9700 actually require and what a server-wide list can only
 //     approximate.
 //
-// An unregistered client_id skips step 2 rather than failing it. This server
-// accepted an invented client_id long before registration existed, and
-// installs that connected under the old scheme still present one; step 1
-// still holds for them, so they can never reach a callback a registered
-// client couldn't.
+// An unregistered client_id skips step 2 rather than failing it, for clients
+// that connected before registration existed. Step 1 still holds for them, so
+// they can never reach a callback a registered client couldn't.
 async function checkRedirectUri(uri: string, clientId: string): Promise<URL | null> {
   const url = parseRedirectUri(uri);
   if (!url) return null;

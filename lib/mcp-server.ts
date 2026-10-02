@@ -15,22 +15,11 @@ export type { AppendAt } from './mcp/text-edit';
 type ToolReply = { isError?: boolean; content?: { text?: string }[] };
 
 /**
- * One stderr line per tool call: what was called, whether it worked, how much
- * came back, how long it took.
+ * One stderr line per tool call: tool, outcome, reply size, duration.
  *
- * Nothing on this path used to log at all, which made every "how often does
- * this actually happen" question unanswerable — the size of a reply, the rate
- * of refusals and which tools agents reach for were all invisible to the
- * person running the server. `docker logs` is where that belongs.
- *
- * Wrapped at the server rather than at each registration so a tool added
- * later is logged without anyone remembering to, and so the eighteen call
- * sites below stay about the tools instead of about logging.
- *
- * Deliberately never logs arguments or reply text — a query string and a note
- * body are the two things most worth not writing to a log file. Length is the
- * part that answers the question. stderr, because in stdio mode stdout
- * carries JSON-RPC framing and nothing else.
+ * Wrapped at the server, so a tool added later is logged too. Never logs
+ * arguments or reply text: queries and note bodies stay out of logs. stderr,
+ * because in stdio mode stdout carries JSON-RPC framing only.
  */
 function logToolCalls(server: McpServer): void {
   const wrap = (register: (...a: unknown[]) => unknown) => (...args: unknown[]) => {
@@ -49,11 +38,7 @@ function logToolCalls(server: McpServer): void {
           done(reply?.isError ? 'error' : 'ok', chars);
           return reply;
         } catch (err) {
-          // A throw becomes an isError reply one layer up, so it is the same
-          // event to a caller and has to read the same way here — including
-          // its size. A refusal that lists every heading in a note is not a
-          // cheap reply, and a log that called every error 0ch would hide
-          // exactly the ones worth finding.
+          // A throw becomes an isError reply one layer up; log it the same way, with its size.
           done('error', err instanceof Error ? err.message.length : 0);
           throw err;
         }

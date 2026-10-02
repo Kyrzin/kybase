@@ -1,7 +1,6 @@
 // lib/migrate.ts — applies db/migrations/*.sql in filename order at server
-// start (instrumentation.ts), tracked in schema_migrations. Replaces the old
-// "apply new files with psql by hand" upgrade step — a `git pull` without it
-// used to mean 500s from a schema the code no longer matched.
+// start (instrumentation.ts), tracked in schema_migrations, so the schema always
+// matches the code that runs against it.
 //
 // Databases created before schema_migrations existed get every migration
 // replayed once: all shipped migrations are idempotent (if not exists /

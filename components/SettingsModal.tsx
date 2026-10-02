@@ -102,9 +102,7 @@ export default function SettingsModal({ apiFetch, onClose, reloadNotes, onShareR
   // Text, not a number input: 'native' is a legal value, and an empty number
   // field is indistinguishable from a zero.
   const [settingsDim, setSettingsDim] = useState('');
-  // Fetched from the provider itself — a caption cannot say which models a
-  // provider still offers, and Google withdrew the one that used to be named
-  // here while it was still the shipped default.
+  // Fetched from the provider: the models it offers change over time.
   const [modelList, setModelList] = useState<{ provider: string; models: { id: string }[]; error?: string; filtered: boolean } | null>(null);
   const [pull, setPull] = useState<{ running: boolean; model?: string; completed?: number; total?: number; status?: string; error?: string } | null>(null);
   const [settingsSaving, setSettingsSaving]   = useState(false);
@@ -236,12 +234,8 @@ export default function SettingsModal({ apiFetch, onClose, reloadNotes, onShareR
     if (data) setRerankMinScore(data.rerankMinScore == null ? '' : String(data.rerankMinScore));
   };
 
-  // Blank clears the floor, and so does 0 — that is what someone types to
-  // mean "no floor", and it used to hit the range check and return without
-  // saving or saying anything. The field then showed 0 while the old floor
-  // stayed in force, which is the worst possible answer: it cost a round of
-  // live measurements that were all silently run against the previous value.
-  // Anything else out of range now reverts the field instead of pretending.
+  // Blank or 0 clears the floor; any other out-of-range value reverts the field
+  // instead of being ignored silently.
   const saveRerankMinScore = async () => {
     const raw = rerankMinScore.trim();
     const parsed = Number(raw);
@@ -281,9 +275,7 @@ export default function SettingsModal({ apiFetch, onClose, reloadNotes, onShareR
     setTrashError(null);
     const res = await apiFetch(`/api/notes/${id}/restore`, { method: 'POST' });
     if (!res.ok) {
-      // The one restore failure mode a user can actually act on is a title
-      // collision (409) — silently doing nothing here left no way to tell
-      // "worked" from "can't, rename the live note first" apart.
+      // A title collision (409) is the restore failure a user can act on, so say so.
       const body = await res.json().catch(() => ({}));
       setTrashError(body.error ?? `Restore failed (HTTP ${res.status})`);
       return;

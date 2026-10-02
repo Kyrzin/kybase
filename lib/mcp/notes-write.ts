@@ -12,11 +12,8 @@ import { resolveInsertOffset, insertAddition, countOccurrences, truncateForError
 
 export function registerNoteWriteTools(server: McpServer, actor: () => string): void {
   // ── create_note ──────────────────────────────────────────────────────────
-  // create_note and update_note used to restate this server's wikilink and
-  // tag rules in full. Those rules are already in `instructions` above, which
-  // every client receives once per session, so the copies cost the same bytes
-  // on every schema load while saying nothing new. What a tool description
-  // still has to carry is the CUE that they apply at this call — that stays.
+  // The wikilink and tag rules live in `instructions`; tool descriptions carry
+  // only the cue that they apply to this call.
   server.tool(
     'create_note',
     'Create a new note. Embedding is generated automatically in the background. ' +

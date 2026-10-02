@@ -1,13 +1,8 @@
 // lib/provider-models.ts — which embedding models a provider actually offers
 //
-// The settings dialog used to name one model per provider as a fixed caption.
-// A caption cannot go stale gracefully: Google withdrew text-embedding-004
-// while it was still the shipped default and the only name the dialog showed,
-// so the dialog kept advertising a model whose every request answers 404.
 //
-// Asking the provider is the only thing that cannot drift. Each lookup is one
-// authenticated GET, made when the dialog opens, and never on the embedding
-// path.
+// Asks the provider, so the settings dialog never advertises a withdrawn model.
+// One authenticated GET when the dialog opens; never on the embedding path.
 import { getEmbeddingConfig, type EmbeddingProvider } from './settings';
 
 export type ProviderModel = { id: string; note?: string };

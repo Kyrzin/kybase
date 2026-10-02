@@ -106,15 +106,10 @@ export async function setLastIndexedModel(key: string): Promise<void> {
 
 export type KeyStatus = 'unset' | 'ok' | 'undecryptable';
 
-// Distinguishes "never set" from "set but can't be decrypted with the
-// current KYBASE_SECRET" — getSetting()/getEmbeddingConfig() collapse both
-// into a silent null (falls back to the env var, keeps the hot embedding
-// path from throwing), which is right for that path but hides a real
-// problem: a stored key that used to work has gone dark, usually because
-// KYBASE_SECRET was rotated after it was saved. Read directly rather than
-// reusing getSetting so this stays a diagnostic, not a second silent
-// fallback — the settings UI needs to tell the two states apart, not
-// paper over the second one too.
+// Tells "never set" from "set but not decryptable with the current
+// KYBASE_SECRET" (for example after rotating the secret). getSetting collapses
+// both into null so the embedding path never throws; the settings UI needs the
+// difference, so this reads the row directly.
 async function getEncryptedKeyStatus(key: string): Promise<KeyStatus> {
   const row = await queryOne<{ value: string }>(
     'select value from settings where key = $1',
@@ -268,10 +263,7 @@ async function getBandsUncached(): Promise<Record<string, BandOverride>> {
     if (typeof value !== 'object' || value === null) continue;
     const v = value as Record<string, unknown>;
     const band: BandOverride = {};
-    // A cosine band only makes sense inside [0, 1), and the floor has to sit
-    // ABOVE the gate or the fraction the ladder computes from them inverts.
-    // A hand-edited row must degrade to "unmeasured" (the ladder then refuses
-    // to claim full corroboration), never to a silently inverted scale.
+    // A similarity floor only makes sense inside [0, 1); anything else is ignored.
     if (typeof v.gate === 'number' && Number.isFinite(v.gate) && v.gate >= 0 && v.gate < 1) band.gate = v.gate;
     if (band.gate !== undefined) out[key] = band;
   }
@@ -394,10 +386,8 @@ export async function getEmbeddingConfig(): Promise<EmbeddingConfig> {
     getSetting('embedding_dim'),
   ]);
 
-  // The literal fallbacks are the ones lib/embeddings.ts used to inline, kept
-  // exactly: embeddingModelKey is built from these, and a key that changed
-  // shape would tell every existing vault its model had changed and cost it a
-  // full, pointless reindex.
+  // embeddingModelKey is built from these fallbacks; changing them would change
+  // existing vaults' model key and force a full reindex.
   const cfg: EmbeddingConfig = {
     provider: (provider ?? process.env.EMBEDDING_PROVIDER ?? 'ollama') as EmbeddingProvider,
     googleApiKey:  googleApiKey  ?? process.env.GOOGLE_API_KEY,

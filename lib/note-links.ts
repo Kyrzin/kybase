@@ -1,15 +1,11 @@
 // lib/note-links.ts — the stored [[wikilink]] index (migration 031).
 //
-// Backlinks and the graph used to answer "who links here" by loading note
-// content and running the parser over it on every call. This keeps the parse
-// result instead, and recomputes only what has actually changed.
 //
-// One parser, still. Links are extracted by lib/wikilinks.ts here exactly as
-// they were extracted inline before — no SQL trigger doing its own bracket
-// matching. A trigger cannot follow code fences (see maskCode), so it would
-// disagree with the renderer and with rename rewriting about which brackets
-// are links, and a third opinion on that question is how the existing two
-// came to differ in the first place.
+// Keeps the parsed links so backlinks and the graph do not re-parse note
+// content on every call; only what changed is recomputed. Links come from the
+// one parser in lib/wikilinks.ts, not from a SQL trigger: a trigger cannot
+// follow code fences (see maskCode) and would disagree with the renderer and
+// with rename rewriting about which brackets are links.
 import { query, withTransaction, LINK_INDEX_LOCK_KEY } from './db';
 import { wikilinkOccurrences } from './wikilinks';
 
@@ -109,8 +105,7 @@ export async function refreshLinkIndex(): Promise<number> {
 
 // Resolution mirrors extractWikilinkTarget: the whole raw string wins over
 // the split, so a note genuinely titled "closed CodeQL #3" is found before
-// the '#' is read as an anchor. Deleted notes resolve to nothing, which is
-// the same answer the old in-memory pass gave — it only ever knew live ones.
+// the '#' is read as an anchor. Deleted notes resolve to nothing.
 //
 // The source note is filtered the same way, and for the same reason. Rows
 // survive a soft delete on purpose — restoring a note brings its links back
@@ -126,8 +121,7 @@ const RESOLVED = `
 `;
 
 /**
- * Graph edges over a given set of notes, replacing the in-memory pass that
- * used to re-parse their content (buildWikilinkEdges).
+ * Graph edges over a given set of notes.
  *
  * Resolution happens here rather than in SQL because the caller's note set is
  * the whole universe for it: with a folder filter, a link pointing outside
@@ -173,19 +167,12 @@ export type Neighbor = {
 };
 
 /**
- * The notes around one note, out to `depth` hops.
+ * The notes around one note, out to `depth` hops, without fetching the whole
+ * graph.
  *
- * Exists because the only way to see structure used to be get_graph, which
- * returns the entire vault — on the live one, ~9000 tokens of nodes and edges
- * to answer a question about a single note's surroundings. This answers that
- * question with the surroundings.
- *
- * Traversal is UNDIRECTED: a note that links here is a neighbour just as much
- * as one linked from here, and an agent asking "what is around this" wants
- * both (buildGraph's own neighbourhood BFS made the same call). Direction is
- * still reported, but only as the DIRECT relation to the root — at two hops
- * "which way does the arrow point" has no single answer, so both flags are
- * simply false there rather than describing some intermediate edge.
+ * Traversal is undirected: a note that links here is as much a neighbour as one
+ * linked from here. Direction is reported only for the direct relation to the
+ * root; at two hops both flags are false.
  *
  * Each note appears once, at the shortest depth that reaches it. Cycles are
  * cut by carrying the path, so a mutual link pair cannot recurse forever.

@@ -1,7 +1,5 @@
 // lib/sql.ts — helpers for building safe SQL fragments.
-// Shared so the escaping rules can't drift apart between call sites: the MCP
-// title lookup and the substring search each carried their own copy, and the
-// search one silently lost the backslash case.
+// Shared so the escaping rules cannot drift apart between call sites.
 
 /**
  * Escape ilike wildcards so user text can't widen the match. Postgres treats

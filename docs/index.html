@@ -5,17 +5,19 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="google-site-verification" content="2PKdHFJM5HTb6YHJ_Ra_3BtBItU-GrHFR4TioOPvLCw" />
   <title>Kybase — Self-hosted memory for AI agents | Markdown knowledge base + MCP server</title>
-  <meta name="description" content="Kybase is a self-hosted markdown knowledge base with a wikilink graph, hybrid semantic search (pgvector + Ollama) and a first-party MCP server — persistent memory for AI agents. Markdown for humans, MCP for agents. One docker compose up.">
+  <meta name="description" content="Kybase is a self-hosted Markdown knowledge base that AI agents use as memory over MCP, and you read and edit in your browser. Works with Claude, ChatGPT and Cursor.">
   <link rel="canonical" href="https://kyrzin.github.io/kybase/">
   <meta property="og:title" content="Kybase — Self-hosted memory for AI agents">
-  <meta property="og:description" content="Markdown knowledge base with wikilink graph, hybrid semantic search (pgvector + Ollama) and a first-party MCP server. 100% private, one docker compose up.">
+  <meta property="og:description" content="Your agent remembers in Markdown notes you can read, edit and link. Self-hosted, open source, works with Claude, ChatGPT and Cursor.">
   <meta property="og:url" content="https://kyrzin.github.io/kybase/">
   <meta property="og:type" content="website">
   <meta property="og:image" content="https://kyrzin.github.io/kybase/og-image.png">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="Kybase — Self-hosted memory for AI agents">
-  <meta name="twitter:description" content="Markdown knowledge base with wikilink graph, hybrid semantic search (pgvector + Ollama) and a first-party MCP server. 100% private, one docker compose up.">
+  <meta name="twitter:description" content="Your agent remembers in Markdown notes you can read, edit and link. Self-hosted, open source, works with Claude, ChatGPT and Cursor.">
   <meta name="twitter:image" content="https://kyrzin.github.io/kybase/og-image.png">
+  <meta name="theme-color" content="#11111b">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
@@ -23,7 +25,7 @@
     "name": "Kybase",
     "operatingSystem": "Docker, Linux, macOS, Windows",
     "applicationCategory": "DeveloperApplication",
-    "description": "Self-hosted markdown knowledge base with wikilink graph, hybrid semantic search (pgvector + Ollama) and a first-party MCP server — persistent memory for AI agents.",
+    "description": "Self-hosted Markdown knowledge base that AI agents use as memory over MCP, with a web app for reading and editing the same notes.",
     "url": "https://kyrzin.github.io/kybase/",
     "codeRepository": "https://github.com/Kyrzin/kybase",
     "license": "https://www.gnu.org/licenses/agpl-3.0.html",
@@ -32,127 +34,489 @@
     "author": { "@type": "Person", "name": "Denis Kurzin", "url": "https://github.com/Kyrzin" }
   }
   </script>
+  <script>if (!matchMedia('(prefers-reduced-motion: reduce)').matches) document.documentElement.classList.add('js');</script>
+  <link rel="preload" href="fonts/atkinson-hyperlegible-next.woff2" as="font" type="font/woff2" crossorigin>
   <style>
+    @font-face {
+      font-family: "Atkinson Hyperlegible Next";
+      src: url("fonts/atkinson-hyperlegible-next.woff2") format("woff2");
+      font-weight: 200 800; font-style: normal; font-display: swap;
+    }
+    @font-face {
+      font-family: "Atkinson Hyperlegible Mono";
+      src: url("fonts/atkinson-hyperlegible-mono.woff2") format("woff2");
+      font-weight: 200 800; font-style: normal; font-display: swap;
+    }
+
+    /* The app's own palette: each hue has one job. */
     :root {
-      --bg: #0d1117; --panel: #161b22; --border: #30363d;
-      --text: #e6edf3; --muted: #9198a1; --accent: #d29752; --link: #6ca0f6;
+      --ink: #11111b;      /* page */
+      --mantle: #181825;   /* agent pane, code */
+      --base: #1e1e2e;     /* note pane */
+      --line: #313244;     /* borders */
+      --line-strong: #45475a;
+      --text: #cdd6f4;
+      --sub: #a6adc8;
+      --muted: #7f849c;
+      --agent: #94e2d5;    /* what the agent does */
+      --human: #f9e2af;    /* what changed for you */
+      --link: #89b4fa;     /* [[wikilinks]] and links */
+      --sans: "Atkinson Hyperlegible Next", system-ui, -apple-system, "Segoe UI", sans-serif;
+      --mono: "Atkinson Hyperlegible Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+      --measure: 66ch;
     }
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html { -webkit-text-size-adjust: 100%; }
     body {
-      background: var(--bg); color: var(--text);
-      font: 16px/1.65 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      margin: 0; background: var(--ink); color: var(--text);
+      font-family: var(--sans); font-size: 1.0625rem; line-height: 1.6;
+      font-feature-settings: "kern"; text-rendering: optimizeLegibility;
     }
-    .wrap { max-width: 860px; margin: 0 auto; padding: 0 24px; }
-    a { color: var(--link); text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    header { padding: 56px 0 40px; text-align: center; }
-    header img.banner { max-width: 100%; border-radius: 12px; border: 1px solid var(--border); }
-    h1 { font-size: 2.4rem; margin: 28px 0 10px; }
-    .tagline { font-size: 1.2rem; color: var(--muted); max-width: 640px; margin: 0 auto; }
-    .cta { margin-top: 28px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+    a { color: var(--link); text-underline-offset: 0.18em; }
+    a:hover { color: #b4cdfc; }
+    :focus-visible { outline: 2px solid var(--link); outline-offset: 3px; border-radius: 4px; }
+    code, pre, kbd { font-family: var(--mono); }
+    .skip { position: absolute; left: -9999px; }
+    .skip:focus { left: 16px; top: 12px; background: var(--base); padding: 8px 12px; z-index: 10; }
+
+    .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+
+    /* ─── Top bar ─────────────────────────────────────────── */
+    .top { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 22px 0; }
+    .mark { display: inline-flex; align-items: center; gap: 10px; color: var(--text); text-decoration: none; font-weight: 700; font-size: 1.125rem; letter-spacing: -0.01em; }
+    .mark svg { flex: none; }
+    .top nav { display: flex; gap: 22px; flex-wrap: wrap; }
+    .top nav a { color: var(--sub); text-decoration: none; font-size: 0.975rem; }
+    .top nav a:hover { color: var(--text); }
+
+    /* ─── Hero ────────────────────────────────────────────── */
+    .hero { padding-top: 56px; padding-bottom: 88px; }
+    h1 {
+      font-size: clamp(2.5rem, 5.6vw, 4.5rem); line-height: 1.04; letter-spacing: -0.025em;
+      font-weight: 700; margin: 0 0 24px;
+    }
+    h1 span { display: block; text-wrap: balance; }
+    .lede { font-size: clamp(1.125rem, 1.6vw, 1.3rem); color: var(--sub); max-width: 52ch; margin: 0 0 32px; }
+    .actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
     .btn {
-      display: inline-block; padding: 11px 22px; border-radius: 8px;
-      font-weight: 600; border: 1px solid var(--border);
+      display: inline-flex; align-items: center; min-height: 46px; padding: 0 20px; border-radius: 8px;
+      font-weight: 700; font-size: 1rem; text-decoration: none; border: 1px solid transparent;
     }
-    .btn-primary { background: var(--accent); color: #1a1208; border-color: var(--accent); }
-    .btn-primary:hover { filter: brightness(1.08); text-decoration: none; }
-    .btn-ghost { color: var(--text); }
-    .btn-ghost:hover { background: var(--panel); text-decoration: none; }
-    section { padding: 36px 0; border-top: 1px solid var(--border); }
-    h2 { font-size: 1.5rem; margin-bottom: 18px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
-    .card {
-      background: var(--panel); border: 1px solid var(--border);
-      border-radius: 10px; padding: 18px;
+    .btn-primary { background: var(--human); color: var(--ink); }
+    .btn-primary:hover { background: #fbebc6; color: var(--ink); }
+    .btn-ghost { border-color: var(--line-strong); color: var(--text); }
+    .btn-ghost:hover { border-color: var(--sub); color: var(--text); }
+    .fineprint { color: var(--muted); font-size: 0.95rem; margin: 18px 0 0; }
+
+    /* ─── The scene: one note, two readers ───────────────── */
+    .scene { margin: 0; position: relative; }
+    .pane { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+    .pane-head {
+      display: flex; align-items: center; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--line);
+      font-size: 0.875rem; color: var(--sub);
     }
-    .card h3 { font-size: 1.02rem; margin-bottom: 6px; }
-    .card p { color: var(--muted); font-size: 0.93rem; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+    .agent { background: var(--mantle); }
+    .agent .dot { background: var(--agent); }
+    .agent-body { padding: 18px 18px 20px; min-height: 22em; font-size: 0.975rem; }
+    .agent-body p { margin: 0; word-break: break-word; }
+    .msg.you {
+      margin-left: auto; max-width: 88%; width: fit-content; background: rgba(249, 226, 175, 0.1);
+      border: 1px solid rgba(249, 226, 175, 0.28); border-radius: 12px 12px 4px 12px; padding: 9px 13px; color: var(--text);
+    }
+    .tool { margin-top: 16px; font-family: var(--mono); font-size: 0.84rem; color: var(--sub); }
+    .tool .fn { color: var(--agent); }
+    .tool .arg { color: var(--human); }
+    .tool-res { font-family: var(--mono); font-size: 0.84rem; color: var(--muted); padding-left: 1.4em; margin-top: 2px !important; }
+    .tool-res b { color: var(--sub); font-weight: 600; }
+    .msg.answer { margin-top: 14px; color: var(--text); line-height: 1.55; }
+    .source { margin-top: 10px; font-size: 0.875rem; color: var(--muted); }
+    .source .wl { margin-left: 4px; }
+    .caret { display: inline-block; width: 0.5em; height: 1.05em; vertical-align: -0.16em; background: var(--agent); animation: blink 1s steps(1) infinite; margin-left: 1px; }
+    .msg.you .caret { background: var(--human); }
+    @keyframes blink { 50% { opacity: 0; } }
+
+    .note { background: var(--base); }
+    .note .dot { background: var(--human); }
+    .note-title { color: var(--text); }
+    .note-body { padding: 20px 24px 22px; font-size: 1rem; }
+    .note-body h3 { font-size: 1.05rem; margin: 0 0 6px; letter-spacing: -0.005em; }
+    .note-body p, .note-body li { color: var(--sub); margin: 0; }
+    .note-body ul { margin: 0; padding-left: 1.2em; }
+    .note-body li + li { margin-top: 4px; }
+    .note-body .sec { padding: 8px 10px; margin: 0 -10px; border-radius: 6px; transition: background-color .5s ease, box-shadow .5s ease; }
+    .note-body .sec + .sec { margin-top: 6px; }
+    .note-body .sec.found { background: rgba(137, 180, 250, 0.08); box-shadow: inset 2px 0 0 var(--link); }
+    .wl { color: var(--link); }
+    .wl::before { content: "[["; opacity: 0.55; }
+    .wl::after { content: "]]"; opacity: 0.55; }
+    .note-body code { font-size: 0.9em; color: var(--text); }
+    .hide { display: none; }
+    /* Until the scene starts, hide its moving parts; without JS or with reduced motion the end state shows. */
+    .js:not(.played) #agent [data-step] { display: none; }
+    .js:not(.played) .note-body .sec.found { background: none; box-shadow: none; }
+
+    .replay {
+      margin-top: 14px; background: none; border: 1px solid var(--line-strong); color: var(--sub);
+      font: inherit; font-size: 0.875rem; padding: 6px 12px; border-radius: 8px; cursor: pointer;
+    }
+    .replay:hover { color: var(--text); border-color: var(--sub); }
+
+    /* Headline on top, the two panes side by side underneath. */
+    .hero-a .hero-grid { display: block; }
+    .hero-a .scene { margin-top: 56px; display: grid; grid-template-columns: 1fr 1.15fr; gap: 20px; align-items: stretch; }
+    .hero-a .agent { display: flex; flex-direction: column; }
+    .hero-a .agent-body { flex: 1; }
+    .hero-a .replay { grid-column: 1 / -1; justify-self: start; margin-top: 0; }
+
+
+    /* ─── Sections ────────────────────────────────────────── */
+    section { padding: 72px 0; }
+    h2 { font-size: clamp(1.75rem, 3vw, 2.4rem); line-height: 1.12; letter-spacing: -0.02em; margin: 0 0 14px; font-weight: 700; }
+    .intro { color: var(--sub); max-width: var(--measure); margin: 0 0 40px; }
+
+    .steps { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 40px; counter-reset: step; }
+    .steps li { counter-increment: step; border-top: 1px solid var(--line-strong); padding-top: 18px; }
+    .steps li::before { content: counter(step); display: block; font-family: var(--mono); color: var(--agent); font-size: 0.95rem; margin-bottom: 8px; }
+    .steps h3 { font-size: 1.2rem; margin: 0 0 8px; }
+    .steps p { margin: 0; color: var(--sub); }
+
+    .tabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--line); margin-bottom: 24px; }
+    .tab {
+      background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; color: var(--sub);
+      font: inherit; font-size: 1rem; padding: 10px 14px; cursor: pointer;
+    }
+    .tab:hover { color: var(--text); }
+    .tab[aria-selected="true"] { color: var(--text); border-bottom-color: var(--human); }
+    .panel { max-width: 760px; }
+    .panel p { margin: 0 0 14px; color: var(--sub); }
+    .panel p:last-child { margin-bottom: 0; }
     pre {
-      background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-      padding: 16px 18px; overflow-x: auto; font-size: 0.9rem; line-height: 1.55;
+      margin: 0 0 14px; padding: 16px 18px; background: var(--mantle); border: 1px solid var(--line); border-radius: 10px;
+      overflow-x: auto; font-size: 0.875rem; line-height: 1.6; color: var(--text);
     }
-    code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; }
-    p.note { color: var(--muted); margin-top: 12px; font-size: 0.93rem; }
-    table { width: 100%; border-collapse: collapse; font-size: 0.93rem; }
-    th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
-    th { color: var(--muted); font-weight: 600; }
-    footer { padding: 36px 0 48px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.9rem; text-align: center; }
+    pre .c { color: var(--muted); }
+    p code, li code, dd code { background: var(--mantle); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; font-size: 0.86em; color: var(--text); }
+
+    .gets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px 56px; margin: 0; }
+    .gets div { max-width: 46ch; }
+    .gets dt { font-weight: 700; font-size: 1.1rem; margin-bottom: 4px; }
+    .gets dd { margin: 0; color: var(--sub); }
+
+    .privacy { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 56px; align-items: start; }
+    .privacy p { color: var(--sub); max-width: var(--measure); margin: 0 0 14px; }
+    .facts { list-style: none; margin: 0; padding: 0; border-left: 2px solid var(--human); }
+    .facts li { padding: 4px 0 4px 18px; color: var(--text); }
+    .facts li + li { margin-top: 10px; }
+
+    .install-grid { max-width: 860px; }
+    .install-grid > div + div { margin-top: 32px; }
+    .install-grid h3 { font-size: 1.15rem; margin: 0 0 6px; }
+    .install-grid p { color: var(--sub); margin: 0 0 14px; }
+
+    footer { border-top: 1px solid var(--line); padding: 28px 0 48px; color: var(--muted); font-size: 0.95rem; }
+    footer .wrap { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center; }
+    footer a { color: var(--sub); }
+    footer .spacer { flex: 1; }
+
+    @media (max-width: 900px) {
+      .hero { padding-top: 32px; padding-bottom: 64px; }
+      .hero-a .scene { grid-template-columns: 1fr; }
+      .steps, .gets, .privacy { grid-template-columns: 1fr; }
+      .steps, .gets { gap: 28px; }
+      section { padding: 56px 0; }
+    }
+    @media (max-width: 560px) {
+      .top nav a:not(.gh) { display: none; }
+      .agent { font-size: 0.8rem; }
+      .note-body { padding: 16px 16px 18px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .caret { animation: none; }
+      .note-body .sec { transition: none; }
+    }
   </style>
 </head>
-<body>
+<body class="hero-a">
+  <a class="skip" href="#main">Skip to content</a>
   <div class="wrap">
-    <header>
-      <img class="banner" src="https://raw.githubusercontent.com/Kyrzin/kybase/main/public/banner.png" alt="Kybase — self-hosted memory for AI agents">
-      <h1>Kybase</h1>
-      <p class="tagline">A personal, self-hosted knowledge base that your AI agent uses as native, persistent memory. Markdown notes, wikilink graph, hybrid semantic search — and a first-party MCP server.</p>
-      <div class="cta">
-        <a class="btn btn-primary" href="https://github.com/Kyrzin/kybase">View on GitHub</a>
-        <a class="btn btn-ghost" href="https://github.com/Kyrzin/kybase#quick-start">Quick Start</a>
-      </div>
+    <header class="top">
+      <a class="mark" href="./" aria-label="Kybase home">
+        <svg width="28" height="28" viewBox="0 0 24 24" aria-hidden="true"><defs><linearGradient id="hm0" gradientUnits="userSpaceOnUse" x1="5.03" y1="6.79" x2="18.97" y2="6.13"><stop stop-color="#94e2d5"/><stop offset="1" stop-color="#89b4fa"/></linearGradient><linearGradient id="hm1" gradientUnits="userSpaceOnUse" x1="18.97" y1="6.13" x2="11.43" y2="17.87"><stop stop-color="#89b4fa"/><stop offset="1" stop-color="#f9e2af"/></linearGradient><linearGradient id="hm2" gradientUnits="userSpaceOnUse" x1="11.43" y1="17.87" x2="5.03" y2="6.79"><stop stop-color="#f9e2af"/><stop offset="1" stop-color="#94e2d5"/></linearGradient></defs><path d="M4.2 8.5L4.88 8.74L5.56 8.96L6.24 9.15L6.91 9.31L7.58 9.44L8.25 9.53L8.91 9.6L9.57 9.64L10.22 9.65L10.87 9.63L11.51 9.58L12.14 9.5L12.77 9.4L13.39 9.26L14 9.1L14.6 8.91L15.2 8.7L15.79 8.45L16.37 8.19L16.95 7.89L17.51 7.57L18.07 7.23L18.63 6.86L19.18 6.47L18.76 5.79L18.18 6.06L17.6 6.3L17.02 6.51L16.45 6.69L15.88 6.85L15.31 6.98L14.75 7.08L14.2 7.16L13.65 7.21L13.11 7.23L12.57 7.23L12.04 7.21L11.51 7.16L10.98 7.08L10.46 6.99L9.94 6.87L9.43 6.72L8.91 6.56L8.4 6.37L7.89 6.16L7.38 5.92L6.88 5.66L6.37 5.38L5.86 5.08Z" fill="url(#hm0)"/><path d="M18.06 4.46L17.46 4.88L16.89 5.3L16.34 5.75L15.82 6.2L15.33 6.68L14.86 7.16L14.42 7.66L14.01 8.18L13.63 8.7L13.27 9.24L12.94 9.79L12.63 10.35L12.36 10.92L12.11 11.51L11.89 12.1L11.69 12.7L11.52 13.31L11.38 13.93L11.26 14.56L11.16 15.2L11.1 15.85L11.05 16.5L11.03 17.17L11.03 17.84L11.83 17.9L11.95 17.27L12.09 16.65L12.25 16.06L12.43 15.49L12.63 14.93L12.86 14.4L13.1 13.88L13.35 13.39L13.63 12.91L13.93 12.45L14.24 12.02L14.57 11.59L14.92 11.19L15.28 10.81L15.66 10.44L16.06 10.09L16.47 9.75L16.91 9.43L17.36 9.12L17.83 8.83L18.31 8.55L18.82 8.28L19.34 8.03L19.88 7.79Z" fill="url(#hm1)"/><path d="M13.33 17.89L13.26 17.21L13.17 16.54L13.05 15.89L12.91 15.25L12.74 14.64L12.55 14.03L12.33 13.45L12.09 12.88L11.82 12.33L11.53 11.8L11.21 11.29L10.87 10.8L10.51 10.33L10.13 9.88L9.73 9.45L9.3 9.04L8.86 8.65L8.4 8.28L7.92 7.93L7.42 7.6L6.9 7.28L6.36 6.98L5.8 6.7L5.23 6.44L4.83 7.13L5.32 7.49L5.78 7.86L6.21 8.23L6.61 8.62L6.98 9.01L7.33 9.41L7.65 9.81L7.95 10.23L8.22 10.65L8.46 11.08L8.68 11.51L8.88 11.95L9.05 12.4L9.2 12.85L9.33 13.32L9.43 13.78L9.52 14.26L9.58 14.74L9.62 15.24L9.65 15.74L9.65 16.25L9.63 16.77L9.59 17.3L9.53 17.85Z" fill="url(#hm2)"/><circle cx="18.97" cy="6.13" r="2.7" fill="#89b4fa"/><circle cx="5.03" cy="6.79" r="2.7" fill="#94e2d5"/><circle cx="11.43" cy="17.87" r="2.7" fill="#f9e2af"/></svg>
+        Kybase
+      </a>
+      <nav aria-label="Main">
+        <a href="#how">How it works</a>
+        <a href="#connect">Connect</a>
+        <a href="#install">Install</a>
+        <a class="gh" href="https://github.com/Kyrzin/kybase">GitHub</a>
+      </nav>
     </header>
+  </div>
 
-    <section>
-      <h2>Why Kybase?</h2>
-      <p>Giving an agent persistent memory usually means assembling a notes app, an MCP bridge, an embedding pipeline, and sync between them yourself. Kybase is that whole stack as one <code>docker compose up</code> — no SaaS, no accounts, 100% private.</p>
-      <div class="grid" style="margin-top:20px">
-        <div class="card">
-          <h3>MCP-native</h3>
-          <p>18 tools (search, graph, backlinks, CRUD for notes and folders) over Streamable HTTP — works with any Streamable HTTP MCP client: Claude Code, Claude Desktop, claude.ai connectors, ChatGPT, Cursor, Windsurf.</p>
+  <main id="main">
+    <div class="wrap hero">
+      <div class="hero-grid">
+        <div>
+          <h1><span>Your agent remembers.</span> <span>You can read every word.</span></h1>
+          <p class="lede">Kybase is a self-hosted knowledge base for AI agents. Your agent searches and writes Markdown notes over MCP; you read, edit and link the same notes in your browser.</p>
+          <div class="actions">
+            <a class="btn btn-primary" href="#install">Install Kybase</a>
+            <a class="btn btn-ghost" href="https://github.com/Kyrzin/kybase">View on GitHub</a>
+          </div>
+          <p class="fineprint">Free and open source under AGPL-3.0. Runs on your server or your laptop.</p>
         </div>
-        <div class="card">
-          <h3>Local semantic search</h3>
-          <p>pgvector + Ollama embeddings, hybrid keyword and semantic search. Pluggable providers: Ollama, Google, or OpenAI.</p>
-        </div>
-        <div class="card">
-          <h3>Wikilink knowledge graph</h3>
-          <p>[[Title]] links, backlinks panel, interactive graph view with semantic edges computed from embedding similarity.</p>
-        </div>
-        <div class="card">
-          <h3>Zero external services</h3>
-          <p>App, PostgreSQL 16 + pgvector, and Ollama in one compose file. Single-secret auth, plain-markdown export/import.</p>
-        </div>
+
+        <figure class="scene" aria-label="You ask your agent why a decision was made. The agent searches Kybase, finds the note that records it, and answers with that note as its source.">
+          <div class="pane agent">
+            <div class="pane-head"><span class="dot"></span>Your agent</div>
+            <div class="agent-body" id="agent" aria-live="off">
+              <p class="msg you" data-step="1"><span>Why didn't we add a message broker back then?</span></p>
+              <p class="tool" data-step="2"><span class="fn">search_notes</span> <span class="arg">"message broker decision"</span></p>
+              <p class="tool-res" data-step="3">found <b>ADR-001</b>, 2 sections</p>
+              <p class="msg answer" data-step="4"><span>We decided against it in ADR-001. A broker would be one more system to run, monitor and back up, and the queue fits in Postgres. The note also says to revisit this once the queue passes 1,000 jobs a minute.</span></p>
+              <p class="source" data-step="5">Source <span class="wl">ADR-001 Postgres as the primary datastore</span></p>
+            </div>
+          </div>
+          <div class="pane note">
+            <div class="pane-head"><span class="dot"></span><span class="note-title">ADR-001 Postgres as the primary datastore</span></div>
+            <div class="note-body">
+              <div class="sec" id="sec-decision">
+                <h3>Decision</h3>
+                <p>Jobs, documents and embeddings live in one Postgres. A second datastore needs a new ADR.</p>
+              </div>
+              <div class="sec found" id="sec-why">
+                <h3>Why no broker</h3>
+                <p>A broker would be one more system to run, monitor and back up. The job queue fits in Postgres, and one database means one backup. See <span class="wl">Event Bus Architecture</span>.</p>
+              </div>
+              <div class="sec found" id="sec-revisit">
+                <h3>Revisit when</h3>
+                <p>The queue passes 1,000 jobs a minute, or a second team needs the events.</p>
+              </div>
+            </div>
+          </div>
+          <button class="replay" type="button" id="replay" hidden>Replay</button>
+        </figure>
+      </div>
+    </div>
+
+    <section id="how">
+      <div class="wrap">
+        <h2>How it works</h2>
+        <ol class="steps">
+          <li>
+            <h3>Run it</h3>
+            <p>One Docker Compose stack on your server, or <code>npx kybase-mcp</code> on your laptop with nothing else to install.</p>
+          </li>
+          <li>
+            <h3>Connect your agent</h3>
+            <p>Add the address to Claude, ChatGPT or Cursor and sign in once in your browser. Each app gets its own token you can revoke.</p>
+          </li>
+          <li>
+            <h3>Work as usual</h3>
+            <p>The agent looks things up before it answers and writes down what it learns. You open the same notes, fix them and link them.</p>
+          </li>
+        </ol>
       </div>
     </section>
 
-    <section>
-      <h2>Quick start</h2>
-      <pre><code>git clone https://github.com/Kyrzin/kybase.git
-cd kybase
-cp .env.example .env
-# set KYBASE_SECRET (openssl rand -hex 32)
-docker compose up -d --build</code></pre>
-      <p class="note">Open <code>http://localhost:3000</code> and log in with your <code>KYBASE_SECRET</code>. Migrations apply automatically; Ollama pulls the embedding model (embeddinggemma, ~620&nbsp;MB) once in the background.</p>
-    </section>
-
-    <section>
-      <h2>Connect an MCP client</h2>
-      <pre><code>{
+    <section id="connect">
+      <div class="wrap">
+        <h2>Connect your agent</h2>
+        <p class="intro">Kybase speaks MCP at <code>/api/mcp</code>. Apps that support OAuth sign in once in your browser, so your secret never goes into their settings.</p>
+        <div class="tabs" role="tablist" aria-label="Agent apps">
+          <button class="tab" role="tab" id="t-cc" aria-controls="p-cc" aria-selected="true">Claude Code</button>
+          <button class="tab" role="tab" id="t-cl" aria-controls="p-cl" aria-selected="false" tabindex="-1">Claude</button>
+          <button class="tab" role="tab" id="t-gpt" aria-controls="p-gpt" aria-selected="false" tabindex="-1">ChatGPT</button>
+          <button class="tab" role="tab" id="t-cur" aria-controls="p-cur" aria-selected="false" tabindex="-1">Cursor</button>
+          <button class="tab" role="tab" id="t-npx" aria-controls="p-npx" aria-selected="false" tabindex="-1">One laptop, no server</button>
+        </div>
+        <div class="panel" role="tabpanel" id="p-cc" aria-labelledby="t-cc" tabindex="0">
+<pre><code>claude mcp add --transport http --scope user kybase https://your-domain/api/mcp</code></pre>
+          <p>Then run <code>/mcp</code> in Claude Code, pick <code>kybase</code>, choose Authenticate and enter your <code>KYBASE_SECRET</code> on the page that opens.</p>
+        </div>
+        <div class="panel" role="tabpanel" id="p-cl" aria-labelledby="t-cl" tabindex="0" hidden>
+          <p>In Claude Desktop or claude.ai open Customize, then Connectors, then Add custom connector. Paste <code>https://your-domain/api/mcp</code>, choose Connect and sign in.</p>
+          <p>Claude connects from Anthropic's servers, so your Kybase has to be reachable over HTTPS.</p>
+        </div>
+        <div class="panel" role="tabpanel" id="p-gpt" aria-labelledby="t-gpt" tabindex="0" hidden>
+          <p>In ChatGPT open Settings, then Plugins, then Add, then Add MCP server. Pick Streamable HTTP and paste <code>https://your-domain/api/mcp</code>. ChatGPT opens the Kybase sign-in page.</p>
+          <p>ChatGPT connects from its own servers too, so your Kybase has to be reachable over HTTPS.</p>
+        </div>
+        <div class="panel" role="tabpanel" id="p-cur" aria-labelledby="t-cur" tabindex="0" hidden>
+          <p>Add this to <code>~/.cursor/mcp.json</code>, then connect <code>kybase</code> under Customize, MCPs and sign in.</p>
+<pre><code>{
   "mcpServers": {
-    "kybase": {
-      "type": "http",
-      "url": "https://your-domain/api/mcp",
-      "headers": { "Authorization": "Bearer &lt;KYBASE_SECRET&gt;" }
-    }
+    "kybase": { "url": "https://your-domain/api/mcp" }
   }
 }</code></pre>
-      <p class="note">The server ships with MCP instructions that teach the agent to search before writing and to interlink notes — so the knowledge graph grows as the agent works, instead of accumulating orphan notes.</p>
+        </div>
+        <div class="panel" role="tabpanel" id="p-npx" aria-labelledby="t-npx" tabindex="0" hidden>
+          <p>For one agent on your own computer: no Docker, no database to run. Put this in your app's MCP settings and restart it.</p>
+<pre><code>{
+  "mcpServers": {
+    "kybase": { "command": "npx", "args": ["-y", "kybase-mcp"] }
+  }
+}</code></pre>
+          <p>Notes live in <code>~/.kybase</code>, and <code>kybase-mcp export vault.zip</code> gets them back out as Markdown.</p>
+        </div>
+      </div>
     </section>
 
-    <section>
-      <h2>Stack</h2>
-      <table>
-        <tr><th>Layer</th><th>Tech</th></tr>
-        <tr><td>Frontend</td><td>Next.js App Router, React 19</td></tr>
-        <tr><td>Database</td><td>PostgreSQL 16 + pgvector</td></tr>
-        <tr><td>Embeddings</td><td>Ollama <code>embeddinggemma</code> (default, multilingual) / Google / OpenAI — model and vector size chosen in Settings</td></tr>
-        <tr><td>Search</td><td>RRF hybrid: pgvector HNSW cosine + bilingual FTS</td></tr>
-        <tr><td>MCP</td><td><code>@modelcontextprotocol/sdk</code> Streamable HTTP</td></tr>
-      </table>
+    <section id="features">
+      <div class="wrap">
+        <h2>What you get</h2>
+        <dl class="gets">
+          <div><dt>Notes you can read</dt><dd>Everything the agent keeps is plain Markdown. Read it, correct it, search it, back it up.</dd></div>
+          <div><dt>One memory for every agent</dt><dd>Claude, ChatGPT, Cursor and the web app all work with the same notes.</dd></div>
+          <div><dt>Search by words and by meaning</dt><dd>An agent finds the right note whether or not it knows the exact wording.</dd></div>
+          <div><dt>Reads and writes by section</dt><dd>An agent opens the part of a long note it needs and adds to it without rewriting the rest.</dd></div>
+          <div><dt>Links and a graph</dt><dd><code>[[Wikilinks]]</code> connect notes, and the graph shows each folder as its own island.</dd></div>
+          <div><dt>Every change kept</dt><dd>Each edit keeps the previous version, labelled with the app that made it, ready to restore.</dd></div>
+        </dl>
+      </div>
     </section>
 
-    <footer>
-      <p><a href="https://github.com/Kyrzin/kybase">github.com/Kyrzin/kybase</a> · AGPL-3.0 · © Denis Kurzin</p>
-    </footer>
-  </div>
+    <section id="privacy">
+      <div class="wrap privacy">
+        <div>
+          <h2>Your notes stay with you</h2>
+          <p>Kybase runs where you put it, on your server or your laptop. There is no Kybase account and no cloud service of ours in between.</p>
+          <p>With Ollama, notes and their embeddings never leave your machine. Google and OpenAI embeddings are there if you prefer them, and Settings says plainly that picking one sends note text to that provider.</p>
+        </div>
+        <ul class="facts">
+          <li>Open source, AGPL-3.0</li>
+          <li>Export everything as Markdown in folders</li>
+          <li>Each connected app has its own revocable token</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="install">
+      <div class="wrap">
+        <h2>Install</h2>
+        <p class="intro">The full app gives you the web interface, the graph, share links and one knowledge base for several agents. It needs Docker and about 1 GB.</p>
+        <div class="install-grid">
+          <div>
+            <h3>macOS and Linux</h3>
+<pre><code>git clone https://github.com/Kyrzin/kybase.git
+cd kybase
+cp .env.example .env
+sed -i.bak "s/^KYBASE_SECRET=$/KYBASE_SECRET=$(openssl rand -hex 32)/" .env
+sed -i.bak "s/^POSTGRES_PASSWORD=$/POSTGRES_PASSWORD=$(openssl rand -hex 16)/" .env
+rm -f .env.bak
+docker compose pull &amp;&amp; docker compose up -d</code></pre>
+            <p>Windows commands are in the <a href="https://github.com/Kyrzin/kybase#the-full-app">README</a>.</p>
+          </div>
+          <div>
+            <h3>Then</h3>
+            <p>Open <code>http://localhost:3000</code> and sign in with the <code>KYBASE_SECRET</code> from <code>.env</code>.</p>
+            <p>For search by meaning, pick an embedding provider in Settings: Ollama on your machine, or Google or OpenAI with an API key.</p>
+            <p>Then <a href="#connect">connect your agent</a>.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <a href="https://github.com/Kyrzin/kybase">GitHub</a>
+      <a href="https://github.com/Kyrzin/kybase/releases">Releases</a>
+      <a href="https://www.npmjs.com/package/kybase-mcp">npm</a>
+      <span class="spacer"></span>
+      <span>AGPL-3.0</span>
+      <span>© Denis Kurzin</span>
+    </div>
+  </footer>
+
+  <script>
+  (function () {
+    // Tabs: arrow keys move between them, as the ARIA pattern expects.
+    var tabs = Array.prototype.slice.call(document.querySelectorAll('[role="tab"]'));
+    function select(tab) {
+      tabs.forEach(function (t) {
+        var on = t === tab;
+        t.setAttribute('aria-selected', on);
+        t.tabIndex = on ? 0 : -1;
+        document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
+      });
+    }
+    tabs.forEach(function (t, i) {
+      t.addEventListener('click', function () { select(t); });
+      t.addEventListener('keydown', function (e) {
+        var d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+        if (!d) return;
+        var next = tabs[(i + d + tabs.length) % tabs.length];
+        select(next); next.focus();
+      });
+    });
+
+    // The scene plays once on load. Reduced motion shows the end state.
+    var steps = Array.prototype.slice.call(document.querySelectorAll('#agent [data-step]'));
+    var found = [document.getElementById('sec-why'), document.getElementById('sec-revisit')];
+    var replay = document.getElementById('replay');
+    var timers = [];
+    if (!document.documentElement.classList.contains('js')) return;
+
+    function later(fn, ms) { timers.push(setTimeout(fn, ms)); }
+    function caret() { var c = document.createElement('span'); c.className = 'caret'; return c; }
+    // Types each span of a line in turn, character by character.
+    function typeInto(el, ms, done) {
+      var spans = Array.prototype.slice.call(el.querySelectorAll('span'));
+      var full = spans.map(function (x) { return x.textContent; });
+      spans.forEach(function (x) { x.textContent = ''; });
+      el.classList.remove('hide');
+      var c = caret(); el.appendChild(c);
+      var si = 0, ci = 0;
+      (function tick() {
+        if (si >= spans.length) { c.remove(); done(); return; }
+        if (ci < full[si].length) { spans[si].textContent += full[si][ci++]; later(tick, ms); }
+        else { si++; ci = 0; later(tick, ms * 4); }
+      })();
+    }
+    // Streams a reply word by word, the way an agent's answer arrives.
+    function stream(el, ms, done) {
+      var span = el.querySelector('span');
+      var words = span.textContent.split(' ');
+      span.textContent = '';
+      el.classList.remove('hide');
+      var c = caret(); el.appendChild(c);
+      var i = 0;
+      (function tick() {
+        if (i >= words.length) { c.remove(); done(); return; }
+        span.textContent += (i ? ' ' : '') + words[i++];
+        later(tick, ms);
+      })();
+    }
+    function reset() {
+      timers.forEach(clearTimeout); timers = [];
+      steps.forEach(function (x) { x.classList.add('hide'); });
+      found.forEach(function (x) { x.classList.remove('found'); });
+      replay.hidden = true;
+    }
+    function play() {
+      reset();
+      document.documentElement.classList.add('played');
+      typeInto(steps[0], 30, function () {
+        later(function () {
+          typeInto(steps[1], 24, function () {
+            later(function () { steps[2].classList.remove('hide'); found[0].classList.add('found'); }, 350);
+            later(function () { found[1].classList.add('found'); }, 950);
+            later(function () {
+              stream(steps[3], 70, function () {
+                later(function () { steps[4].classList.remove('hide'); }, 250);
+                later(function () { replay.hidden = false; }, 800);
+              });
+            }, 1500);
+          });
+        }, 550);
+      });
+    }
+    replay.addEventListener('click', play);
+    later(play, 500);
+  })();
+  </script>
 </body>
 </html>

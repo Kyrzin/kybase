@@ -5,6 +5,7 @@ import { safeEqual } from '@/lib/auth';
 import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
 import { parseRedirectUri, normalizeRedirectUri } from '@/lib/oauth-redirect';
 import { getClient, touchClient } from '@/lib/oauth-clients';
+import { oauthIssuer } from '@/lib/oauth-issuer';
 
 export const dynamic = 'force-dynamic';
 
@@ -80,7 +81,7 @@ function renderForm(params: Record<string, string>, error?: string) {
 <body>
   <div class="card">
     <h1>Kybase</h1>
-    <p>Claude requests access to your Kybase knowledge base. Enter your API key to continue.${redirectHost ? `<br>After sign-in you will be redirected to <strong>${esc(redirectHost)}</strong>.` : ''}</p>
+    <p>An application requests access to your Kybase knowledge base. Enter your API key to continue.${redirectHost ? `<br>After sign-in you will be redirected to <strong>${esc(redirectHost)}</strong>.` : ''}</p>
     ${error ? `<div class="error">${esc(error)}</div>` : ''}
     <form method="POST">
       ${hidden}
@@ -176,6 +177,8 @@ export async function POST(req: NextRequest) {
 
   callbackUrl.searchParams.set('code', code);
   callbackUrl.searchParams.set('state', state);
+  // RFC 9207: lets a client that talks to several servers tell whose code this is.
+  callbackUrl.searchParams.set('iss', oauthIssuer(req));
 
   // 303 See Other forces the OAuth callback to be a GET. Default redirect is
   // 307, which preserves the POST method and makes Claude's callback 405.

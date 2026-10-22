@@ -1,13 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { oauthIssuer } from '@/lib/oauth-issuer';
 
 export const dynamic = 'force-dynamic';
 
 export function GET(req: NextRequest) {
-  const host  = req.headers.get('x-forwarded-host') ?? new URL(req.url).host;
-  const proto = req.headers.get('x-forwarded-proto')?.split(',')[0] ?? 'https';
-  const origin = `${proto}://${host}`;
+  const origin = oauthIssuer(req);
   return NextResponse.json({
     issuer: origin,
+    // /authorize returns `iss` with every code, and its errors never redirect
+    // to the client. ChatGPT uses its fixed callback only when this is true.
+    authorization_response_iss_parameter_supported: true,
     authorization_endpoint: `${origin}/authorize`,
     token_endpoint: `${origin}/api/oauth/token`,
     // Hosted MCP clients refuse a server whose metadata lacks this.

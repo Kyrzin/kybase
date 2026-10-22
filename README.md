@@ -147,13 +147,17 @@ That's it — the agent can now search your notes, read them, write new ones,
 update existing ones and link them together.
 
 <details>
-<summary><b>Other clients</b> — Claude Desktop, claude.ai, Cursor, Windsurf</summary>
+<summary><b>Other clients</b> — Claude Desktop, claude.ai, ChatGPT, Cursor, Windsurf</summary>
 
 **Claude Desktop and claude.ai** — Customize → Connectors → Add custom
 connector, same URL, then **Connect** and sign in. Claude connects from
 Anthropic's servers, so the instance has to be reachable over HTTPS from the
 internet. In Claude Desktop, remote servers go here, not in
 `claude_desktop_config.json`.
+
+**ChatGPT** — Settings → Plugins → Add → Add MCP server, type Streamable
+HTTP, same URL. ChatGPT then opens the Kybase sign-in page. It connects from
+its own servers too, so the same HTTPS requirement applies.
 
 **Cursor** — `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project):
 

@@ -6,9 +6,15 @@
 // accepted at registration must never then be refused at authorize time, and
 // one refused at registration must never sneak in through authorize.
 
-// claude.ai's connector callback. Matching is exact, so this must be the URI the
-// connector actually sends. KYBASE_OAUTH_REDIRECT_URIS adds more for other clients.
-const DEFAULT_REDIRECT_URIS = ['https://claude.ai/api/mcp/auth_callback'];
+// Fixed callbacks of hosted connectors. Matching is exact, so each must be the
+// URI the connector actually sends. KYBASE_OAUTH_REDIRECT_URIS adds more for
+// other clients.
+const DEFAULT_REDIRECT_URIS = [
+  'https://claude.ai/api/mcp/auth_callback',
+  // ChatGPT sends this one only to servers that return `iss` with the code
+  // (app/authorize); to others it sends a callback unique to each connector.
+  'https://chatgpt.com/connector_platform_oauth_redirect',
+];
 
 // Compared through the URL parser rather than as raw text so two spellings of
 // the same callback (a trailing slash, a needlessly percent-encoded character)

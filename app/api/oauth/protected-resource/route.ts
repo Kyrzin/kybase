@@ -7,13 +7,13 @@
 // then reads that server's metadata. Without it (and the WWW-Authenticate
 // header on a 401 from /api/mcp) a client cannot find the registration endpoint.
 import { NextRequest, NextResponse } from 'next/server';
+import { oauthIssuer } from '@/lib/oauth-issuer';
 
 export const dynamic = 'force-dynamic';
 
 export function GET(req: NextRequest) {
-  const host  = req.headers.get('x-forwarded-host') ?? new URL(req.url).host;
-  const proto = req.headers.get('x-forwarded-proto')?.split(',')[0] ?? 'https';
-  const origin = `${proto}://${host}`;
+  // authorization_servers must equal the issuer exactly.
+  const origin = oauthIssuer(req);
   return NextResponse.json({
     // The resource identifier is the MCP endpoint itself, not the origin —
     // that is the URL a token issued here is meant to be presented to.

@@ -52,6 +52,9 @@ export async function POST(req: NextRequest) {
   const accepted = requested.filter(uri => parseRedirectUri(uri) !== null);
   if (accepted.length === 0) {
     recordAuthFailure(req, 'oauth-register');
+    // Hosted clients rarely show error_description, so the log is where the
+    // owner finds the exact URI to add.
+    console.warn(`[oauth] registration refused, no accepted callback in ${JSON.stringify(requested.map(u => u.slice(0, 200)))}`);
     return NextResponse.json(
       {
         error: 'invalid_redirect_uri',

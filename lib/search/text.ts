@@ -26,7 +26,8 @@ function weightForFolder(folderId: string | null | undefined, weights: FolderWei
  * Full-text search via search_notes_fts, in passes:
  *  1. strict — the query as typed (AND);
  *  2. OR — the significant words OR'd, when the strict pass came back short;
- *  3. rare-word anchors — when the strict pass found nothing;
+ *  3. rare-word anchors — when the strict pass found nothing; for two words
+ *     with no anchor, the OR pass instead;
  *  4. substring — always; marks verbatim identifier matches as `exact`.
  *
  * `deferSections`: hybrid resolves section headings once, on the final page,
@@ -45,7 +46,8 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
   let orRows: FtsRow[] = [];
   let anchorRows: FtsRow[] = [];
   const words = significantWords(query);
-  // With one or two words an OR pass adds nothing over the strict pass.
+  // With one or two words an OR pass mostly repeats the strict pass; two words
+  // that match nothing get one below, after the anchors.
   if (rows.length < limit && words.length > 2) {
     const seen = new Set(rows.map((r) => r.id));
     const orAll = await dbQuery<FtsRow>(
@@ -64,6 +66,12 @@ export async function textSearch(query: string, limit = 10, filters?: SearchFilt
       const anchorAll = await dbQuery<FtsRow>('select * from search_notes_fts($1, $2, $3)', [anchors.join(' '), fetchLimit, scopeIds]);
       anchorRows = anchorAll.filter((r) => !seen.has(r.id));
     }
+  }
+
+  // Two words that never occur in one note, neither rare enough to anchor on
+  // (one may occur nowhere): each word alone is what is left to match.
+  if (rows.length === 0 && words.length === 2 && anchorRows.length === 0) {
+    orRows = await dbQuery<FtsRow>('select * from search_notes_fts($1, $2, $3)', [words.join(' or '), fetchLimit, scopeIds]);
   }
 
   // A whitespace-free query that looks like an identifier (several words, a

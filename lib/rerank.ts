@@ -9,6 +9,7 @@
 // Wire protocol is text-embeddings-inference's /rerank: POST {query, texts}
 // -> [{index, score}]. Any service answering that shape works.
 import { getRerankEnabled } from './settings';
+import { sectionOfSpan } from './markdown';
 
 export type RerankConfig = {
   url: string;
@@ -157,12 +158,28 @@ export type RerankPassage = {
   noteId: string;
   /** What is sent to the model: heading prefixed, truncated to its window. */
   text: string;
-  /** The chunk's own body, kept verbatim so the winning passage can become the excerpt. */
+  /**
+   * What the excerpt is cut from if this passage wins, kept verbatim: the
+   * chunk's own body, or the window itself when no query word could place
+   * the excerpt inside the chunk.
+   */
   content: string;
 };
 
 /** Enough windows to sweep a whole chunk; chunks are bounded, so is this. */
 const WINDOW_SCAN_CAP = 16;
+
+/** The window of a chunk that scores highest; ties keep the earliest, so a chunk that matches nothing is represented by its opening. */
+function bestWindowBy(content: string, score: (lowerText: string) => number): string {
+  const windows = windowsOf(content, PASSAGE_CHARS, WINDOW_SCAN_CAP);
+  let best = windows[0];
+  let bestScore = -1;
+  for (const w of windows) {
+    const s = score(w.toLowerCase());
+    if (s > bestScore) { bestScore = s; best = w; }
+  }
+  return best;
+}
 
 /**
  * The window of a chunk that carries most of the query, rather than its first
@@ -171,23 +188,132 @@ const WINDOW_SCAN_CAP = 16;
  * that matches nothing is represented by its opening as before.
  */
 export function bestWindow(content: string, words: string[]): string {
-  const windows = windowsOf(content, PASSAGE_CHARS, WINDOW_SCAN_CAP);
-  if (windows.length === 1 || words.length === 0) return windows[0];
-  let best = windows[0];
-  let bestHits = -1;
-  for (const w of windows) {
-    const hay = w.toLowerCase();
-    const hits = words.filter((x) => hay.includes(x)).length;
-    if (hits > bestHits) { bestHits = hits; best = w; }
-  }
-  return best;
+  return bestWindowBy(content, (hay) => words.filter((x) => hay.includes(x)).length);
 }
 
 /**
- * Which passages represent a note to the reranker: chunks (the note's own
- * text, not the display excerpt) chosen by query-word overlap, plus the chunk
- * nearest the query by meaning when distances are given. Sending every chunk
- * would take minutes on CPU.
+ * Up to `count` windows spread evenly across a chunk, first and last
+ * included. For a chunk chosen by meaning alone, where no query word says
+ * which part of it matters: the model reads the spread and picks.
+ */
+function spreadWindows(text: string, count: number): string[] {
+  const last = text.length - PASSAGE_CHARS;
+  if (last <= 0) return [text];
+  // No more than half-overlapping windows need to cover it.
+  const n = Math.min(count, Math.ceil(last / (PASSAGE_CHARS / 2)) + 1);
+  if (n <= 1) return [snapToWords(text, 0, PASSAGE_CHARS)];
+  return Array.from({ length: n }, (_, i) => {
+    const from = Math.round((i * last) / (n - 1));
+    return snapToWords(text, from, from + PASSAGE_CHARS);
+  });
+}
+
+// Score tiers, so a lower tier can never outweigh a higher one: the query
+// verbatim, then an identifier it contains, then weighted words.
+const PHRASE_MATCH = 1e6;
+const IDENTIFIER_MATCH = 1e3;
+
+/**
+ * A query token that is matched whole: it contains punctuation that splitting
+ * into words would shatter — case numbers (117/21), versions, file and host
+ * names. A hyphen counts only next to a digit, so hyphenated words are not
+ * identifiers; four characters at least, so abbreviations like "e.g." are not.
+ */
+const isIdentifier = (token: string) =>
+  token.length >= 4 && (/[._/:@\\#]/.test(token) || (token.includes('-') && /\p{N}/u.test(token)));
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Punctuation that joins the parts of an identifier: 12/34, v1.5.0, 10:30, nas-02. */
+const JOINER = /[./:_@#\\-]/;
+
+/**
+ * Matches `pattern` only where it is not part of a longer token: 12/34 is not
+ * 112/340, and v1.5.0 is not v1.5.0.1. A joiner followed by a
+ * space (the full stop after "v1.5.0.") does not extend the token.
+ */
+const standalone = (pattern: string) => new RegExp(
+  `(?<![\\p{L}\\p{N}])(?<![\\p{L}\\p{N}][./:_@#\\\\-])${pattern}(?![\\p{L}\\p{N}])(?![./:_@#\\\\-][\\p{L}\\p{N}])`, 'u');
+
+/**
+ * Drops the whitespace typed or OCR'd around a joiner inside an identifier:
+ * "12 / 34" → "12/34", "v 1 . 5 . 0" → "v 1.5.0". Only between a
+ * letter or digit and another; a hyphen only before a digit, so "foo - bar"
+ * stays three words.
+ */
+export function normalizeQuery(query: string): string {
+  return query.replace(/(?<=[\p{L}\p{N}])\s*([./:_@#\\]|-(?=\s*\p{N}))\s*(?=[\p{L}\p{N}])/gu, '$1');
+}
+
+const isLetter = (ch: string) => /\p{L}/u.test(ch);
+const isDigit = (ch: string) => /\p{N}/u.test(ch);
+/** Whether text may hold whitespace between two adjacent characters of an identifier. */
+const looseBetween = (a: string, b: string) =>
+  JOINER.test(a) || JOINER.test(b) || (isLetter(a) && isDigit(b)) || (isDigit(a) && isLetter(b));
+
+/**
+ * A query token as a pattern that tolerates whitespace in the text around a
+ * joiner and between letters and digits ("12 / 34", "v 1.5.0" for 12/34 and
+ * v1.5.0), never inside a run of letters or of digits.
+ */
+function tolerant(token: string): string {
+  const chars = [...token];
+  return chars.map((ch, i) => (i > 0 && looseBetween(chars[i - 1], ch) ? '\\s*' : '') + escapeRegExp(ch)).join('');
+}
+
+/**
+ * Scores lowercased text of one note against the query: the whole query as a
+ * phrase (any whitespace between its tokens), identifier tokens, then words
+ * weighted by inverse document frequency over the note's own chunks, so a term
+ * few chunks share outweighs several that most of them do. `firstAt` is where
+ * the earliest of them occurs in a text, or -1.
+ */
+function queryMatcher(query: string, hays: string[]): { score: (lowerText: string) => number; firstAt: (lowerText: string) => number } {
+  const normalized = normalizeQuery(query).toLowerCase();
+  const tokens = normalized.split(/\s+/)
+    .map((t) => t.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, ''))
+    .filter(Boolean);
+  // Between two query tokens the text needs whitespace too, unless one ends in
+  // a letter and the next starts with a digit or the reverse: "v 1.5.0" is
+  // also "v1.5.0", "on line" is not "online", "2026 10" is not "202610".
+  const phrase = tokens.length > 1
+    ? standalone(tokens.map((t, i) => (i === 0 ? '' : looseBetween(tokens[i - 1].slice(-1), t[0]) ? '\\s*' : '\\s+') + tolerant(t)).join(''))
+    : null;
+  // \p{L}\p{N} with /u, not \w: JavaScript's \w is ASCII-only, so splitting a
+  // Cyrillic query on \W+ shatters it into empty strings and every chunk
+  // scores zero — the selection would silently degrade to "always the first
+  // chunk" on exactly the languages this reranker is here to serve.
+  const words = [...new Set(normalized.split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 3))];
+  const terms = [
+    ...[...new Set(tokens.filter(isIdentifier))].map((t) => {
+      const re = standalone(tolerant(t));
+      return { tier: IDENTIFIER_MATCH, has: (hay: string) => re.test(hay), at: (hay: string) => hay.search(re) };
+    }),
+    ...words.map((w) => ({ tier: 0, has: (hay: string) => hay.includes(w), at: (hay: string) => hay.indexOf(w) })),
+  ].map((t) => {
+    const df = hays.filter(t.has).length;
+    return { ...t, weight: df > 0 ? Math.log(1 + hays.length / df) : 0 };
+  });
+  return {
+    score: (hay) => {
+      let score = phrase?.test(hay) ? PHRASE_MATCH : 0;
+      for (const t of terms) if (t.has(hay)) score += t.tier + t.weight;
+      return score;
+    },
+    firstAt: (hay) => {
+      const found = [phrase ? hay.search(phrase) : -1, ...terms.map((t) => t.at(hay))].filter((i) => i >= 0);
+      return found.length > 0 ? Math.min(...found) : -1;
+    },
+  };
+}
+
+/**
+ * Which passages represent a note to the reranker, at most perNote + 1 of
+ * them — sending every chunk would take minutes on CPU. Chunks the query
+ * reaches lexically come first (see queryMatcher), each by its best window;
+ * then the chunk nearest the query by meaning, when distances are given;
+ * then the note's opening fills any slot left, so a note nothing matches is
+ * still represented. Ties keep document order.
  */
 export function selectPassages(
   noteId: string,
@@ -195,32 +321,51 @@ export function selectPassages(
   query: string,
   perNote: number
 ): RerankPassage[] {
-  // \p{L}\p{N} with /u, not \w: JavaScript's \w is ASCII-only, so splitting a
-  // Cyrillic query on \W+ shatters it into empty strings and every chunk
-  // scores zero — the selection would silently degrade to "always the first
-  // chunk" on exactly the languages this reranker is here to serve.
-  const words = [...new Set(query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((w) => w.length > 3))];
-  const scored = chunks.map((c) => {
-    const hay = ((c.heading ?? '') + '\n' + c.content).toLowerCase();
-    return { c, hits: words.filter((w) => hay.includes(w)).length };
+  const hays = chunks.map((c) => ((c.heading ?? '') + '\n' + c.content).toLowerCase());
+  const { score: match, firstAt } = queryMatcher(query, hays);
+  const scores = hays.map(match);
+  // The model reads a window under the heading of the section it sits in, not
+  // the chunk's: a chunk can group several sections under the first one's. A
+  // window the query's words reached belongs to the section they are in.
+  const passage = (i: number, window: string, content = chunks[i].content): RerankPassage => {
+    const at = chunks[i].content.indexOf(window);
+    const hit = at === -1 ? -1 : firstAt(window.toLowerCase());
+    const heading = (at === -1 ? null : sectionOfSpan(chunks[i].content, at, at + window.length, hit === -1 ? undefined : at + hit))
+      ?? chunks[i].heading;
+    return { noteId, text: (heading ? heading + '\n' : '') + window, content };
+  };
+
+  const lexical = chunks.map((_, i) => i).filter((i) => scores[i] > 0)
+    .sort((a, b) => scores[b] - scores[a] || a - b)
+    .slice(0, perNote);
+
+  // The chunk nearest by meaning is added, not swapped in: a question that
+  // shares no words with the text (another language, other wording) would
+  // otherwise be judged on whatever the words picked — for a book, its title
+  // page. A note's score is its best passage, so the word-matched ones keep
+  // counting exactly as before.
+  let nearest = -1;
+  chunks.forEach((c, i) => {
+    if (c.distance != null && (nearest === -1 || c.distance < chunks[nearest].distance!)) nearest = i;
   });
-  // Ties keep document order, so a note whose chunks all score zero is
-  // represented by its opening rather than by an arbitrary one.
-  scored.sort((a, b) => b.hits - a.hits);
-  const picked = scored.slice(0, perNote).map(({ c }) => c);
-  // Plus the chunk nearest the query by meaning, when distances are known. A
-  // question that shares no words with the text (another language, other
-  // wording) would otherwise be judged on the note's opening — for a book,
-  // its title page. Added, not swapped in: a note's score is its best
-  // passage, so the word-matched ones keep counting exactly as before.
-  const nearest = chunks.reduce<(typeof chunks)[number] | null>(
-    (best, c) => (c.distance != null && (best === null || c.distance < best.distance!) ? c : best), null);
-  if (nearest && !picked.includes(nearest)) picked.push(nearest);
-  return picked.map((c) => ({
-    noteId,
-    text: (c.heading ? c.heading + '\n' : '') + bestWindow(c.content, words),
-    content: c.content,
-  }));
+  let semantic: RerankPassage[] = [];
+  if (nearest !== -1 && !lexical.includes(nearest)) {
+    semantic = scores[nearest] > 0
+      ? [passage(nearest, bestWindowBy(chunks[nearest].content, match))]
+      // No query word says which part of it matters, so it takes the free
+      // slots as windows across it. Each window is its own excerpt source:
+      // the one that wins is the part shown.
+      : spreadWindows(chunks[nearest].content, perNote + 1 - lexical.length).map((w) => passage(nearest, w, w));
+  }
+
+  const slots = perNote + (semantic.length > 0 ? 1 : 0) - lexical.length - semantic.length;
+  const opening = chunks.map((_, i) => i)
+    .filter((i) => !lexical.includes(i) && i !== nearest)
+    .slice(0, Math.max(0, slots));
+  return [
+    ...[...lexical, ...opening].map((i) => passage(i, bestWindowBy(chunks[i].content, match))),
+    ...semantic,
+  ];
 }
 
 /**
@@ -232,27 +377,26 @@ export function selectPassages(
 export type RerankHit = { score: number; content: string };
 
 /**
- * One model pass: each text scored against the query, as `{index, score}`
- * pairs pointing back into `texts`.
- *
- * Returns null on any failure — an unreachable service, a timeout, a
- * malformed response. Null means "no opinion", and the caller keeps the order
- * fusion produced. Reranking is an improvement to ordering, never a
- * dependency of search: the same rule the text and semantic arms already
- * follow (see hybridRun's allSettled).
+ * Texts per request. TEI refuses a request with more than its
+ * --max-client-batch-size texts (HTTP 413), which would switch reranking off
+ * for the whole search; 32 is TEI's own default, the compose service allows 64.
  */
-export async function rerankTexts(
+export const RERANK_BATCH = 32;
+
+/** One request of at most RERANK_BATCH texts; indices are shifted by `offset` back into the caller's list. */
+async function rerankBatch(
   query: string,
   texts: string[],
-  cfg: RerankConfig
+  offset: number,
+  cfg: RerankConfig,
+  signal: AbortSignal
 ): Promise<{ index: number; score: number }[] | null> {
-  if (texts.length === 0) return null;
   try {
     const res = await fetch(`${cfg.url}/rerank`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, texts }),
-      signal: AbortSignal.timeout(cfg.timeoutMs),
+      signal,
     });
     if (!res.ok) {
       console.warn(`[rerank] ${res.status} from ${cfg.url}, keeping fusion order`);
@@ -262,11 +406,41 @@ export async function rerankTexts(
     if (!Array.isArray(scored)) return null;
     return (scored as { index?: number; score?: number }[])
       .filter((row) => Number.isInteger(row?.index) && row.index! >= 0 && row.index! < texts.length && typeof row.score === 'number')
-      .map((row) => ({ index: row.index!, score: row.score! }));
+      .map((row) => ({ index: offset + row.index!, score: row.score! }));
   } catch (err) {
     console.warn(`[rerank] unavailable (${err instanceof Error ? err.message : String(err)}), keeping fusion order`);
     return null;
   }
+}
+
+/**
+ * One model pass: each text scored against the query, as `{index, score}`
+ * pairs pointing back into `texts`, best first and ties by position — the
+ * same whether it took one request or several.
+ *
+ * Returns null on any failure — an unreachable service, a timeout, a
+ * malformed response, any one request of several. Null means "no opinion",
+ * and the caller keeps the order fusion produced. Reranking is an improvement
+ * to ordering, never a dependency of search: the same rule the text and
+ * semantic arms already follow (see hybridRun's allSettled).
+ */
+export async function rerankTexts(
+  query: string,
+  texts: string[],
+  cfg: RerankConfig
+): Promise<{ index: number; score: number }[] | null> {
+  if (texts.length === 0) return null;
+  // One deadline for the whole pass, however many requests it takes.
+  const signal = AbortSignal.timeout(cfg.timeoutMs);
+  const offsets: number[] = [];
+  for (let i = 0; i < texts.length; i += RERANK_BATCH) offsets.push(i);
+  const parts = await Promise.all(offsets.map((o) => rerankBatch(query, texts.slice(o, o + RERANK_BATCH), o, cfg, signal)));
+  const scored: { index: number; score: number }[] = [];
+  for (const part of parts) {
+    if (!part) return null;
+    scored.push(...part);
+  }
+  return scored.sort((a, b) => b.score - a.score || a.index - b.index);
 }
 
 /** Scores passages against the query and returns the best score per note. */

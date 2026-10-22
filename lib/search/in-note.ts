@@ -177,9 +177,9 @@ export async function searchInNote(
   const cfg = await rerankConfig();
   let reranked = false;
   if (cfg && rerank && mode === 'hybrid' && ranked.length > 1 && rerankAvailable()) {
-    // The same short window, chosen by the same words, as the vault-wide pass
-    // (selectPassages): counting short words such as articles picks a window
-    // that lacks the term the query is about.
+    // A short window chosen by the query's longer words, as in the vault-wide
+    // pass (selectPassages): counting short words such as articles picks a
+    // window that lacks the term the query is about.
     const windowWords = words.filter((w) => w.length > 3);
     const scored = await rerankTexts(
       query,

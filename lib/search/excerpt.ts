@@ -1,5 +1,5 @@
 import { query as dbQuery } from '../db';
-import { TABLE_ROW_RE, TABLE_SEPARATOR_RE, unpairedFenceIndex, extractHeadings } from '../markdown';
+import { TABLE_ROW_RE, TABLE_SEPARATOR_RE, unpairedFenceIndex, sectionOfSpan } from '../markdown';
 import type { SearchResult } from './types';
 import { LEGACY_EXCERPT } from './config';
 import { MIN_SIGNIFICANT_WORD_LEN } from './signals';
@@ -198,18 +198,33 @@ export async function repairBrokenTableExcerpts(results: SearchResult[]): Promis
 const MIN_SECTION_MATCH_LEN = 8;
 
 /**
- * Sets `section` from the heading above the excerpt's real position in the
- * note. Chunks can merge several small sections under the first one's heading,
- * so this overrides the stored chunk heading, which stays as the fallback.
- * One batched fetch; a result that cannot be located is left unchanged.
+ * The excerpt's own text from the note: without the table header makeExcerpt
+ * may put above it (copied from further up, and identical across tables that
+ * share columns) and without the ellipses at its edges.
+ */
+function excerptBody(excerpt: string): string {
+  const lines = excerpt.split('\n');
+  const own = lines.length > 2 && TABLE_ROW_RE.test(lines[0]) && TABLE_SEPARATOR_RE.test(lines[1])
+    ? lines.slice(2).join('\n')
+    : excerpt;
+  return own.replace(/^(\.\.\.|…)/, '').replace(/(\.\.\.|…)$/, '').trim();
+}
+
+/**
+ * Sets `section` from where the excerpt really sits in the note. Chunks can
+ * merge several small sections under the first one's heading, so this
+ * overrides the stored chunk heading, which stays as the fallback. An excerpt
+ * over two sections is named by the line the query matched, or else by the
+ * section holding most of it (see sectionOfSpan). One batched fetch; a result
+ * that cannot be located is left unchanged.
  */
 export async function attachSections(results: Pick<SearchResult, 'id' | 'excerpt' | 'section'>[], query?: string): Promise<void> {
   const candidates = results
     .filter((r) => !LEGACY_EXCERPT || !r.section)
-    .map((r) => ({
-      r,
-      pattern: r.excerpt.split('\n')[0].replace(/^(\.\.\.|…)/, '').replace(/(\.\.\.|…)$/, '').trim(),
-    }))
+    .map((r) => {
+      const body = excerptBody(r.excerpt);
+      return { r, body, pattern: body.split('\n')[0].trim() };
+    })
     .filter((c) => c.pattern.length >= MIN_SECTION_MATCH_LEN);
   if (candidates.length === 0) return;
 
@@ -219,22 +234,17 @@ export async function attachSections(results: Pick<SearchResult, 'id' | 'excerpt
   );
   const contentById = new Map(rows.map((r) => [r.id, r.content]));
 
-  for (const { r, pattern } of candidates) {
+  for (const { r, body, pattern } of candidates) {
     const content = contentById.get(r.id);
     if (!content) continue;
     const idx = content.indexOf(pattern);
     if (idx === -1) continue;
-    // Take the heading above the query-relevant line, not above the window start.
-    const span = content.slice(idx, idx + r.excerpt.length);
-    const anchor = query && !LEGACY_EXCERPT ? bestPassageOffset(span, query) : null;
-    const target = idx + (anchor?.start ?? 0);
-    // The last heading at or before the target owns it, whatever its level.
-    const headings = extractHeadings(content);
-    let heading: string | null = null;
-    for (const h of headings) {
-      if (h.offset > target) break;
-      heading = h.text;
-    }
+    const end = Math.min(content.length, idx + body.length);
+    // The query-relevant line names it when there is one; the legacy behaviour
+    // names it by where it starts.
+    const anchor = query && !LEGACY_EXCERPT ? bestPassageOffset(content.slice(idx, end), query) : null;
+    const at = anchor ? idx + anchor.start : LEGACY_EXCERPT ? idx : undefined;
+    const heading = sectionOfSpan(content, idx, end, at);
     if (heading) r.section = heading;
   }
 }

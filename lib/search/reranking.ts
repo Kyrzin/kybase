@@ -1,6 +1,6 @@
 import { query as dbQuery } from '../db';
 import { getRerankMinScore } from '../settings';
-import { rerankConfig, rerankAvailable, selectPassages, scorePassages, windowsOf, EXCERPT_CHUNK_CAP, type RerankConfig } from '../rerank';
+import { rerankConfig, rerankAvailable, selectPassages, scorePassages, windowsOf, normalizeQuery, EXCERPT_CHUNK_CAP, type RerankConfig } from '../rerank';
 import type { HybridSearchResult } from './types';
 import { makeExcerpt, stripLeadingHeading } from './excerpt';
 import type { QueryVector } from './semantic';
@@ -48,8 +48,9 @@ export async function applyRerank(
     const hit = scores.get(r.id);
     if (!hit) continue;
     r.rerank_score = hit.score;
-    // Show the passage that earned the rank.
-    r.excerpt = makeExcerpt(stripLeadingHeading(hit.content), query);
+    // Show the passage that earned the rank, centred on the query as matched:
+    // "12 / 34" is found in the text as 12/34.
+    r.excerpt = makeExcerpt(stripLeadingHeading(hit.content), normalizeQuery(query));
   }
 
   // A note with no scored passage (not embedded yet) keeps its place.
@@ -128,6 +129,6 @@ async function refineTopExcerpts(
   for (const r of top) {
     const win = scored?.get(r.id);
     const content = win?.content ?? best.get(r.id);
-    if (content) r.excerpt = makeExcerpt(stripLeadingHeading(content), query);
+    if (content) r.excerpt = makeExcerpt(stripLeadingHeading(content), normalizeQuery(query));
   }
 }

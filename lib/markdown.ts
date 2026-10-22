@@ -95,6 +95,39 @@ export function extractHeadings(content: string): Heading[] {
   return out;
 }
 
+/**
+ * The heading a span of `content` sits under: the one over `at` when given
+ * (the line a query matched), otherwise the one holding most of the span. A
+ * window or an excerpt can cross a heading, and naming it by where it starts
+ * names the section it mostly is not. Null when no heading precedes it.
+ */
+export function sectionOfSpan(content: string, start: number, end: number, at?: number): string | null {
+  const headings = extractHeadings(content);
+  const headingAt = (pos: number) => {
+    let text: string | null = null;
+    for (const h of headings) {
+      if (h.offset > pos) break;
+      text = h.text;
+    }
+    return text;
+  };
+  if (at !== undefined) return headingAt(at);
+  // Ties keep the earlier section.
+  let current = headingAt(start);
+  let best = current;
+  let bestLength = -1;
+  let from = start;
+  for (const h of headings) {
+    if (h.offset <= start) continue;
+    if (h.offset >= end) break;
+    if (h.offset - from > bestLength) { best = current; bestLength = h.offset - from; }
+    current = h.text;
+    from = h.offset;
+  }
+  if (end - from > bestLength) best = current;
+  return best;
+}
+
 export function safeUrl(url: string): string {
   return /^(https?:|mailto:|\/|#)/i.test(url.trim()) ? url : '#';
 }

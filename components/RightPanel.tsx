@@ -9,7 +9,7 @@ import type { Backlink, ListedNote, SearchHit } from '@/lib/types';
 import type { RevertResult } from '@/lib/useNotes';
 import { extractHeadings } from '@/lib/markdown';
 import { Icons } from './Icons';
-import MiniGraph, { type GraphData } from './MiniGraph';
+import SigmaGraph, { type GraphData } from './SigmaGraph';
 import HistoryPanel, { ChangesPanel } from './HistoryPanel';
 
 export type RightPanelMode = 'backlinks' | 'graph' | 'ai' | 'outline' | 'history' | 'changes';
@@ -139,7 +139,7 @@ export default function RightPanel(p: {
               </button>
             </div>
             <div style={{ flex: 1, overflow: 'hidden' }}>
-              <MiniGraph
+              <SigmaGraph
                 graphData={graphData}
                 activeNoteId={activeNoteId}
                 onSelectNote={id => {

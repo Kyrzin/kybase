@@ -16,6 +16,9 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@thednp/dommatrix": "^3.1.1",
     "diff": "^9.0.0",
+    "graphology": "0.26.0",
+    "graphology-layout-forceatlas2": "0.10.1",
+    "graphology-layout-noverlap": "0.4.2",
     "jszip": "^3.10.1",
     "mammoth": "^1.12.1",
     "next": "^16.3.0",
@@ -23,6 +26,7 @@
     "pg": "^8.16.3",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "sigma": "3.0.3",
     "turndown": "^7.2.4",
     "turndown-plugin-gfm": "^1.0.2",
     "zod": "^4.4.3"
@@ -37,6 +41,7 @@
     "dotenv": "^17.4.2",
     "eslint": "^9",
     "eslint-config-next": "^16.3.0",
+    "graphology-types": "0.24.8",
     "tailwindcss": "^4",
     "tsx": "^4.22.3",
     "typescript": "^5"

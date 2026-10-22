@@ -68,7 +68,7 @@ export type IndexedGraph = {
  * nodes carry their title, not their UUID, since ids are most of the payload and
  * nothing in the response resolves through them. Titles are unique (migration
  * 006) and every follow-up tool (get_note, get_neighbors, get_backlinks) takes
- * one. The REST route and MiniGraph keep id-keyed edges. An edge whose endpoint
+ * one. The REST route and the graph view keep id-keyed edges. An edge whose endpoint
  * is missing from `nodes` is dropped rather than emitted with a dangling index.
  */
 export function indexedForm(graph: {

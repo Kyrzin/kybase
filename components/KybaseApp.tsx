@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { Folder, SearchHit } from '@/lib/types';
 import { Icons } from './Icons';
-import { type GraphData } from './MiniGraph';
+import { type GraphData } from './SigmaGraph';
 import SettingsModal from './SettingsModal';
 import Sidebar from './Sidebar';
 import Editor, { type WikilinkPreview } from './Editor';
@@ -184,8 +184,26 @@ export default function KybaseApp() {
   const backlinks = useBacklinks(activeNoteId, rightPanel === 'backlinks');
 
   const linkEdges = useGraphLinks(rightPanel === 'graph', notes);
+  // The graph draws each top-level folder as an island: a note's group is the
+  // root of its folder chain.
+  const rootFolderOf = useMemo(() => {
+    const parent = new Map(folders.map(f => [f.id, f.parent_id]));
+    return (folderId: string | null): string | null => {
+      let id = folderId;
+      for (let hops = 0; id && parent.get(id) && hops < 64; hops++) id = parent.get(id)!;
+      return id;
+    };
+  }, [folders]);
+
   const graphData = useMemo<GraphData>(() => {
-    const nodesList: GraphData['nodes'] = visibleNotes.map(n => ({ id: n.id, title: n.title, type: 'note', folderId: n.folder_id }));
+    const nodesList: GraphData['nodes'] = visibleNotes.map(n => ({
+      id: n.id, title: n.title, type: 'note', folderId: n.folder_id, group: rootFolderOf(n.folder_id),
+    }));
+    const used = new Set(nodesList.map(n => n.group));
+    const groups = folders
+      .filter(f => f.parent_id === null && used.has(f.id))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map(f => ({ id: f.id, name: f.name }));
     const ids = new Set(nodesList.map(n => n.id));
     const edgesList: GraphData['edges'] = linkEdges.filter(e => ids.has(e.from) && ids.has(e.to));
     // Merge semantic edges: only between visible notes, and never on a pair
@@ -199,8 +217,8 @@ export default function KybaseApp() {
       linked.add(key);
       edgesList.push({ from: e.from, to: e.to, kind: 'semantic', score: e.score });
     });
-    return { nodes: nodesList, edges: edgesList };
-  }, [visibleNotes, linkEdges, semanticEdges]);
+    return { nodes: nodesList, edges: edgesList, groups };
+  }, [visibleNotes, linkEdges, semanticEdges, folders, rootFolderOf]);
 
   const searchHits = useNoteSearch(searchQuery);
   const filteredNotes = useMemo(() => {

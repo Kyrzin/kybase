@@ -38,6 +38,9 @@ export type SearchResult = {
   index_pending?: boolean;
   // Cross-encoder score of the best passage, present only when reranking ran.
   rerank_score?: number;
+  // Kept under the rerank minimum score as a verbatim or unique-word match:
+  // found by a word of the query, not confirmed by the reranker.
+  weak_match?: boolean;
 };
 
 export type SearchFilters = {

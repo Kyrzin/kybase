@@ -15,13 +15,17 @@ export async function applyRerank(
   query: string,
   fused: HybridSearchResult[],
   queryVector?: QueryVector
-): Promise<{ results: HybridSearchResult[]; reranked: boolean }> {
-  const unchanged = { results: fused, reranked: false };
-  if (fused.length < 2) return unchanged;
+): Promise<{ results: HybridSearchResult[]; reranked: boolean; dropped: number }> {
+  const unchanged = { results: fused, reranked: false, dropped: 0 };
+  if (fused.length === 0) return unchanged;
   // Never wait on a probe: an absent service must not cost every search a timeout.
   if (!rerankAvailable()) return unchanged;
   const cfg = await rerankConfig();
   if (!cfg) return unchanged;
+  // A single candidate has nothing to reorder, but a minimum score still
+  // applies to it: unscored, it would pass the floor unjudged and unmarked.
+  const floor = await getRerankMinScore();
+  if (fused.length < 2 && floor === null) return unchanged;
 
   const head = fused.slice(0, cfg.topN);
   // Chunk distance to the query lets passage selection find meaning without shared words.
@@ -76,14 +80,15 @@ export async function applyRerank(
   // Optional floor: keeps only what the reranker scored at or above it,
   // dropping unscored candidates too. Verbatim and unique-word matches stay:
   // a cross-encoder cannot judge a name or code it does not know.
-  const floor = await getRerankMinScore();
   if (floor === null) {
     await refineTopExcerpts(query, fused, byNote, cfg);
-    return { results: fused, reranked: true };
+    return { results: fused, reranked: true, dropped: 0 };
   }
-  const kept = fused.filter((r) => r.exact || r.unique || (r.rerank_score !== undefined && r.rerank_score >= floor));
+  const passes = (r: HybridSearchResult) => r.rerank_score !== undefined && r.rerank_score >= floor;
+  const kept = fused.filter((r) => r.exact || r.unique || passes(r));
+  for (const r of kept) if (!passes(r)) r.weak_match = true;
   await refineTopExcerpts(query, kept, byNote, cfg);
-  return { results: kept, reranked: true };
+  return { results: kept, reranked: true, dropped: fused.length - kept.length };
 }
 
 /**

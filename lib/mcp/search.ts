@@ -45,6 +45,13 @@ export function registerSearchTools(server: McpServer): void {
       out.index_pending = true;
       out.hint = 'Excerpt is from a previous version of this note; read it with get_note before quoting.';
     }
+    // Only ever true: the reranker scored this hit under the minimum score and
+    // it stayed for a word of the query alone.
+    if (r.weak_match) {
+      out.weak_match = true;
+      const weak = 'Weak match: kept for a query word alone (verbatim, or in no other note); the reranker did not confirm it. Check the excerpt before relying on it.';
+      out.hint = out.hint ? `${out.hint} ${weak}` : weak;
+    }
     if (r.section) out.section = r.section;
     if (r.content_length !== undefined) out.content_length = r.content_length;
     // Where the excerpt sits, for a note long enough that reading it whole is
@@ -221,6 +228,11 @@ export function registerSearchTools(server: McpServer): void {
             // one is switched on and did not answer — a fault worth seeing,
             // because the results are then the un-reranked ones.
             ...(diagnostics.rerank.enabled ? { reranked: diagnostics.reranked } : {}),
+            // Candidates the rerank minimum score removed: the vault holds more
+            // than this page and has_more show, and rerank:false returns them.
+            ...(diagnostics.rerank.dropped > 0
+              ? { rerank_min_score: diagnostics.rerank.min_score, dropped_by_min_score: diagnostics.rerank.dropped }
+              : {}),
           }, null, 2),
         }],
       };

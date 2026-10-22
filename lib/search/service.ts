@@ -45,7 +45,8 @@ export type SearchDiagnostics = {
   /** A cross-encoder decided this page's order. false also when it did not answer. */
   reranked: boolean;
   /** Distinguishes no service, switched off, skipped for this query, and not answering. */
-  rerank: { available: boolean; enabled: boolean; skipped: boolean; min_score: number | null };
+  /** `dropped`: candidates the rerank minimum score removed from this run. */
+  rerank: { available: boolean; enabled: boolean; skipped: boolean; min_score: number | null; dropped: number };
   took_ms: number;
 };
 
@@ -78,6 +79,7 @@ export async function searchWithDiagnostics(
   let armsUsed: ('text' | 'semantic')[] = [];
   let failures: ArmFailure[] = [];
   let reranked = false;
+  let dropped = 0;
 
   // One row past the page tells whether there is more; project() drops it.
   let hasMore = false;
@@ -99,6 +101,7 @@ export async function searchWithDiagnostics(
     armsUsed = run.armsUsed;
     failures = run.failures;
     reranked = run.reranked;
+    dropped = run.droppedByFloor;
     hasMore = run.hasMore;
   }
 
@@ -128,6 +131,7 @@ export async function searchWithDiagnostics(
         enabled: (await rerankConfig()) !== null,
         skipped: !rerank,
         min_score: await getRerankMinScore(),
+        dropped,
       },
       took_ms: Date.now() - started,
     },
@@ -197,6 +201,7 @@ export function project(
     if (r.created_at !== undefined) base.created_at = r.created_at;
     if (r.question_echo !== undefined) base.question_echo = r.question_echo;
     if (r.index_pending !== undefined) base.index_pending = r.index_pending;
+    if (r.weak_match) base.weak_match = true;
     // Always shown when present: it explains an order rank fusion did not produce.
     if (r.rerank_score !== undefined) base.rerank_score = r.rerank_score;
 

@@ -28,7 +28,7 @@ export async function hybridSearch(query: string, limit = 10, filters?: SearchFi
  */
 export async function hybridRun(query: string, limit = 10, filters?: SearchFilters, rerank = true): Promise<{
   results: HybridSearchResult[]; bestSemantic: number | null; failures: ArmFailure[];
-  armsUsed: ('text' | 'semantic')[]; reranked: boolean; hasMore: boolean;
+  armsUsed: ('text' | 'semantic')[]; reranked: boolean; hasMore: boolean; droppedByFloor: number;
 }> {
   const candidateLimit = Math.min(RRF_CANDIDATE_CAP, Math.max(RRF_CANDIDATE_FLOOR, limit * RRF_CANDIDATE_FACTOR));
   const allowedIds = hasFilters(filters) ? await filteredNoteIds(filters) : undefined;
@@ -66,10 +66,10 @@ export async function hybridRun(query: string, limit = 10, filters?: SearchFilte
 
   let fused = rrfMerge(lists);
   const queryVector = semanticOutcome.status === 'fulfilled' ? semanticOutcome.value.queryVector : undefined;
-  const rr = rerank ? await applyRerank(query, fused, queryVector) : { results: fused, reranked: false };
+  const rr = rerank ? await applyRerank(query, fused, queryVector) : { results: fused, reranked: false, dropped: 0 };
   fused = rr.results;
   const merged = fused.slice(0, limit);
   // Once, on the returned page — see textSearch's deferSections note.
   await attachSections(merged, query);
-  return { results: merged, bestSemantic, failures, armsUsed, reranked: rr.reranked, hasMore: fused.length > limit };
+  return { results: merged, bestSemantic, failures, armsUsed, reranked: rr.reranked, hasMore: fused.length > limit, droppedByFloor: rr.dropped };
 }

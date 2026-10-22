@@ -57,14 +57,17 @@ export function registerSearchTools(server: McpServer): void {
     // fields. Absent whenever reranking did not run.
     if (r.rerank_score !== undefined) out.rerank_score = round3(r.rerank_score);
     if (explain) {
-      // Hybrid results carry text_score/semantic_score per arm. A plain result's
-      // `score` is its one arm's raw number, surfaced under the same field name;
-      // text_tier (set only by the text arm) tells which.
+      // Hybrid results carry text_score/semantic_score per arm that matched,
+      // and rrf_score. A plain result's `score` is its one arm's raw number,
+      // surfaced under the same field name; text_tier (set only by the text
+      // arm) tells which. A hybrid result's `score` is its rrf_score, never an
+      // arm's.
       const plain = r as Partial<SearchResult>;
+      const isPlain = hybrid.rrf_score === undefined;
       if (hybrid.text_score !== undefined) out.text_score = round3(hybrid.text_score);
-      else if (plain.score !== undefined && plain.text_tier !== undefined) out.text_score = round3(plain.score);
+      else if (isPlain && plain.score !== undefined && plain.text_tier !== undefined) out.text_score = round3(plain.score);
       if (hybrid.semantic_score !== undefined) out.semantic_score = round3(hybrid.semantic_score);
-      else if (plain.score !== undefined && plain.text_tier === undefined) out.semantic_score = round3(plain.score);
+      else if (isPlain && plain.score !== undefined && plain.text_tier === undefined) out.semantic_score = round3(plain.score);
       if (hybrid.rrf_score !== undefined) out.rrf_score = round3(hybrid.rrf_score);
 
       if (r.created_at) out.created_at = r.created_at;

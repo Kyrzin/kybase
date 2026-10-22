@@ -177,7 +177,7 @@ export function project(
 
   return sliced.map((r): SearchResult => {
     const isHybrid = 'rrf_score' in r;
-    const rawScore = isHybrid ? r.rrf_score : r.score;
+    const rawScore = isHybrid ? r.rrf_score! : r.score;
 
     const base: SearchResult = {
       id: r.id,
@@ -203,6 +203,7 @@ export function project(
     if (explain) {
       if (r.text_score !== undefined) base.text_score = r.text_score;
       if (r.semantic_score !== undefined) base.semantic_score = r.semantic_score;
+      if ('rrf_score' in r) base.rrf_score = r.rrf_score;
     }
 
     return base;

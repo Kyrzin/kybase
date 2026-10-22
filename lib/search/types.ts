@@ -12,6 +12,8 @@ export type SearchResult = {
   // score) and raw cosine similarity. Debugging aids, not an ordering.
   text_score?: number;
   semantic_score?: number;
+  // Hybrid only, under explain: the rank-fusion score (see HybridSearchResult).
+  rrf_score?: number;
   matched_by?: ('text_score' | 'semantic_score')[];
   // Text-arm cascade level: 'and' = the strict query matched; 'or' and
   // 'substring' = a looser pass filled in.

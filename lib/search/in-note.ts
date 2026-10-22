@@ -3,7 +3,7 @@ import { getEmbedding, embeddingModelKey } from '../embeddings';
 import { getEmbeddingConfig } from '../settings';
 import { escapeLike } from '../sql';
 import { extractHeadings } from '../markdown';
-import { rerankConfig, rerankAvailable, rerankTexts, bestWindow } from '../rerank';
+import { rerankConfig, rerankAvailable, rerankTexts, bestWindow, blendScores } from '../rerank';
 import type { ArmFailure, HybridSearchResult, SearchResult } from './types';
 import { RRF_K } from './config';
 import { NEEDLE_CHARS, OFFSET_WORTH_IT_ABOVE } from './results';
@@ -150,7 +150,8 @@ export async function searchInNote(
   const outcomes = await Promise.allSettled(arms.map(([, , run]) => run()));
 
   type Field = 'text_score' | 'semantic_score';
-  type Place = { chunk: NoteChunk; fused: number; matchedBy: Field[]; scores: Partial<Record<Field, number>>; rerank?: number };
+  // rerank is the model's score, final the one that orders (see blendScores).
+  type Place = { chunk: NoteChunk; fused: number; matchedBy: Field[]; scores: Partial<Record<Field, number>>; rerank?: number; final?: number };
   const places = new Map<number, Place>();
   const failures: ArmFailure[] = [];
   const armsUsed: ('text' | 'semantic')[] = [];
@@ -188,19 +189,24 @@ export async function searchInNote(
     );
     if (scored) {
       for (const { index, score } of scored) ranked[index].rerank = score;
-      ranked.sort((a, b) => (b.rerank ?? -Infinity) - (a.rerank ?? -Infinity) || b.fused - a.fused || byChunkOrder(a, b));
+      // Still in fused order, best first.
+      const best = ranked[0].fused;
+      const judged = ranked.filter((p) => p.rerank !== undefined);
+      blendScores(judged.map((p) => ({ fused: best > 0 ? p.fused / best : 0, rerank: p.rerank! })), cfg)
+        .forEach((final, i) => { judged[i].final = final; });
+      ranked.sort((a, b) => (b.final ?? -Infinity) - (a.final ?? -Infinity) || b.fused - a.fused || byChunkOrder(a, b));
       reranked = true;
     }
   }
 
-  const top = reranked ? ranked[0]?.rerank ?? 0 : ranked[0]?.fused ?? 0;
-  const results: HybridSearchResult[] = ranked.map(({ chunk, fused, matchedBy, scores, rerank: score }) => ({
+  const top = reranked ? ranked[0]?.final ?? 0 : ranked[0]?.fused ?? 0;
+  const results: HybridSearchResult[] = ranked.map(({ chunk, fused, matchedBy, scores, rerank: score, final }) => ({
     id: note.id,
     title: note.title,
     excerpt: makeExcerpt(stripLeadingHeading(chunk.content), query),
     tags: note.tags,
     rrf_score: fused,
-    relevance: top > 0 ? (reranked ? score ?? 0 : fused) / top : 0,
+    relevance: top > 0 ? (reranked ? final ?? 0 : fused) / top : 0,
     matched_by: matchedBy,
     ...scores,
     ...(chunk.heading ? { section: chunk.heading } : {}),

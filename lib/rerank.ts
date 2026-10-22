@@ -10,6 +10,7 @@
 // -> [{index, score}]. Any service answering that shape works.
 import { getRerankEnabled } from './settings';
 import { sectionOfSpan } from './markdown';
+import { RRF_K } from './search/config';
 
 export type RerankConfig = {
   url: string;
@@ -20,11 +21,35 @@ export type RerankConfig = {
   timeoutMs: number;
   /** How many top results get their excerpt chosen by the model too. 0 disables it. */
   excerptTop: number;
+  /** How the model's score meets the fused order; see RerankMode. */
+  mode: RerankMode;
+  /** score mode: weight of the fused relevance, 0..1; the model's score gets the rest. */
+  blendAlpha: number;
+  /** rank mode: weight of the model's rank against the fused rank. */
+  rankWeight: number;
 };
+
+/**
+ * rank (default): rank fusion of the fused order and the model's order, so
+ * neither scale matters. score: a weighted sum of the fused relevance and the
+ * model's score, both 0..1. replace: the model's score alone orders the
+ * rescored notes. A blend keeps a candidate that both arms placed high from
+ * sinking on one low model score — a query on several topics at once can score
+ * every single passage low.
+ */
+export type RerankMode = 'replace' | 'score' | 'rank';
 
 const num = (v: string | undefined, fallback: number) => {
   const n = Number(v);
   return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+const rerankMode = (v: string | undefined): RerankMode => (v === 'score' || v === 'replace' ? v : 'rank');
+
+/** A number in [min, max], or the fallback for anything else, an empty value included. */
+const bounded = (v: string | undefined, fallback: number, min: number, max = Infinity) => {
+  const n = v?.trim() ? Number(v) : NaN;
+  return Number.isFinite(n) && n >= min && n <= max ? n : fallback;
 };
 
 /** The compose service name, so starting the profile is the whole setup; KYBASE_RERANK_URL overrides it. */
@@ -92,7 +117,31 @@ export async function rerankConfig(): Promise<RerankConfig | null> {
     // it was meant to protect.
     timeoutMs: num(process.env.KYBASE_RERANK_TIMEOUT_MS, 20000),
     excerptTop: Math.min(5, Math.max(0, Number(process.env.KYBASE_RERANK_EXCERPT_TOP ?? 1) || 0)),
+    mode: rerankMode(process.env.KYBASE_RERANK_MODE),
+    blendAlpha: bounded(process.env.KYBASE_RERANK_BLEND_ALPHA, 0.5, 0, 1),
+    rankWeight: bounded(process.env.KYBASE_RERANK_RANK_WEIGHT, 1, 0),
   };
+}
+
+/**
+ * The score that orders rescored candidates, higher first. `items` are in
+ * fused order, best first: `fused` is the fused relevance (0..1), `rerank` the
+ * model's score. Ranks in rank mode count from 1; equal model scores keep the
+ * fused order.
+ */
+export function blendScores(
+  items: { fused: number; rerank: number }[],
+  cfg: Pick<RerankConfig, 'mode' | 'blendAlpha' | 'rankWeight'>
+): number[] {
+  if (cfg.mode === 'score') return items.map((it) => cfg.blendAlpha * it.fused + (1 - cfg.blendAlpha) * it.rerank);
+  if (cfg.mode === 'rank') {
+    const rerankRank = new Array<number>(items.length);
+    items.map((_, i) => i)
+      .sort((a, b) => items[b].rerank - items[a].rerank || a - b)
+      .forEach((i, position) => { rerankRank[i] = position + 1; });
+    return items.map((_, i) => 1 / (RRF_K + i + 1) + cfg.rankWeight / (RRF_K + rerankRank[i]));
+  }
+  return items.map((it) => it.rerank);
 }
 
 // Excerpt refinement budget. Both are per note and paid only for the first

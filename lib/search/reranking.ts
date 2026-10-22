@@ -1,15 +1,16 @@
 import { query as dbQuery } from '../db';
 import { getRerankMinScore } from '../settings';
-import { rerankConfig, rerankAvailable, selectPassages, scorePassages, windowsOf, normalizeQuery, EXCERPT_CHUNK_CAP, type RerankConfig } from '../rerank';
+import { rerankConfig, rerankAvailable, selectPassages, scorePassages, windowsOf, normalizeQuery, blendScores, EXCERPT_CHUNK_CAP, type RerankConfig } from '../rerank';
 import type { HybridSearchResult } from './types';
 import { makeExcerpt, stripLeadingHeading } from './excerpt';
 import type { QueryVector } from './semantic';
 
 /**
- * Reorders the top of the fused list by cross-encoder score, before the page
- * is cut. It reorders candidates, never adds one. Verbatim matches are
- * reordered only among themselves. `reranked: false` when nothing was
- * rescored (service off, unreachable or silent).
+ * Reorders the top of the fused list by cross-encoder score, alone or blended
+ * with the fused order (RerankMode), before the page is cut. It reorders
+ * candidates, never adds one. Verbatim matches are reordered only among
+ * themselves. `reranked: false` when nothing was rescored (service off,
+ * unreachable or silent).
  */
 export async function applyRerank(
   query: string,
@@ -60,9 +61,12 @@ export async function applyRerank(
   // A note with no scored passage (not embedded yet) keeps its place.
   const seen = head.filter((r) => r.rerank_score !== undefined);
   const order = new Map(head.map((r, i) => [r.id, i]));
+  // `seen` is still in fused order and its relevance still the fused one.
+  const finals = blendScores(seen.map((r) => ({ fused: r.relevance, rerank: r.rerank_score! })), cfg);
+  const finalOf = new Map(seen.map((r, i) => [r.id, finals[i]]));
   seen.sort((a, b) =>
     Number(b.exact) - Number(a.exact) ||
-    (b.rerank_score! - a.rerank_score!) ||
+    (finalOf.get(b.id)! - finalOf.get(a.id)!) ||
     (order.get(a.id)! - order.get(b.id)!) ||
     a.id.localeCompare(b.id)
   );
@@ -71,10 +75,11 @@ export async function applyRerank(
     if (head[i].rerank_score !== undefined) fused[i] = seen[next++];
   }
 
-  // Relevance is recomputed from the score that decided this order.
-  const top = seen[0]?.rerank_score;
+  // Relevance is recomputed from the score that decided this order;
+  // rerank_score stays the model's own.
+  const top = seen.length > 0 ? finalOf.get(seen[0].id) : undefined;
   if (top !== undefined && top > 0) {
-    for (const r of seen) r.relevance = r.rerank_score! / top;
+    for (const r of seen) r.relevance = finalOf.get(r.id)! / top;
   }
 
   // Optional floor: keeps only what the reranker scored at or above it,

@@ -1,5 +1,26 @@
 # Changelog
 
+## Kybase 1.5.1
+
+### Search
+- Better results for names, rare words and short queries.
+- Better passages and excerpts from long notes, shown under the right section.
+  Run Reindex in Settings to apply this to existing notes.
+- Optional reranker: new `KYBASE_RERANK_MODE` setting, default `rank`;
+  `replace` keeps the previous behaviour. The first search after a restart is
+  reranked too.
+- `search_notes` marks weak matches and reports results removed by the minimum
+  reranker score.
+- `explain` reports `rrf_score` under its own name.
+
+### Graph
+- New graph view with folders as islands. Needs WebGL.
+
+### Connections
+- ChatGPT can connect without configuration.
+- `KYBASE_OAUTH_REDIRECT_URIS` is passed through the shipped compose file.
+- Refused OAuth callback URIs are logged.
+
 ## Kybase 1.5.0
 
 ### Search

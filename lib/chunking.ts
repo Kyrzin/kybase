@@ -71,14 +71,30 @@ export function chunkNote(content: string, maxLen = DEFAULT_MAX_LEN): NoteChunk[
     flush();
   }
 
-  // 3. Merge small adjacent atoms so tiny sections don't become noise chunks
+  // 3. Merge small adjacent atoms so tiny micro-crumbs don't become noise chunks.
+  // A meaningful Markdown section (with its own heading and >= 100 chars) preserves
+  // its section identity and heading context. Only micro-crumbs (< 100 chars, e.g.
+  // stubs, single-line notes, table fragments) or atoms sharing the same heading
+  // are packed together up to maxLen.
+  const crumb = (text: string) => text.length < Math.min(100, Math.floor(maxLen / 20));
   const chunks: NoteChunk[] = [];
   let acc: Section | null = null;
   for (const a of atoms) {
-    if (acc && acc.text.length + a.text.length + 2 <= maxLen) {
+    if (!acc) {
+      acc = { heading: a.heading, text: a.text };
+      continue;
+    }
+    const fits = acc.text.length + a.text.length + 2 <= maxLen;
+    const sameHeading = acc.heading !== null && acc.heading === a.heading;
+    const canMerge = fits && (sameHeading || crumb(acc.text) || crumb(a.text) || (acc.heading === null && a.heading === null));
+
+    if (canMerge) {
       acc.text += '\n\n' + a.text;
+      if (acc.heading === null && a.heading !== null) {
+        acc.heading = a.heading;
+      }
     } else {
-      if (acc) chunks.push({ index: chunks.length, heading: acc.heading, content: acc.text });
+      chunks.push({ index: chunks.length, heading: acc.heading, content: acc.text });
       acc = { heading: a.heading, text: a.text };
     }
   }

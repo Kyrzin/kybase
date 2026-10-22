@@ -1,6 +1,6 @@
 import { query as dbQuery } from '../db';
 import { getRerankMinScore } from '../settings';
-import { rerankConfig, rerankAvailable, selectPassages, scorePassages, windowsOf, normalizeQuery, blendScores, EXCERPT_CHUNK_CAP, type RerankConfig } from '../rerank';
+import { rerankConfig, rerankReady, selectPassages, scorePassages, windowsOf, normalizeQuery, blendScores, EXCERPT_CHUNK_CAP, type RerankConfig } from '../rerank';
 import type { HybridSearchResult } from './types';
 import { makeExcerpt, stripLeadingHeading } from './excerpt';
 import type { QueryVector } from './semantic';
@@ -19,10 +19,11 @@ export async function applyRerank(
 ): Promise<{ results: HybridSearchResult[]; reranked: boolean; dropped: number }> {
   const unchanged = { results: fused, reranked: false, dropped: 0 };
   if (fused.length === 0) return unchanged;
-  // Never wait on a probe: an absent service must not cost every search a timeout.
-  if (!rerankAvailable()) return unchanged;
   const cfg = await rerankConfig();
   if (!cfg) return unchanged;
+  // Waits only on the first probe after start: an absent service must not
+  // cost every search a timeout.
+  if (!(await rerankReady())) return unchanged;
   // A single candidate has nothing to reorder, but a minimum score still
   // applies to it: unscored, it would pass the floor unjudged and unmarked.
   const floor = await getRerankMinScore();

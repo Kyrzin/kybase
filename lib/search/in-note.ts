@@ -3,7 +3,7 @@ import { getEmbedding, embeddingModelKey } from '../embeddings';
 import { getEmbeddingConfig } from '../settings';
 import { escapeLike } from '../sql';
 import { extractHeadings } from '../markdown';
-import { rerankConfig, rerankAvailable, rerankTexts, bestWindow, blendScores } from '../rerank';
+import { rerankConfig, rerankReady, rerankTexts, bestWindow, blendScores } from '../rerank';
 import type { ArmFailure, HybridSearchResult, SearchResult } from './types';
 import { RRF_K } from './config';
 import { NEEDLE_CHARS, OFFSET_WORTH_IT_ABOVE } from './results';
@@ -177,7 +177,7 @@ export async function searchInNote(
 
   const cfg = await rerankConfig();
   let reranked = false;
-  if (cfg && rerank && mode === 'hybrid' && ranked.length > 1 && rerankAvailable()) {
+  if (cfg && rerank && mode === 'hybrid' && ranked.length > 1 && (await rerankReady())) {
     // A short window chosen by the query's longer words, as in the vault-wide
     // pass (selectPassages): counting short words such as articles picks a
     // window that lacks the term the query is about.

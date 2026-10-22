@@ -64,11 +64,17 @@ export function rerankUrl(): string {
 // would pay a connection timeout on every search to learn what it already
 // knew a second ago.
 let liveness: { ok: boolean; at: number } | null = null;
-let probeInFlight = false;
+let probeInFlight: Promise<boolean> | null = null;
 const LIVENESS_TTL_MS = 60_000;
 const PROBE_TIMEOUT_MS = 2_000;
 
-/** Asks the service whether it is there. Awaited only off the search path. */
+/** One probe at a time; callers that want its answer share it. */
+function probeShared(): Promise<boolean> {
+  probeInFlight ??= probeReranker().finally(() => { probeInFlight = null; });
+  return probeInFlight;
+}
+
+/** Asks the service whether it is there. A search awaits only the first one (rerankReady). */
 export async function probeReranker(): Promise<boolean> {
   try {
     const res = await fetch(`${rerankUrl()}/health`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
@@ -88,13 +94,19 @@ export async function probeReranker(): Promise<boolean> {
  * ranked by rank fusion instead, which is the shipped default anyway.
  */
 export function rerankAvailable(): boolean {
-  if (!liveness || Date.now() - liveness.at > LIVENESS_TTL_MS) {
-    if (!probeInFlight) {
-      probeInFlight = true;
-      probeReranker().finally(() => { probeInFlight = false; });
-    }
-  }
+  if (!liveness || Date.now() - liveness.at > LIVENESS_TTL_MS) void probeShared();
   return liveness?.ok ?? false;
+}
+
+/**
+ * rerankAvailable for a search about to rerank. Until the process has asked
+ * once there is no answer to go on, and the first search after a start would
+ * go unranked; that one search waits for the first probe instead, at most
+ * PROBE_TIMEOUT_MS. Every later one reads the last answer without waiting.
+ */
+export async function rerankReady(): Promise<boolean> {
+  if (!liveness) await probeShared();
+  return rerankAvailable();
 }
 
 /**

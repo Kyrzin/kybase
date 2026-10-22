@@ -118,6 +118,7 @@ services:
       PORT: "3000"
       DATABASE_URL: postgres://kybase:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@db:5432/kybase
       KYBASE_SECRET: ${KYBASE_SECRET:?set KYBASE_SECRET in .env}
+      KYBASE_OAUTH_REDIRECT_URIS: ${KYBASE_OAUTH_REDIRECT_URIS:-}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-ollama}
       OLLAMA_URL: ${OLLAMA_URL:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-embeddinggemma}

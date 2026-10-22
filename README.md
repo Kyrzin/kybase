@@ -265,6 +265,12 @@ adapts to the new model's vector size on its own.
 > Ollama keeps everything on your machine. Google and OpenAI are convenience
 > options: picking either sends your notes' full text to that provider.
 
+**Reranker (optional).** A cross-encoder can re-order the top search
+results. It is not in the default install: it needs about 800 MB of RAM
+and adds a few seconds to each search on a CPU. Start it with
+`docker compose --profile rerank up -d`; Kybase picks it up on its own,
+and a switch in Settings turns it off. Without it, search works as before.
+
 ## Sharing notes
 
 The **Share** button on a note creates a public read-only link — rendered

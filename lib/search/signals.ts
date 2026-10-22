@@ -56,6 +56,47 @@ export function significantWords(query: string): string[] {
   return query.split(/[^\p{L}\p{N}]+/u).filter((w) => w.length >= MIN_SIGNIFICANT_WORD_LEN);
 }
 
+/**
+ * Notes that are the only one in the vault holding one of the query's words —
+ * a name, a code — and that hold at least half of the query's words: in a
+ * longer question one rare word is incidental. Fails open with an empty set.
+ */
+export async function uniqueTermNotes(words: string[], languages: string[]): Promise<Set<string>> {
+  const unique = [...new Set(words)];
+  if (unique.length === 0 || languages.length === 0) return new Set();
+  const langExprs = languages.map((_, i) => `websearch_to_tsquery($${i + 2}::regconfig, unaccent(wt.word))`);
+  const tsqExpr = [`websearch_to_tsquery('simple', unaccent(wt.word))`, ...langExprs].join(' || ');
+  try {
+    // Two matches are enough to know a word is not unique.
+    const rows = await dbQuery<{ id: string; matched: number }>(
+      `with word_tsq as (
+         select word, (${tsqExpr}) as tsq
+         from unnest($1::text[]) as wt(word)
+       ),
+       sole as (
+         select distinct (array_agg(hit.id))[1] as id
+         from word_tsq wt
+         cross join lateral (
+           select n.id from notes n
+           where n.deleted_at is null and n.search_vector @@ wt.tsq
+           limit 2
+         ) hit
+         group by wt.word
+         having count(*) = 1
+       )
+       select s.id::text as id,
+              (select count(*)::int from word_tsq wt
+                join notes n on n.id = s.id and n.search_vector @@ wt.tsq) as matched
+       from sole s`,
+      [unique, ...languages]
+    );
+    return new Set(rows.filter((r) => r.matched * 2 >= unique.length).map((r) => r.id));
+  } catch (err) {
+    console.warn('[search] unique-word lookup failed, no lead from it:', err instanceof Error ? err.message : err);
+    return new Set();
+  }
+}
+
 // Rare words kept as anchors; a pair often only means something together.
 const ANCHOR_COUNT = 2;
 

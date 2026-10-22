@@ -13,7 +13,7 @@ export function rrfMerge(lists: NamedResultList[], fusion: Fusion = FUSION): Hyb
     result: SearchResult; rrfScore: number; relevance: number;
     extra: Partial<SearchResult>; textTier: SearchResult['text_tier'];
     exact: boolean | undefined; textCoverage: number | undefined;
-    questionEcho: boolean | undefined;
+    questionEcho: boolean | undefined; unique: boolean | undefined;
   }>();
 
   // An arm may list the same note twice; the first (best) occurrence keeps the
@@ -38,6 +38,7 @@ export function rrfMerge(lists: NamedResultList[], fusion: Fusion = FUSION): Hyb
           existing.exact = item.exact;
           existing.textCoverage = item.coverage;
           existing.questionEcho = item.question_echo;
+          existing.unique = item.unique;
         }
         // Show the passage of whichever arm matched this note better.
         if (item.relevance > existing.result.relevance) {
@@ -51,13 +52,14 @@ export function rrfMerge(lists: NamedResultList[], fusion: Fusion = FUSION): Hyb
           exact: field === 'text_score' ? item.exact : undefined,
           textCoverage: field === 'text_score' ? item.coverage : undefined,
           questionEcho: field === 'text_score' ? item.question_echo : undefined,
+          unique: field === 'text_score' ? item.unique : undefined,
         });
       }
     });
   }
 
   return [...scoreMap.values()]
-    .map(({ result, rrfScore, relevance, extra, textTier, exact, textCoverage, questionEcho }) => {
+    .map(({ result, rrfScore, relevance, extra, textTier, exact, textCoverage, questionEcho, unique }) => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars -- drop `score`, forward everything else
       const { score: _score, ...rest } = result;
       const matched_by = Object.keys(extra) as ('text_score' | 'semantic_score')[];
@@ -71,6 +73,7 @@ export function rrfMerge(lists: NamedResultList[], fusion: Fusion = FUSION): Hyb
         ...(exact !== undefined ? { exact } : {}),
         ...(textCoverage !== undefined ? { coverage: textCoverage } : {}),
         ...(questionEcho ? { question_echo: true } : {}),
+        ...(unique ? { unique: true } : {}),
       };
     })
     // A verbatim identifier match sorts first in every mode: Postgres tokenizes

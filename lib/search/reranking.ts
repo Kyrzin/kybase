@@ -74,13 +74,14 @@ export async function applyRerank(
   }
 
   // Optional floor: keeps only what the reranker scored at or above it,
-  // dropping unscored candidates too.
+  // dropping unscored candidates too. Verbatim and unique-word matches stay:
+  // a cross-encoder cannot judge a name or code it does not know.
   const floor = await getRerankMinScore();
   if (floor === null) {
     await refineTopExcerpts(query, fused, byNote, cfg);
     return { results: fused, reranked: true };
   }
-  const kept = fused.filter((r) => r.rerank_score !== undefined && r.rerank_score >= floor);
+  const kept = fused.filter((r) => r.exact || r.unique || (r.rerank_score !== undefined && r.rerank_score >= floor));
   await refineTopExcerpts(query, kept, byNote, cfg);
   return { results: kept, reranked: true };
 }

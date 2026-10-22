@@ -1,5 +1,7 @@
 import type { ArmFailure, HybridSearchResult, NamedResultList, SearchFilters } from './types';
 import { RRF_CANDIDATE_CAP, RRF_CANDIDATE_FACTOR, RRF_CANDIDATE_FLOOR } from './config';
+import { getFtsLanguages } from '../settings';
+import { significantWords, uniqueTermNotes } from './signals';
 import { filteredNoteIds, hasFilters } from './results';
 import { attachSections } from './excerpt';
 import { textSearch } from './text';
@@ -40,6 +42,11 @@ export async function hybridRun(query: string, limit = 10, filters?: SearchFilte
   const armsUsed: ('text' | 'semantic')[] = [];
 
   if (textOutcome.status === 'fulfilled') {
+    const words = significantWords(query);
+    if (textOutcome.value.length > 0 && words.length > 0) {
+      const unique = await getFtsLanguages().then((langs) => uniqueTermNotes(words, langs), () => new Set<string>());
+      for (const r of textOutcome.value) if (unique.has(r.id)) r.unique = true;
+    }
     lists.push({ field: 'text_score', results: textOutcome.value });
     armsUsed.push('text');
   } else {

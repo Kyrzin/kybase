@@ -20,6 +20,9 @@ export type SearchResult = {
   text_tier?: 'and' | 'or' | 'substring';
   // The identifier-shaped query occurs verbatim in the note (see textSearch).
   exact?: boolean;
+  // Hybrid only: the only note holding one of the query's words, and holding
+  // at least half of them (see uniqueTermNotes).
+  unique?: boolean;
   // Heading the excerpt sits under; get_note's `section` accepts it.
   section?: string;
   // IDF-weighted fraction of the query's significant words present in the note.

@@ -29,8 +29,8 @@ export function unreachableHint(provider: EmbeddingProvider, err: unknown): stri
   const message = err instanceof Error ? `${err.message} ${err.cause ?? ''}` : String(err);
   if (!/ENOTFOUND|ECONNREFUSED|EAI_AGAIN|fetch failed|timed out|aborted/i.test(message)) return null;
   return 'Ollama is not running. It is left out of the default install so that nobody pays for '
-    + 'a ~4 GB download to use Google or OpenAI embeddings. Start it with '
-    + '`docker compose --profile ollama up -d` — the app and your notes keep running — then reload this page.';
+    + 'a ~4 GB download to use Google or OpenAI embeddings. Start it — with Docker Compose, '
+    + '`docker compose --profile ollama up -d` — and try again; your notes keep working meanwhile.';
 }
 
 async function getJson(url: string, init?: RequestInit): Promise<unknown> {

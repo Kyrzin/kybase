@@ -46,7 +46,8 @@ async function getJson(url: string, init?: RequestInit): Promise<unknown> {
  */
 async function googleModels(apiKey: string): Promise<ProviderModel[]> {
   const body = (await getJson(
-    `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}&pageSize=200`
+    'https://generativelanguage.googleapis.com/v1beta/models?pageSize=200',
+    { headers: { 'x-goog-api-key': apiKey } }
   )) as { models?: { name?: string; supportedGenerationMethods?: string[] }[] };
   return (body.models ?? [])
     .filter((m) => (m.supportedGenerationMethods ?? []).includes('embedContent'))

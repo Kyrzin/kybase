@@ -39,10 +39,10 @@ function googleDimensions(dims: number | null): { outputDimensionality?: number 
 export async function googleEmbed(text: string, apiKey: string | undefined, model: string, dims: number | null, task: EmbedTask = 'document', isCancelled?: () => boolean): Promise<number[]> {
   if (!apiKey) throw new Error('Google API key is not configured');
   const res = await fetchWithRetry(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:embedContent`,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify({
         model: `models/${model}`,
         content: { parts: [{ text }] },
@@ -80,10 +80,10 @@ export async function googleBatchEmbed(texts: string[], apiKey: string | undefin
     }));
 
     const res = await fetchWithRetry(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:batchEmbedContents?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:batchEmbedContents`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify({ requests }),
       },
       {

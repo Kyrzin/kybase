@@ -1,5 +1,37 @@
 # Changelog
 
+## Kybase 1.5.2
+
+### Security
+- Fixed unsafe rendering of crafted note content in the web UI.
+- Shared notes get their own, stricter content security policy.
+- The Google API key is sent in a request header instead of the URL.
+
+### Notes
+- Notes render with markdown-it: inline code, links with parentheses,
+  nested lists and quotes show as written.
+- Typing is no longer lost when an import or a new note opens, and a save
+  refused while the tab was hidden is reported instead of dropped.
+
+### Search
+- More accurate reranking of short sections and of notes kept as logs.
+- `search_notes` names other matching sections of the same note
+  (`other_sections`), so an agent can read later entries too.
+- The log says when the reranker stops or starts answering.
+
+### Install
+- The shipped compose file publishes the app on this machine only. Set
+  `KYBASE_BIND=0.0.0.0` to reach it from other devices; see Upgrading.
+- A provider key saved under another `KYBASE_SECRET` is reported once in
+  the log, not on every search.
+
+### Connections
+- Setup for Devin Desktop (formerly Windsurf) in the README and in
+  Settings → Connect.
+- The MCP server reports the Kybase version.
+- The hint shown when Ollama is not running fits every install.
+- Sign-in pages call the master secret the secret.
+
 ## Kybase 1.5.1
 
 ### Search

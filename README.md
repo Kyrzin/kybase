@@ -13,7 +13,7 @@
 
 <h3 align="center">Your AI forgets when the session ends. Kybase remembers.</h3>
 
-Kybase gives Claude, Cursor, Windsurf and any other MCP-speaking agent a
+Kybase gives Claude, ChatGPT, Cursor and any other MCP-speaking agent a
 long-term memory you own: one Markdown knowledge base, running on your own
 machine, that every agent can search, read and update — and that you can
 open in a browser and edit by hand.
@@ -143,11 +143,16 @@ claude mcp add --transport http --scope user kybase https://your-domain/api/mcp
 Then run `/mcp` in Claude Code, pick `kybase` → **Authenticate**, and enter
 your `KYBASE_SECRET` on the page that opens.
 
+Moving from a secret in the config to this sign-in? Remove the old `kybase`
+entry from the project's `.mcp.json` first: Claude Code prefers it to the
+one above and never uses the sign-in. If that file was committed with the
+secret in it, change the secret (see [SECURITY.md](SECURITY.md)).
+
 That's it — the agent can now search your notes, read them, write new ones,
 update existing ones and link them together.
 
 <details>
-<summary><b>Other clients</b> — Claude Desktop, claude.ai, ChatGPT, Cursor, Windsurf</summary>
+<summary><b>Other clients</b> — Claude Desktop, claude.ai, ChatGPT, Cursor, Devin Desktop</summary>
 
 **Claude Desktop and claude.ai** — Customize → Connectors → Add custom
 connector, same URL, then **Connect** and sign in. Claude connects from
@@ -173,8 +178,9 @@ its own servers too, so the same HTTPS requirement applies.
 
 Then connect `kybase` under Customize → MCPs and sign in.
 
-**Windsurf** — `~/.codeium/windsurf/mcp_config.json`, with `serverUrl`
-instead of `url`:
+**Devin Desktop** (formerly Windsurf) — `~/.config/devin/mcp_config.json`
+(`%APPDATA%\devin\mcp_config.json` on Windows), with `serverUrl` instead of
+`url`:
 
 ```json
 {
@@ -200,9 +206,10 @@ config — never in a file you commit.
 
 ## What you get
 
-- **Markdown, not an opaque memory blob** — every note is plain text; read
-  it, edit it, `grep` it, back it up with `cp`
-- **One knowledge base, every agent** — Claude, Cursor, Windsurf and the
+- **Markdown, not an opaque memory blob** — every note is plain Markdown
+  that you read and edit in the browser and your agents read and edit
+  through MCP
+- **One knowledge base, every agent** — Claude, ChatGPT, Cursor and the
   web UI all look at the same notes
 - **Hybrid search** — full-text and meaning-based search fused into one
   ranked result, so an agent finds the note whether it knows the exact

@@ -26,7 +26,7 @@ type OAuthClient = { id: string; client_name: string | null; created_at: string;
 type ShareItem = { id: string; token: string | null; note_id: string; note_title: string; created_at: string; expires_at: string | null };
 type TrashedNote = { id: string; title: string; folder_id: string | null; deleted_at: string };
 
-type McpClient = 'claude-code' | 'claude-desktop' | 'cursor' | 'windsurf';
+type McpClient = 'claude-code' | 'claude-desktop' | 'cursor' | 'devin';
 type ClientOs = 'mac' | 'windows' | 'linux';
 
 const OS_LABEL: Record<ClientOs, string> = { mac: 'macOS', windows: 'Windows', linux: 'Linux' };
@@ -41,15 +41,13 @@ function detectOs(): ClientOs {
 }
 
 /** One path, for the reader's own system — listing every platform's is noise. */
-function clientPath(client: 'cursor' | 'windsurf', os: ClientOs): string {
+function clientPath(client: 'cursor' | 'devin', os: ClientOs): string {
   const home = os === 'windows' ? '%USERPROFILE%\\' : '~/';
   switch (client) {
     case 'cursor':
       return os === 'windows' ? `${home}.cursor\\mcp.json` : `${home}.cursor/mcp.json`;
-    case 'windsurf':
-      return os === 'windows'
-        ? `${home}.codeium\\windsurf\\mcp_config.json`
-        : `${home}.codeium/windsurf/mcp_config.json`;
+    case 'devin':
+      return os === 'windows' ? '%APPDATA%\\devin\\mcp_config.json' : '~/.config/devin/mcp_config.json';
   }
 }
 
@@ -58,7 +56,7 @@ function mcpOrigin(): string {
   return typeof window === 'undefined' ? 'https://your-domain' : window.location.origin;
 }
 
-// Clients that sign in with OAuth; Windsurf takes the secret in a header instead.
+// Clients that sign in with OAuth; Devin Desktop takes the secret in a header instead.
 const SIGN_IN: Partial<Record<McpClient, string>> = {
   'claude-code': 'Then run /mcp in Claude Code, pick kybase → Authenticate',
   'claude-desktop': 'Then click Connect',
@@ -74,10 +72,10 @@ function mcpSnippet(client: McpClient): string {
     // Claude Desktop adds remote servers as connectors, not in its config file.
     case 'claude-desktop':
       return url;
-    // Cursor takes url without type; Windsurf calls the field serverUrl.
+    // Cursor takes url without type; Devin Desktop calls the field serverUrl.
     case 'cursor':
       return JSON.stringify({ mcpServers: { kybase: { url } } }, null, 2);
-    case 'windsurf':
+    case 'devin':
       return JSON.stringify(
         { mcpServers: { kybase: { serverUrl: url, headers: { Authorization: 'Bearer <KYBASE_SECRET>' } } } },
         null,
@@ -780,12 +778,12 @@ export default function SettingsModal({ apiFetch, onClose, reloadNotes, onShareR
                 <option value="claude-code">Claude Code</option>
                 <option value="claude-desktop">Claude Desktop, claude.ai</option>
                 <option value="cursor">Cursor</option>
-                <option value="windsurf">Windsurf</option>
+                <option value="devin">Devin Desktop (Windsurf)</option>
               </select>
               <div style={{ fontSize: 11, color: '#585b70', marginBottom: 6 }}>
                 {mcpClient === 'claude-code' && 'Run in a terminal:'}
                 {mcpClient === 'claude-desktop' && 'Customize → Connectors → Add custom connector, with this URL:'}
-                {(mcpClient === 'cursor' || mcpClient === 'windsurf') && (
+                {(mcpClient === 'cursor' || mcpClient === 'devin') && (
                   <>
                     Put this in{' '}
                     <code style={{ color: '#a6adc8', userSelect: 'all' }}>{clientPath(mcpClient, clientOs)}</code>

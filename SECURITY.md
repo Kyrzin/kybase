@@ -18,7 +18,8 @@ Consequences you should understand before deploying:
 
 - There are no accounts or roles — the master secret is root. Rotate it
   (`.env`, restart) if you suspect it leaked; that invalidates nothing
-  token-wise, so also revoke tokens you don't recognize.
+  token-wise, so also revoke tokens you don't recognize. Google and OpenAI
+  keys saved in Settings are encrypted with it: enter them again afterwards.
 - The browser UI never stores the master secret client-side. Logging in
   exchanges it for a signed, httpOnly session cookie (30 days, fixed —
   no sliding refresh) that page JavaScript can never read, so an XSS

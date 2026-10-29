@@ -29,7 +29,7 @@ the MCP endpoint, auth, or the compose/Dockerfile setup.
 ## PR expectations
 
 - Keep changes focused — a bug fix doesn't need surrounding refactors.
-- If you touch `lib/mcp-server.ts`, update the tool count/table in `README.md` and re-check the MCP tool descriptions the agent sees. The same file ships inside the `kybase-mcp` npm package (`packages/kybase-mcp`), so rebuild it there (`npm install && node build.mjs`) if you change what it exposes.
+- If you touch `lib/mcp-server.ts`, update the tool count in `packages/kybase-mcp/README.md` and re-check the MCP tool descriptions the agent sees. The same file ships inside the `kybase-mcp` npm package (`packages/kybase-mcp`), so rebuild it there (`npm install && node build.mjs`) if you change what it exposes.
 - Migrations go in `db/migrations/` as a new numbered `.sql` file — never edit an already-released one.
 
 ## Reporting bugs / requesting features

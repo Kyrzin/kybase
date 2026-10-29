@@ -25,6 +25,8 @@ export type SearchResult = {
   unique?: boolean;
   // Heading the excerpt sits under; get_note's `section` accepts it.
   section?: string;
+  // Other sections of the same note the query also reaches (attachOtherSections).
+  other_sections?: string[];
   // IDF-weighted fraction of the query's significant words present in the note.
   coverage?: number;
   created_at?: string;

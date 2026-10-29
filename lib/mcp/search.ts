@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { queryOne } from '../db';
-import { searchWithDiagnostics, searchInNote, SearchUnavailableError, type SearchResult, type HybridSearchResult, type SearchDiagnostics } from '../search';
+import { searchWithDiagnostics, searchInNote, attachOtherSections, SearchUnavailableError, type SearchResult, type HybridSearchResult, type SearchDiagnostics } from '../search';
 import { getSemanticProfile } from '../embeddings';
 import { folderIdFromPath } from '../folders';
 import { uuid, QUERY_REQUIRED, morePage } from './shared';
@@ -53,6 +53,7 @@ export function registerSearchTools(server: McpServer): void {
       out.hint = out.hint ? `${out.hint} ${weak}` : weak;
     }
     if (r.section) out.section = r.section;
+    if (r.other_sections) out.other_sections = r.other_sections;
     if (r.content_length !== undefined) out.content_length = r.content_length;
     // Where the excerpt sits, for a note long enough that reading it whole is
     // not an option. Absent on short notes and whenever the position could not
@@ -97,7 +98,9 @@ export function registerSearchTools(server: McpServer): void {
     '- READ THE SECTION, NOT THE NOTE. A hit\'s `section` is the heading its excerpt came from — ' +
     'pass that string to get_note\'s `section` to get that part alone. If a long hit has no ' +
     '`section`, get_note with limit:1000 returns its `headings` outline; pick one and re-read with ' +
-    '`section`. For prose without headings, a hit\'s `excerpt_offset` goes to get_note as `offset`.\n' +
+    '`section`. For prose without headings, a hit\'s `excerpt_offset` goes to get_note as `offset`. ' +
+    '`other_sections` names more sections of the same note that match: read them too, since a note kept ' +
+    'as a log may revise the shown entry in a later one.\n' +
     '- A hit is a candidate, not an answer. `relevance` is relative to the best hit in this ' +
     'response, so the top result always reads 1.0 — an ordering, not a verdict; `best_score` is ' +
     'that hit\'s own raw similarity. `matched_by` says which arms found it: semantic_score ' +
@@ -183,6 +186,8 @@ export function registerSearchTools(server: McpServer): void {
         throw err;
       }
 
+      // Not for type "text": a search for exact words should stay as fast as one.
+      if (type !== 'text') await attachOtherSections(results, q);
       const displayResults = results.map((r) => toDisplayResult(r, explain));
 
       if (type === 'text') {

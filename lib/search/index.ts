@@ -9,5 +9,5 @@ export { rrfMerge } from './fusion';
 export { SearchUnavailableError, hybridSearch } from './hybrid';
 export { searchWithDiagnostics, universalSearch } from './service';
 export type { SearchMode, SearchOptions, SearchDiagnostics } from './service';
-export { searchInNote } from './in-note';
+export { searchInNote, attachOtherSections } from './in-note';
 export type { InNoteSearch } from './in-note';

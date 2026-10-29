@@ -22,8 +22,8 @@ type NoteChunk = { chunk_index: number; heading: string | null; content: string;
  * the vault and keeps two chunks per note; materializing this note's chunks
  * keeps the vector index out, so the order within the note is exact.
  */
-async function noteChunksByMeaning(noteId: string, query: string, modelKey: string, count: number): Promise<NoteChunk[]> {
-  const embedding = await getEmbedding(query, 'query');
+async function noteChunksByMeaning(noteId: string, query: string, modelKey: string, count: number, queryEmbedding?: number[]): Promise<NoteChunk[]> {
+  const embedding = queryEmbedding ?? await getEmbedding(query, 'query');
   return dbQuery<NoteChunk>(
     `with scoped as materialized (
        select chunk_index, heading, content, embedding from note_chunks
@@ -107,6 +107,36 @@ async function placeInNote(noteId: string, page: SearchResult[], chunks: NoteChu
   });
 }
 
+/** How many of a page's first hits get other_sections, and how many each lists. */
+const OTHER_SECTIONS_HITS = 3;
+const OTHER_SECTIONS_MAX = 3;
+
+/**
+ * Names, beside each of the page's first hits, other sections of the same note
+ * that hold the query's words and are near it in meaning — what a search
+ * inside that note puts next to the section shown. A note kept as a log can
+ * revise an entry in a later one, and a vault-wide hit shows only one section.
+ * No reranker pass, and one query embedding for all the notes. Best-effort: a
+ * note that fails to answer keeps its hit as is.
+ */
+export async function attachOtherSections(results: SearchResult[], query: string): Promise<void> {
+  const hits = results.slice(0, OTHER_SECTIONS_HITS);
+  if (hits.length === 0) return;
+  // Without the meaning arm no place can match both arms, so there is nothing to list.
+  const queryEmbedding = await getEmbedding(query, 'query').catch(() => null);
+  if (!queryEmbedding) return;
+  await Promise.all(hits.map(async (hit) => {
+    const run = await searchInNote(hit.id, query, { limit: IN_NOTE_CANDIDATES, rerank: false, queryEmbedding }).catch(() => null);
+    const more: string[] = [];
+    for (const r of run?.results ?? []) {
+      if (r.matched_by?.length !== 2 || !r.section || r.section === hit.section || more.includes(r.section)) continue;
+      more.push(r.section);
+      if (more.length === OTHER_SECTIONS_MAX) break;
+    }
+    if (more.length > 0) hit.other_sections = more;
+  }));
+}
+
 export type InNoteSearch = {
   results: SearchResult[];
   hasMore: boolean;
@@ -131,9 +161,10 @@ export type InNoteSearch = {
 export async function searchInNote(
   noteId: string,
   query: string,
-  options: Pick<SearchOptions, 'mode' | 'limit' | 'offset' | 'explain' | 'rerank'> = {}
+  // queryEmbedding: the query's vector when the caller already has it.
+  options: Pick<SearchOptions, 'mode' | 'limit' | 'offset' | 'explain' | 'rerank'> & { queryEmbedding?: number[] } = {}
 ): Promise<InNoteSearch | null> {
-  const { mode = 'hybrid', limit = 10, offset = 0, explain = false, rerank = true } = options;
+  const { mode = 'hybrid', limit = 10, offset = 0, explain = false, rerank = true, queryEmbedding } = options;
   const [note] = await dbQuery<{ id: string; title: string; tags: string[]; content_length: number; embedding_pending: boolean }>(
     'select id, title, tags, length(content) as content_length, embedding_pending from notes where id = $1 and deleted_at is null',
     [noteId]
@@ -145,7 +176,7 @@ export async function searchInNote(
   const pool = Math.max(IN_NOTE_CANDIDATES, offset + limit);
   const arms = ([
     ['text', 'text_score', () => noteChunksByWords(note.id, words, pool)],
-    ['semantic', 'semantic_score', () => noteChunksByMeaning(note.id, query, modelKey, pool)],
+    ['semantic', 'semantic_score', () => noteChunksByMeaning(note.id, query, modelKey, pool, queryEmbedding)],
   ] as const).filter(([arm]) => mode === 'hybrid' || mode === arm);
   const outcomes = await Promise.allSettled(arms.map(([, , run]) => run()));
 

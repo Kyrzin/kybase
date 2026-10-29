@@ -11,6 +11,13 @@ import { tables } from 'turndown-plugin-gfm';
 
 const turndown = new TurndownService({ headingStyle: 'atx' });
 turndown.use(tables);
+// turndown has no concept of "not rendered": an element it has no rule for
+// contributes its text, so a <script> or <style> in the BODY would arrive as a
+// line of source code in the note; in a saved web page that is most of the
+// file. Removed on the parsed document, so a tag inside a comment or an
+// attribute cannot cut away the text around it. Covers every format that
+// goes through here; an EPUB chapter's script is not content either.
+turndown.remove(['script', 'style', 'noscript', 'template']);
 
 export function demoteHeadings(markdown: string): string {
   return markdown.replace(/^(#{1,6})(\s)/gm, (_match, hashes: string, space: string) => {
@@ -29,15 +36,6 @@ function stripHead(html: string): string {
   return html.replace(/<head\b[^>]*>[\s\S]*?<\/head>/i, '');
 }
 
-// turndown has no concept of "not rendered": an element it has no rule for
-// contributes its text, so a <script> or <style> in the BODY arrives as a
-// line of source code in the note; in a saved web page that is most of the
-// file. Removed for every format that goes through here — an EPUB chapter's
-// script is not content either.
-function stripCode(html: string): string {
-  return html.replace(/<(script|style|noscript|template)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
-}
-
 export function htmlToMarkdown(html: string): string {
-  return demoteHeadings(turndown.turndown(stripCode(stripHead(html))));
+  return demoteHeadings(turndown.turndown(stripHead(html)));
 }

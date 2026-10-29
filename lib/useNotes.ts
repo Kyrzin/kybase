@@ -282,6 +282,17 @@ export function useNotes(cb: UseNotesCallbacks) {
     editStateRef.current = { editMode, activeNoteId, editTitle, editContent };
   }, [editMode, activeNoteId, editTitle, editContent]);
 
+  // Sends typing the autosave still holds, as last rendered. A switch made
+  // after a long wait (an import, a create) runs a flushSave captured before
+  // it, and opening the new note drops the timer with whatever was typed since.
+  const sendPendingEdit = useCallback(() => {
+    if (!saveTimerRef.current) return;
+    clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = null;
+    const { editMode, activeNoteId, editTitle, editContent } = editStateRef.current;
+    if (editMode && activeNoteId) void saveActiveNote(activeNoteId, editTitle, editContent);
+  }, [saveActiveNote]);
+
   // ── A note's text ────────────────────────────────────────────────────────────
   // In-flight text requests, shared by concurrent callers.
   const textRequestsRef = useRef(new Map<string, Promise<string | null>>());
@@ -510,6 +521,7 @@ export function useNotes(cb: UseNotesCallbacks) {
         });
         if (res.ok) {
           const newNote: Note = await res.json();
+          sendPendingEdit();
           setNotes(prev => [...prev, newNote]);
           openNote(newNote.id);
           setEditMode(true);
@@ -518,7 +530,7 @@ export function useNotes(cb: UseNotesCallbacks) {
     };
     document.addEventListener('click', handler);
     return () => document.removeEventListener('click', handler);
-  }, [notes, selectNote, flushSave, openNote]);
+  }, [notes, selectNote, flushSave, openNote, sendPendingEdit]);
 
   const saveNote = useCallback(async () => {
     if (!activeNote) return;
@@ -654,10 +666,11 @@ export function useNotes(cb: UseNotesCallbacks) {
     }
     if (!res || !res.ok) return;
     const newNote: Note = await res.json();
+    sendPendingEdit();
     setNotes(prev => [...prev, newNote]);
     openNote(newNote.id);
     setEditMode(true);
-  }, [notes, flushSave, openNote]);
+  }, [notes, flushSave, openNote, sendPendingEdit]);
 
   // ── Document import (PDF/EPUB/DOCX) ──────────────────────────────────────
   // Raw-body upload (matches SettingsModal's ZIP importVault, not
@@ -687,6 +700,7 @@ export function useNotes(cb: UseNotesCallbacks) {
       }
       setSyncError(null);
       const newNote: Note = data;
+      sendPendingEdit();
       setNotes(prev => [...prev, newNote]);
       openNote(newNote.id);
     } catch {
@@ -694,7 +708,7 @@ export function useNotes(cb: UseNotesCallbacks) {
     } finally {
       setPdfImporting(false);
     }
-  }, [flushSave, openNote]);
+  }, [flushSave, openNote, sendPendingEdit]);
 
   const createFolder = useCallback(async (parentId: string | null = null) => {
     const name = prompt('Folder name:');

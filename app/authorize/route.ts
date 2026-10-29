@@ -81,11 +81,11 @@ function renderForm(params: Record<string, string>, error?: string) {
 <body>
   <div class="card">
     <h1>Kybase</h1>
-    <p>An application requests access to your Kybase knowledge base. Enter your API key to continue.${redirectHost ? `<br>After sign-in you will be redirected to <strong>${esc(redirectHost)}</strong>.` : ''}</p>
+    <p>An application requests access to your Kybase knowledge base. Enter your Kybase secret to continue.${redirectHost ? `<br>After sign-in you will be redirected to <strong>${esc(redirectHost)}</strong>.` : ''}</p>
     ${error ? `<div class="error">${esc(error)}</div>` : ''}
     <form method="POST">
       ${hidden}
-      <input type="password" name="secret" placeholder="API key" autofocus>
+      <input type="password" name="secret" placeholder="Kybase secret" autofocus>
       <button type="submit">Authorize</button>
     </form>
   </div>
@@ -146,7 +146,7 @@ export async function POST(req: NextRequest) {
       return renderForm(formParams, `Too many attempts. Try again in ${retryAfter}s.`);
     }
     recordAuthFailure(req, 'authorize');
-    return renderForm(formParams, 'Invalid API key. Please try again.');
+    return renderForm(formParams, 'Wrong secret. Please try again.');
   }
 
   const callbackUrl = await checkRedirectUri(redirectUri, clientId);

@@ -21,7 +21,7 @@ open in a browser and edit by hand.
 **Self-hosted. Private by default. Plain Markdown. Yours.**
 
 <p align="center">
-  <img src="public/readme/demo.gif" width="100%" alt="Kybase in use: a markdown note with wikilinks, the knowledge graph with wikilink and semantic edges, then a plain-language question — 'what broke in production' — returning the right incident note first, even though none of those words appear in it.">
+  <img src="public/readme/agent-demo.gif" width="100%" alt="Kybase over MCP: in one Claude Code session the agent saves a team decision to Kybase as a note; in a new session with no memory of the first, it finds that note and answers why the decision was made, naming the note as its source.">
 </p>
 
 **[The problem](#the-problem) · [Quick start](#quick-start) · [Connect your agent](#connect-your-agent) · [What you get](#what-you-get) · [Settings](#settings) · [Sharing](#sharing-notes) · [Backups](#backups) · [Upgrading](#upgrading)**
@@ -221,6 +221,10 @@ config — never in a file you commit.
 - **Yours to take** — Settings → **Export .zip** gives plain Markdown with
   folders as directories, readable by any editor, Obsidian included.
   **Import .zip** merges one back.
+
+<p align="center">
+  <img src="public/readme/demo.gif" width="100%" alt="Kybase in use: a markdown note with wikilinks, the knowledge graph with wikilink and semantic edges, then a plain-language question — 'what broke in production' — returning the right incident note first, even though none of those words appear in it.">
+</p>
 
 Obsidian and Notion are built for a person reading and writing. Kybase is
 built for the loop between **you ↔ your knowledge ↔ your agent**: you edit

@@ -426,25 +426,29 @@ export function useNotes(cb: UseNotesCallbacks) {
       const id = activeNoteId;
       // Counted as in flight so a re-read on return cannot overtake it.
       savesInFlightRef.current++;
+      // A refused or lost flush on a tab switch, where the page lives on, goes
+      // through the normal save: it re-reads on a 409 and says what happened.
+      // Dropped, the typing sat unsaved with nothing on screen and no retry.
+      const retry = () => { void saveActiveNote(id, editTitle, editContent); };
       fetch(`/api/notes/${id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body,
         keepalive: true,
       })
-        .then(r => (r.ok ? r.json() : null))
         // visibilitychange fires on every tab switch, not just real unload —
         // the page is very much alive to receive this. Without it,
         // notesRef.current keeps the pre-flush updated_at forever, so the
         // next save (typing again after switching back) guard-fails against
         // a write that already landed — a conflict banner with no conflict.
-        .then((data: { updated_at: string } | null) => {
-          if (!data) return;
+        .then(async r => {
+          if (!r.ok) return retry();
+          const data: { updated_at: string } = await r.json();
           setNotes(prev => prev.map(n =>
             n.id === id ? { ...n, title: editTitle, content: editContent, updated_at: data.updated_at } : n
           ));
         })
-        .catch(() => {})
+        .catch(retry)
         .finally(() => { savesInFlightRef.current--; });
     };
     // Tab switch or window focus; both may fire for one return, so reads are spaced out.
@@ -474,7 +478,7 @@ export function useNotes(cb: UseNotesCallbacks) {
       window.removeEventListener('pagehide', flushOnHide);
       window.removeEventListener('beforeunload', flushOnHide);
     };
-  }, [refreshNote, reloadNotes]);
+  }, [refreshNote, reloadNotes, saveActiveNote]);
 
   const { onNoteOpened } = cb;
   const selectNote = useCallback(async (id: string) => {

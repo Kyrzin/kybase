@@ -65,6 +65,10 @@ function requireSecret(): string {
   return secret;
 }
 
+// A key that does not decrypt fails the same way on every read, and the
+// embedding settings are read on every search: said once per key.
+const undecryptableWarned = new Set<string>();
+
 // Tolerant read: a DB hiccup falls back to env vars (same contract the
 // UI and embedding pipeline always had) instead of failing the caller.
 async function getSetting(key: string): Promise<string | null> {
@@ -78,7 +82,15 @@ async function getSetting(key: string): Promise<string | null> {
     // DB — read it as-is rather than failing; it's re-encrypted the next
     // time it's written (setSetting always encrypts going forward).
     if (ENCRYPTED_SETTING_KEYS.has(key) && isEncrypted(row.value)) {
-      return decryptWithSecret(row.value, requireSecret());
+      try {
+        return decryptWithSecret(row.value, requireSecret());
+      } catch (err) {
+        if (!undecryptableWarned.has(key)) {
+          undecryptableWarned.add(key);
+          console.warn(`[settings] '${key}' cannot be read (${err instanceof Error ? err.message : err}): it was probably saved under another KYBASE_SECRET. Enter it again in Settings; until then it counts as not set.`);
+        }
+        return null;
+      }
     }
     return row.value;
   } catch (err) {

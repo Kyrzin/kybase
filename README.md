@@ -260,8 +260,9 @@ the agent works instead of filling up with orphans.
 
 Everything else goes in `.env`, copied from `.env.example`, which documents
 each option. Only `KYBASE_SECRET` and `POSTGRES_PASSWORD` are required;
-`KYBASE_PORT` changes the host port, and `KYBASE_TAG` pins a version (e.g.
-`1.4`) instead of tracking `latest`.
+`KYBASE_PORT` changes the host port, `KYBASE_BIND=0.0.0.0` opens it to other
+devices on your network (by default only this machine can connect), and
+`KYBASE_TAG` pins a version (e.g. `1.4`) instead of tracking `latest`.
 
 **Embedding provider.** Open Settings in the web UI, pick a provider
 (Ollama, Google or OpenAI), choose a model, add an API key if it needs one,

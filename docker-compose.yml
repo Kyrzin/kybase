@@ -112,7 +112,10 @@ services:
     restart: unless-stopped
     mem_limit: 512m
     ports:
-      - "${KYBASE_PORT:-3000}:3000"
+      # This machine only: a port published on every interface is open to the
+      # whole network, and on a server Docker opens it past a ufw firewall.
+      # KYBASE_BIND=0.0.0.0 opens it to other devices.
+      - "${KYBASE_BIND:-127.0.0.1}:${KYBASE_PORT:-3000}:3000"
     environment:
       NODE_ENV: production
       PORT: "3000"

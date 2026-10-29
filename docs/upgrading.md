@@ -8,6 +8,20 @@ docker compose up -d --build
 That's the whole procedure. The rest of this page explains what happens
 underneath.
 
+## Kybase listens on this machine only
+
+From 1.5.2 the shipped compose file publishes the app on `127.0.0.1`. The
+browser and agents on the same machine, and a reverse proxy or tunnel there,
+work as before. A port published on every interface was open to the whole
+network, and on a server Docker opens it even past a ufw firewall.
+
+**If you open Kybase from another device by its address, add one line to
+`.env` before upgrading:**
+
+```
+KYBASE_BIND=0.0.0.0
+```
+
 ## Ollama no longer starts by default
 
 Up to v1.4, `docker compose up -d` started a bundled Ollama. It does not any

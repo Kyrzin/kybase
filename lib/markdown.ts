@@ -4,11 +4,14 @@
 // left alone so they read naturally in text — attribute values built from
 // user text must go through escapeAttr(), and URLs through safeUrl(), or a
 // note containing e.g. [x](" onerror="...") breaks out of the attribute.
-// This file is the XSS boundary: any change here needs matching test
-// coverage before it ships.
+// Brackets are escaped too: the passes run over HTML already built, and a
+// link or wikilink matched inside an attribute value would put its own
+// quotes there. This file is the XSS boundary: any change here needs
+// matching test coverage before it ships.
 
 export function escapeAttr(s: string): string {
-  return s.replace(/"/g, '&quot;');
+  return s.replace(/"/g, '&quot;').replace(/\[/g, '&#91;').replace(/\]/g, '&#93;')
+    .replace(/\(/g, '&#40;').replace(/\)/g, '&#41;');
 }
 
 /**

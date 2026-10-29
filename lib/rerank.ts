@@ -11,6 +11,7 @@
 import { getRerankEnabled } from './settings';
 import { sectionOfSpan } from './markdown';
 import { RRF_K } from './search/config';
+import { stripLeadingHeading } from './search/excerpt';
 
 export type RerankConfig = {
   url: string;
@@ -380,11 +381,25 @@ export function selectPassages(
   noteId: string,
   chunks: { heading: string | null; content: string; distance?: number | null }[],
   query: string,
-  perNote: number
+  perNote: number,
+  title?: string
 ): RerankPassage[] {
   const hays = chunks.map((c) => ((c.heading ?? '') + '\n' + c.content).toLowerCase());
   const { score: match, firstAt } = queryMatcher(query, hays);
   const scores = hays.map(match);
+  // The heading line a chunk opens with does not count against the window:
+  // the passage already names the section. A chunk whose text under that line
+  // fits a window is sent whole, whichever window the words picked; a longer
+  // one gets the line's length back on the window that opens it. Every other
+  // window, and a chunk that fits as it is, is sent as before.
+  const windowOf = (i: number, window: string): string => {
+    const { content } = chunks[i];
+    const lead = content.length - stripLeadingHeading(content).length;
+    if (lead === 0 || window.length === content.length) return window;
+    if (content.length - lead <= PASSAGE_CHARS) return content;
+    if (!content.startsWith(window)) return window;
+    return snapToWords(content, 0, Math.min(content.length, window.length + lead));
+  };
   // The model reads a window under the heading of the section it sits in, not
   // the chunk's: a chunk can group several sections under the first one's. A
   // window the query's words reached belongs to the section they are in.
@@ -393,7 +408,10 @@ export function selectPassages(
     const hit = at === -1 ? -1 : firstAt(window.toLowerCase());
     const heading = (at === -1 ? null : sectionOfSpan(chunks[i].content, at, at + window.length, hit === -1 ? undefined : at + hit))
       ?? chunks[i].heading;
-    return { noteId, text: (heading ? heading + '\n' : '') + window, content };
+    // The note's title opens the passage unless the heading repeats it: an
+    // entry of a log or a chapter of a book says little about what the note is.
+    const named = title && title !== heading ? title + '\n' : '';
+    return { noteId, text: named + (heading ? heading + '\n' : '') + window, content };
   };
 
   const lexical = chunks.map((_, i) => i).filter((i) => scores[i] > 0)
@@ -412,11 +430,12 @@ export function selectPassages(
   let semantic: RerankPassage[] = [];
   if (nearest !== -1 && !lexical.includes(nearest)) {
     semantic = scores[nearest] > 0
-      ? [passage(nearest, bestWindowBy(chunks[nearest].content, match))]
+      ? [passage(nearest, windowOf(nearest, bestWindowBy(chunks[nearest].content, match)))]
       // No query word says which part of it matters, so it takes the free
       // slots as windows across it. Each window is its own excerpt source:
       // the one that wins is the part shown.
-      : spreadWindows(chunks[nearest].content, perNote + 1 - lexical.length).map((w) => passage(nearest, w, w));
+      : [...new Set(spreadWindows(chunks[nearest].content, perNote + 1 - lexical.length).map((w) => windowOf(nearest, w)))]
+        .map((w) => passage(nearest, w, w));
   }
 
   const slots = perNote + (semantic.length > 0 ? 1 : 0) - lexical.length - semantic.length;
@@ -424,7 +443,7 @@ export function selectPassages(
     .filter((i) => !lexical.includes(i) && i !== nearest)
     .slice(0, Math.max(0, slots));
   return [
-    ...[...lexical, ...opening].map((i) => passage(i, bestWindowBy(chunks[i].content, match))),
+    ...[...lexical, ...opening].map((i) => passage(i, windowOf(i, bestWindowBy(chunks[i].content, match)))),
     ...semantic,
   ];
 }

@@ -46,7 +46,7 @@ export async function applyRerank(
     if (list) list.push(c); else byNote.set(c.note_id, [c]);
   }
 
-  const passages = head.flatMap((r) => selectPassages(r.id, byNote.get(r.id) ?? [], query, cfg.perNote));
+  const passages = head.flatMap((r) => selectPassages(r.id, byNote.get(r.id) ?? [], query, cfg.perNote, r.title));
   const scores = await scorePassages(query, passages, cfg);
   if (!scores) return unchanged;
 

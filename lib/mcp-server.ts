@@ -1,6 +1,7 @@
 // lib/mcp-server.ts — MCP server factory with 18 tools
 // Uses @modelcontextprotocol/sdk McpServer (high-level API)
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { version } from '../package.json';
 import { registerNoteReadTools } from './mcp/notes-read';
 import { registerNoteWriteTools } from './mcp/notes-write';
 import { registerSearchTools } from './mcp/search';
@@ -62,7 +63,7 @@ export type McpServerOptions = {
 
 export function createMcpServer(options: McpServerOptions = {}): McpServer {
   const server = new McpServer(
-    { name: 'kybase', version: '1.0.0' },
+    { name: 'kybase', version },
     {
       instructions:
         'Kybase is a personal knowledge base of interlinked markdown notes. Notes reference ' +

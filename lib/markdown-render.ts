@@ -62,7 +62,7 @@ export function parseMarkdown(text: string): string {
   // read it; markdown-it would turn everything below it into code.
   const lines = text.split('\n');
   const unpaired = unpairedFenceIndex(lines);
-  if (unpaired !== -1) lines[unpaired] = lines[unpaired].replace(/`/g, '\\`');
+  if (unpaired !== -1) lines[unpaired] = lines[unpaired].replace(/[\\`]/g, '\\$&');
   try {
     return md.render(lines.join('\n'), { headingIds: headingIds(text) });
   } catch (err) {

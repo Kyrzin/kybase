@@ -1,5 +1,19 @@
 # Changelog
 
+## Kybase 1.5.3
+
+### Security
+- Updated Next.js, markdown-it and other dependencies with security fixes.
+- New `KYBASE_PUBLIC_URL` setting: the address Kybase names in sign-in
+  metadata and share links, instead of one taken from request headers.
+
+### Import
+- Removing scripts and styles from imported HTML, EPUB and DOCX no longer
+  drops text next to a tag inside a comment.
+
+### Install
+- The shipped compose file has a healthcheck for the app.
+
 ## Kybase 1.5.2
 
 ### Security

@@ -8,7 +8,8 @@ import { useRef, useCallback } from 'react';
 import type { ListedNote, Folder } from '@/lib/types';
 import { Icons } from './Icons';
 import FolderPicker from './FolderPicker';
-import { parseMarkdown, renderWithWikilinks } from '@/lib/markdown';
+import { renderWithWikilinks } from '@/lib/markdown';
+import { parseMarkdown } from '@/lib/markdown-render';
 
 export type WikilinkPreview = { x: number; y: number; noteId: string } | null;
 

@@ -9,7 +9,8 @@
 // one code path and one identical 404.
 import { NextRequest, NextResponse } from 'next/server';
 import { getSharedNote } from '@/lib/shares';
-import { parseMarkdown, stripWikilinks } from '@/lib/markdown';
+import { stripWikilinks } from '@/lib/markdown';
+import { parseMarkdown } from '@/lib/markdown-render';
 import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
 
 export const dynamic = 'force-dynamic';
@@ -80,8 +81,16 @@ export async function GET(
     .meta{font-size:.8rem;color:#6c7086;margin-bottom:32px}
     article h1,article h2,article h3{color:#cdd6f4;line-height:1.3}
     article a{color:#89b4fa}
-    article img{max-width:100%}
-    article pre{white-space:pre-wrap;word-break:break-word}
+    article img{max-width:100%;border-radius:6px}
+    article code{background:#1e1e2e;padding:2px 6px;border-radius:3px;font-size:.9em}
+    article pre{background:#1e1e2e;padding:12px;border-radius:6px;white-space:pre-wrap;word-break:break-word}
+    article pre code{background:none;padding:0}
+    article blockquote{border-left:3px solid #6c7086;padding-left:12px;color:#a6adc8;margin:8px 0}
+    article hr{border:none;border-top:1px solid #313244;margin:16px 0}
+    article table{border-collapse:collapse;margin:8px 0;width:100%}
+    article th,article td{border:1px solid #313244;padding:6px 10px}
+    article th{background:#1e1e2e}
+    article li.task{list-style:none}
     footer{margin-top:48px;padding-top:16px;border-top:1px solid #313244;font-size:.75rem;color:#6c7086}
   </style>
 </head>

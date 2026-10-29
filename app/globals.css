@@ -107,6 +107,18 @@ body {
         .markdown-preview p { margin: 8px 0; }
         .markdown-preview strong { color: #f5c2e7; }
         .markdown-preview li { color: #bac2de; }
+        .markdown-preview ul, .markdown-preview ol { margin: 8px 0; padding-left: 24px; }
+        .markdown-preview li.task { list-style: none; }
+        .markdown-preview a { color: #89b4fa; text-decoration: underline; }
+        .markdown-preview code { background: #1e1e2e; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
+        .markdown-preview pre { background: #1e1e2e; padding: 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0; }
+        .markdown-preview pre code { background: none; padding: 0; border-radius: 0; font-size: inherit; }
+        .markdown-preview blockquote { border-left: 3px solid #6c7086; padding-left: 12px; color: #a6adc8; margin: 8px 0; }
+        .markdown-preview hr { border: none; border-top: 1px solid #313244; margin: 16px 0; }
+        .markdown-preview img { max-width: 100%; border-radius: 6px; margin: 8px 0; }
+        .markdown-preview table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+        .markdown-preview th, .markdown-preview td { border: 1px solid #313244; padding: 6px 10px; }
+        .markdown-preview th { background: #1e1e2e; }
 
         .wikilink { color: #89b4fa; cursor: pointer; text-decoration: none; border-bottom: 1px dashed #89b4fa44; transition: all 0.15s; padding: 0 2px; }
         .wikilink:hover { background: #89b4fa22; border-bottom-color: #89b4fa; }

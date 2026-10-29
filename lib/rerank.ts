@@ -77,12 +77,22 @@ function probeShared(): Promise<boolean> {
 
 /** Asks the service whether it is there. A search awaits only the first one (rerankReady). */
 export async function probeReranker(): Promise<boolean> {
+  let failure: string | null = null;
   try {
     const res = await fetch(`${rerankUrl()}/health`, { signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) });
-    liveness = { ok: res.ok, at: Date.now() };
-  } catch {
-    liveness = { ok: false, at: Date.now() };
+    if (!res.ok) failure = `HTTP ${res.status}`;
+  } catch (err) {
+    const code = (err as { cause?: { code?: unknown } }).cause?.code;
+    failure = `${err instanceof Error ? err.message : String(err)}${typeof code === 'string' ? `: ${code}` : ''}`;
   }
+  // Only a change is logged: an install without the reranker profile probes
+  // once a minute and would repeat the same line forever.
+  if (failure !== null && liveness?.ok !== false) {
+    console.warn(`[rerank] not answering at ${rerankUrl()} (${failure}); searches keep the fusion order`);
+  } else if (failure === null && liveness?.ok === false) {
+    console.info(`[rerank] answering again at ${rerankUrl()}`);
+  }
+  liveness = { ok: failure === null, at: Date.now() };
   return liveness.ok;
 }
 

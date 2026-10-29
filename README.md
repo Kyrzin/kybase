@@ -265,7 +265,8 @@ the agent works instead of filling up with orphans.
 Everything else goes in `.env`, copied from `.env.example`, which documents
 each option. Only `KYBASE_SECRET` and `POSTGRES_PASSWORD` are required;
 `KYBASE_PORT` changes the host port, `KYBASE_BIND=0.0.0.0` opens it to other
-devices on your network (by default only this machine can connect), and
+devices on your network (by default only this machine can connect),
+`KYBASE_PUBLIC_URL` sets the address behind your HTTPS proxy, and
 `KYBASE_TAG` pins a version (e.g. `1.4`) instead of tracking `latest`.
 
 **Embedding provider.** Open Settings in the web UI, pick a provider

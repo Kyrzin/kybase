@@ -71,6 +71,8 @@ Consequences you should understand before deploying:
 1. Generate a strong secret: `openssl rand -hex 32`. Never reuse it elsewhere.
 2. Put Kybase behind HTTPS (reverse proxy such as Traefik/Caddy/nginx).
    The bundled compose file publishes the app on plain HTTP for localhost use.
+   Set `KYBASE_PUBLIC_URL` to the address behind it, so the URLs Kybase hands
+   out (sign-in metadata, share links) never come from request headers.
 3. Do not expose Postgres publicly; the bundled compose keeps it on the
    internal network only. Set a non-default `POSTGRES_PASSWORD` in `.env`.
 4. Back up regularly — see the Backups section of the README.

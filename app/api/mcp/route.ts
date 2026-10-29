@@ -7,6 +7,7 @@ import { createMcpServer } from '@/lib/mcp-server';
 import { bearerToken, safeEqual } from '@/lib/auth';
 import { verifyToken } from '@/lib/tokens';
 import { authLimitExceeded, recordAuthFailure } from '@/lib/rate-limit';
+import { publicOrigin } from '@/lib/oauth-issuer';
 
 export const dynamic = 'force-dynamic';
 
@@ -58,13 +59,11 @@ async function handle(req: NextRequest): Promise<Response> {
     recordAuthFailure(req, 'bearer');
     // RFC 9728 §5.1: point a 401 at the resource metadata, which is how a client
     // finds the authorization server (and its client registration).
-    const host  = req.headers.get('x-forwarded-host') ?? new URL(req.url).host;
-    const proto = req.headers.get('x-forwarded-proto')?.split(',')[0] ?? 'https';
     return NextResponse.json({ error: 'Unauthorized' }, {
       status: 401,
       headers: {
         'WWW-Authenticate':
-          `Bearer resource_metadata="${proto}://${host}/.well-known/oauth-protected-resource"`,
+          `Bearer resource_metadata="${publicOrigin(req)}/.well-known/oauth-protected-resource"`,
       },
     });
   }

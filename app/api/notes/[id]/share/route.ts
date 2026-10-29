@@ -3,6 +3,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { z } from 'zod';
 import { createShare } from '@/lib/shares';
+import { publicOrigin } from '@/lib/oauth-issuer';
 
 const CreateShareSchema = z.object({
   expires_in_days: z.number().int().min(1).max(3650).optional(),
@@ -23,13 +24,10 @@ export async function POST(
     const share = await createShare(id, parsed.data.expires_in_days);
     if (!share) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
-    // Public URL from the proxy headers, same convention as OAuth discovery.
-    const host  = req.headers.get('x-forwarded-host') ?? new URL(req.url).host;
-    const proto = req.headers.get('x-forwarded-proto')?.split(',')[0] ?? 'https';
     return NextResponse.json({
       id: share.id,
       token: share.token,
-      url: `${proto}://${host}/share/${share.token}`,
+      url: `${publicOrigin(req)}/share/${share.token}`,
       expires_at: share.expires_at,
     }, { status: 201 });
   } catch (err) {

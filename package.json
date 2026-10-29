@@ -13,7 +13,7 @@
     "smoke-test": "tsx scripts/smoke-test.mts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@thednp/dommatrix": "^3.1.1",
     "diff": "^9.0.0",
     "graphology": "0.26.0",
@@ -21,8 +21,8 @@
     "graphology-layout-noverlap": "0.4.2",
     "jszip": "^3.10.1",
     "mammoth": "^1.12.1",
-    "markdown-it": "14.1.0",
-    "next": "^16.3.0",
+    "markdown-it": "14.3.3",
+    "next": "^16.4.1",
     "pdfjs-dist": "^6.2.108",
     "pg": "^8.16.3",
     "react": "19.2.4",
